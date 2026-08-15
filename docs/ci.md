@@ -10,7 +10,7 @@ pull request and every push to `main`.
 | **Format** | `cargo fmt --all --check` | Removes style from code review entirely |
 | **Clippy** | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Warnings are errors. A warning nobody fixes is a warning nobody reads |
 | **Test** | `cargo test --workspace --all-features` | — |
-| **MSRV** | `cargo check --all-targets` on Rust 1.85.0 | The Pi may run an older toolchain than a developer laptop. Better to find out here than the night before an event. `--all-targets` so a dev-dependency cannot raise the MSRV unnoticed |
+| **MSRV** | `cargo check --all-targets` on Rust 1.88.0 | Establishes what the floor actually is, rather than what the manifest claims. `--all-targets` so a dev-dependency cannot raise it unnoticed. The floor is a tested fact, not a promise — [ADR-0013](adr/0013-msrv-policy.md) |
 | **Security advisories** | `cargo audit --deny warnings` | Known vulnerabilities in the dependency tree |
 | **Licenses and bans** | `cargo deny check` | License compatibility ([ADR-0007](adr/0007-license-selection.md)), duplicate versions, unknown registries |
 | **Cross-build** | `cargo build --release --target aarch64-unknown-linux-gnu --workspace` | Proves the Pi target still builds, including the bundled SQLite C sources ([ADR-0009](adr/0009-rusqlite-for-sqlite-access.md)) |
@@ -56,13 +56,18 @@ there warrant an [ADR](adr/).
 
 ### Accepted advisories
 
-An advisory may be muted only in **both** `deny.toml` and `.cargo/audit.toml`, and only
-with two things written down: why the vulnerable code is unreachable from this workspace,
-and the condition under which the entry gets deleted. An ignore without a deletion
-condition is a permanent exception pretending to be a temporary one.
+**None. That is the target state, not a coincidence.**
 
-Currently accepted:
+An advisory may be muted only in `deny.toml`'s `[advisories] ignore` list, and only with two
+things written down: why the vulnerable code is unreachable from this workspace, and the
+condition under which the entry gets deleted. An ignore without a deletion condition is a
+permanent exception pretending to be a temporary one.
 
-| Advisory | Why it is accepted | Delete when |
-|---|---|---|
-| [RUSTSEC-2026-0009](https://rustsec.org/advisories/RUSTSEC-2026-0009) | Stack exhaustion in `time`'s RFC **2822** parser. SplitForge parses and emits RFC 3339 exclusively; `Rfc2822` appears nowhere in the workspace. The fix is in `time` 0.3.47, which requires Rust 1.88 — above the current MSRV | The MSRV reaches 1.88, **or** anything here starts parsing RFC 2822. See [Q13](open-questions.md#q13-msrv-policy) |
+The list is empty because the one entry that ever lived there —
+[RUSTSEC-2026-0009](https://rustsec.org/advisories/RUSTSEC-2026-0009), reachable only
+through `time`'s RFC 2822 parser, which SplitForge never calls — existed solely because the
+MSRV held `time` below the release that fixed it. Raising the MSRV
+([ADR-0013](adr/0013-msrv-policy.md)) removed the reason, so the entry went with it.
+
+That is the precedent worth keeping: **an accepted advisory whose only justification is a
+version pin is a bug in the pin.** Move the pin.

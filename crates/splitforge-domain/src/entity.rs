@@ -207,8 +207,8 @@ impl AntennaMap {
     /// Resolves the checkpoint covered by a reader and antenna.
     #[must_use]
     pub fn resolve(&self, reader: &ReaderId, antenna: Option<u16>) -> Option<CheckpointId> {
-        // Written without a let-chain deliberately: those need Rust 1.88 and the MSRV is
-        // 1.85 (see rust-version in the workspace manifest).
+        // A specific antenna entry beats the reader-wide wildcard: an operator who has
+        // mapped antenna 4 to the finish means it, even on a reader mapped to the start.
         antenna
             .and_then(|antenna| self.exact.get(&(reader.clone(), antenna)).copied())
             .or_else(|| self.wildcard.get(reader).copied())
