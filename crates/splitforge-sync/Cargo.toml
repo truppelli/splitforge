@@ -1,0 +1,16 @@
+[package]
+name = "splitforge-sync"
+description = "Opt-in outbound integrations. Never on the read path (ADR-0006)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

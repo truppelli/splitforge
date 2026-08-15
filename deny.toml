@@ -1,0 +1,53 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally with:  cargo deny check
+
+[graph]
+# Check the platforms SplitForge actually ships to: CI/dev hosts and the Pi.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Add advisory IDs here only with a comment explaining why the risk is accepted.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses that may appear in the dependency tree. SplitForge itself is
+# GPL-3.0-or-later (ADR-0007); these are licenses we are willing to *consume*.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# SplitForge's own crates are `publish = false`; their license is set once in
+# [workspace.package] and does not need to appear in the allow list above.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Dependency count is kept deliberately small — every crate on the read path is a crate
+# that can lose a read. Additions to the read path warrant an ADR.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
