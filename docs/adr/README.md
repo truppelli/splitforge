@@ -16,6 +16,10 @@ this?" two years from now, the ADR is the answer.
 | [0006](0006-optional-outbound-integrations.md) | Outbound integrations are always optional | Accepted |
 | [0007](0007-license-selection.md) | GPL-3.0-or-later | Accepted |
 | [0008](0008-offline-first-operation.md) | Offline-first: no cloud service on any race-day path | Accepted |
+| [0009](0009-rusqlite-for-sqlite-access.md) | `rusqlite` (bundled) for SQLite access | Accepted |
+| [0010](0010-time-crate-for-timestamps.md) | The `time` crate for all timestamps | Accepted |
+| [0011](0011-append-only-enforced-by-triggers.md) | Append-only enforced by database triggers | Accepted |
+| [0012](0012-architecture-rules-enforced-by-tests.md) | Crate dependency rules enforced by a test | Accepted |
 
 ## Process
 

@@ -15,9 +15,34 @@ publish = false
 # Shared dependency versions are declared here and referenced from member crates with
 # `foo.workspace = true`, so the workspace has exactly one opinion per dependency.
 #
-# Deliberately empty: this is the Milestone 0 planning scaffold and every crate is empty.
-# Dependencies arrive with the code that needs them. See docs/roadmap.md.
+# Features are declared here too, as the union of what members need. Cargo unifies features
+# across a workspace build anyway, so per-crate feature lists would describe a build that
+# never actually happens — better to state the truth in one place.
 [workspace.dependencies]
+splitforge-domain = { version = "0.0.0", path = "crates/splitforge-domain" }
+splitforge-engine = { version = "0.0.0", path = "crates/splitforge-engine" }
+splitforge-reader = { version = "0.0.0", path = "crates/splitforge-reader" }
+splitforge-simulator = { version = "0.0.0", path = "apps/splitforge-simulator" }
+splitforge-storage = { version = "0.0.0", path = "crates/splitforge-storage" }
+splitforge-testkit = { version = "0.0.0", path = "crates/splitforge-testkit" }
+
+anyhow = "1.0.100"
+clap = { version = "4.5.51", features = ["derive"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+time = { version = "0.3.45", features = [
+    "formatting",
+    "macros",
+    "parsing",
+    "serde-well-known",
+] }
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
+toml = "1.1.4"
+uuid = { version = "1.24.1", features = ["serde", "v4", "v5"] }
 
 [workspace.lints.rust]
 # SplitForge parses untrusted binary input from the network. Rust's memory safety is a
@@ -32,10 +57,14 @@ all = { level = "warn", priority = -1 }
 dbg_macro = "warn"
 todo = "warn"
 
-# NOTE: `clippy::unwrap_used` and `clippy::expect_used` are intentionally NOT set
-# workspace-wide — they fire throughout test code, where unwrapping is correct. They will
-# be enabled per-crate on the crates reachable during an event (`splitforge-llrp`,
-# `splitforge-storage`, `splitforge-engine`) once those crates have content.
+# NOTE: `clippy::unwrap_used` and `clippy::expect_used` are intentionally NOT set here.
+# They fire throughout test code, where unwrapping is exactly right — a test that handles
+# an error instead of panicking on it is a test that can silently stop testing.
+#
+# Instead each crate reachable during an event denies them for non-test builds:
+#
+#     #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+#
 # See CONTRIBUTING.md, "Code standards".
 
 [profile.release]

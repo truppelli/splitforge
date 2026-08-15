@@ -54,7 +54,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The Pi may run an older toolchain than a developer laptop. Catch it here
       # rather than during a deploy the night before an event.
-      - run: cargo check --workspace --all-features
+      #
+      # `--all-targets` so tests are covered too: a dev-dependency that quietly raises
+      # the MSRV is exactly the kind of thing that goes unnoticed until it matters.
+      - run: cargo check --workspace --all-features --all-targets
 
   audit:
     name: Security advisories
@@ -86,13 +89,18 @@ jobs:
         with:
           targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
-      - name: Install cross linker
+      # Also the C cross-compiler: `rusqlite` is built with the `bundled` feature
+      # (ADR-0009), so SQLite itself is compiled from source for the target.
+      - name: Install cross toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
       # Linker configuration lives in .cargo/config.toml (ADR-0002).
-      - name: Build edge service for the Pi
-        run: cargo build --release --target aarch64-unknown-linux-gnu -p splitforge-edge
+      #
+      # The whole workspace, not just the edge service: the edge service is still empty,
+      # and a cross-build that compiles nothing proves nothing.
+      - name: Build for the Pi
+        run: cargo build --release --target aarch64-unknown-linux-gnu --workspace
       # This proves the code COMPILES for the Pi. It proves nothing about reader
       # behavior, storage performance, or power-loss recovery — those are validated
       # on hardware or not at all. See docs/hardware-support.md.

@@ -11,6 +11,13 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

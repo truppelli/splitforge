@@ -10,7 +10,34 @@ homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[lib]
+name = "splitforge_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "splitforge"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+splitforge-domain.workspace = true
+splitforge-engine.workspace = true
+splitforge-reader.workspace = true
+splitforge-simulator.workspace = true
+splitforge-storage.workspace = true
+# Milestone 1 has no event storage, so the roster, checkpoints, and policy come from a
+# fixture. This dependency is temporary and disappears in Milestone 2, when
+# `event create` / `roster import` put that configuration in the database where it belongs.
+splitforge-testkit.workspace = true
+time.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "rt-multi-thread"] }

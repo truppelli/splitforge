@@ -11,7 +11,8 @@
 //! - **Must never depend on:** nothing — this is the only crate that knows all concrete implementations
 //!
 //! These rules come from ADR-0001 and are tabulated in `docs/architecture.md`.
-//! Enforcing them in CI is an open question (Q6 in `docs/open-questions.md`).
+//! They are enforced by `crates/splitforge-testkit/tests/dependency_rules.rs`, not left to
+//! review (ADR-0012).
 
 fn main() {
     println!("splitforge-edge is not implemented yet. See docs/roadmap.md.");

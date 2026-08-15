@@ -7,11 +7,17 @@
 Offline-first, open-source race timing software written in Rust, built to run at a race
 checkpoint on a Raspberry Pi.
 
-> ### Status: pre-alpha — planning only
+> ### Status: pre-alpha — simulated events only
 >
-> This repository currently contains a project charter, architecture documents, and an
-> empty Cargo workspace. **There is no working timing system here yet, and no RFID reader
-> has been tested.** Do not use SplitForge to time a real event.
+> The data path works end to end **against a synthetic reader**: reads are journalled
+> durably, deduplicated into crossings, and emitted as JSON. **No RFID reader has been
+> tested, and there is no results or scoring layer yet.** Do not use SplitForge to time a
+> real event.
+>
+> Milestones [0](docs/roadmap.md#milestone-0--project-charter) and
+> [1](docs/roadmap.md#milestone-1--simulation-first-vertical-slice) are complete.
+> Milestone 3 is gated on physical hardware — see
+> [hardware support](docs/hardware-support.md).
 
 ## What SplitForge is
 
@@ -111,6 +117,48 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Time a simulated race
+
+No hardware, no network, no configuration. The simulator speaks the same `ReaderProvider`
+port a real reader will, so nothing downstream can tell the difference.
+
+```bash
+# A 5K: 12 entrants over a start mat and a finish mat, one of them a DNF,
+# plus one chip that is not on the roster.
+cargo run --bin splitforge -- simulate --database event.db --fixture five-k
+
+# Every read, exactly as recorded — hundreds of them, one crossing each.
+cargo run --bin splitforge -- reads --database event.db --limit 5
+
+# What the engine concluded from that evidence.
+cargo run --bin splitforge -- accepted --database event.db --fixture five-k
+```
+
+```json
+{
+  "at": "2026-04-11T08:17:32.249Z",
+  "checkpoint": "finish",
+  "chip": "E28011606000020000000104",
+  "bib": "104",
+  "name": "Runner 104",
+  "lap": 1,
+  "burst_reads": 15,
+  "rssi_dbm": -60,
+  "source_raw_read": "16cde1ce-0c1f-4be8-b075-1e3ee2496457"
+}
+```
+
+One crossing, fifteen raw reads behind it, and a pointer back to the read that was
+credited. All fifteen are still in the journal, and each of the fourteen that were not
+credited says which rule suppressed it.
+
+The other fixture is `--fixture multi-lap`, a four-lap criterium including a rider who
+loiters beside the mat and must **not** be credited with a 45-second lap.
+
+Run `simulate` twice against the same database and the sequence continues rather than
+restarting; run `derive` in any process afterwards and it reaches the same conclusions,
+identifiers included.
+
 ### Cross-compiling for the Pi
 
 ```bash
@@ -143,8 +191,13 @@ apps/
   splitforge-simulator   Synthetic readers and race scenarios
 ```
 
-Every crate is currently empty. See [ADR-0001](docs/adr/0001-rust-workspace.md) for the
-dependency rules that govern them.
+`domain`, `reader`, `storage`, `engine`, `simulator`, `testkit`, and `cli` have content.
+`llrp`, `results`, `export`, `api`, `sync`, and `edge` are still empty — see the
+[roadmap](docs/roadmap.md) for when each lands.
+
+The dependency rules between them come from
+[ADR-0001](docs/adr/0001-rust-workspace.md) and are **enforced by the test suite**, not by
+review ([ADR-0012](docs/adr/0012-architecture-rules-enforced-by-tests.md)).
 
 ## Contributing
 

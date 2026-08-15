@@ -10,7 +10,25 @@ homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+# Library plus binary: the library is what the CLI and the tests use, the binary is a
+# self-contained demo race. See the crate docs for why the simulator is a first-class
+# component rather than a test helper.
+[lib]
+name = "splitforge_simulator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "splitforge-simulator"
+path = "src/main.rs"
+
 [dependencies]
+splitforge-domain.workspace = true
+splitforge-reader.workspace = true
+time.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
