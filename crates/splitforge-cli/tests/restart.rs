@@ -111,12 +111,22 @@ async fn a_process_killed_mid_race_leaves_an_intact_journal() {
     let directory = TempDir::new().expect("temp dir");
     let database = directory.path().join("event.db");
 
-    // Accelerated rather than immediate, so the process is genuinely mid-write — an
+    // Seed with a completed run first. The point of this test is what a kill does to reads
+    // that were already acknowledged, and seeding makes that question answerable without
+    // depending on how much the *killed* process managed to write — which is a function of
+    // the runner's fsync latency and therefore not something to assert on.
+    run_ok(&["simulate", "--fixture", "five-k"], &database).await;
+    let acknowledged = SqliteJournal::open(&database)
+        .expect("seed run leaves a readable database")
+        .count()
+        .expect("count seeded reads");
+    assert!(acknowledged > 0, "the seed run wrote nothing");
+
+    // Now a second run, accelerated so the process is genuinely mid-write when it dies. An
     // immediate run would very likely finish before the kill arrives, and a test that
-    // silently stops testing anything is worse than no test. At 300x the 29-minute fixture
-    // takes about six seconds, which leaves room on both sides of the kill.
+    // silently stops testing anything is worse than no test.
     let mut child = Command::new(BINARY)
-        .args(["simulate", "--fixture", "five-k", "--speed", "300"])
+        .args(["simulate", "--fixture", "multi-lap", "--speed", "300"])
         .arg("--database")
         .arg(&database)
         .stdout(Stdio::null())
@@ -125,10 +135,13 @@ async fn a_process_killed_mid_race_leaves_an_intact_journal() {
         .spawn()
         .expect("spawn splitforge simulate");
 
-    // Wait for the writer to get properly underway rather than sleeping a fixed interval
-    // and hoping. A slow CI runner would otherwise be killed during process startup, and
-    // the test would fail for a reason that has nothing to do with durability.
-    wait_for_reads(&database, 20).await;
+    // Long enough that the writer is underway on any runner, short enough that the 300x
+    // criterium — about five seconds of wall clock — is nowhere near finished.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    assert!(
+        child.try_wait().expect("poll child").is_none(),
+        "the simulation exited on its own before it could be killed"
+    );
     child.kill().await.expect("kill the timer mid-race");
     let _ = child.wait().await;
 
@@ -138,25 +151,10 @@ async fn a_process_killed_mid_race_leaves_an_intact_journal() {
         .expect("every surviving row must still decode");
 
     assert!(
-        !recovered.is_empty(),
-        "the process was killed after writing reads, so some must have survived"
-    );
-
-    let fixture = five_k();
-    let last_planned = fixture
-        .crossings
-        .last()
-        .expect("the fixture plans crossings")
-        .at;
-    let last_recorded = recovered
-        .last()
-        .expect("checked non-empty")
-        .read
-        .authoritative_timestamp();
-    assert!(
-        last_recorded < last_planned,
-        "the race finished before the kill landed, so this test proved nothing about \
-         interrupting a write; shorten the sleep or slow the simulation down"
+        recovered.len() as u64 >= acknowledged,
+        "a kill destroyed reads that had already been acknowledged: {} survived of {}",
+        recovered.len(),
+        acknowledged
     );
 
     // Sequence numbers are contiguous from 1: nothing was written, acknowledged, and then
@@ -170,11 +168,69 @@ async fn a_process_killed_mid_race_leaves_an_intact_journal() {
     }
 
     // A partial journal is still a valid journal, and derivation must handle it without
-    // special-casing anything.
-    let derivation = common::derive_from(&fixture, &recovered);
+    // special-casing anything. Derived against the seeded fixture, so the criterium's
+    // partial reads land as unmapped rather than as crossings — which is itself the right
+    // behavior: an unrecognized reader withholds interpretation, it does not discard.
+    let derivation = common::derive_from(&five_k(), &recovered);
     assert_eq!(
         derivation.accepted.len() + derivation.rejected.len(),
         recovered.len()
+    );
+}
+
+#[tokio::test]
+async fn a_second_process_can_read_the_journal_while_a_race_is_running() {
+    // What an operator does at 6 a.m. to check the timer is alive. It must never fail and
+    // never block the writer — that is the entire reason the journal runs in WAL mode.
+    //
+    // This is not hypothetical: `PRAGMA journal_mode = WAL` takes an exclusive lock and
+    // does not honour `busy_timeout`, so issuing it unconditionally on every open made this
+    // fail intermittently against a live writer. Storage now reads the mode before setting
+    // it, and this test is what holds that fix in place.
+    let directory = TempDir::new().expect("temp dir");
+    let database = directory.path().join("event.db");
+
+    let mut child = Command::new(BINARY)
+        .args(["simulate", "--fixture", "five-k", "--speed", "200"])
+        .arg("--database")
+        .arg(&database)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn splitforge simulate");
+
+    let mut observed = 0_u64;
+    let mut successes = 0_u32;
+    for attempt in 0..25 {
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let Ok(journal) = SqliteJournal::open(&database) else {
+            // Only tolerated before the writer has created the file at all.
+            assert_eq!(
+                observed, 0,
+                "attempt {attempt}: the journal became unreadable after it had been read \
+                 once, while a race was in progress"
+            );
+            continue;
+        };
+        let count = journal
+            .count()
+            .expect("counting a live journal must not fail");
+        assert!(
+            count >= observed,
+            "the visible read count went backwards, from {observed} to {count}"
+        );
+        observed = count;
+        successes += 1;
+    }
+
+    child.kill().await.expect("kill the simulation");
+    let _ = child.wait().await;
+
+    assert!(successes > 0, "the journal was never readable");
+    assert!(
+        observed > 0,
+        "a race ran for three seconds and a second process saw no reads at all"
     );
 }
 
@@ -210,25 +266,6 @@ async fn a_restart_appends_rather_than_restarting_the_sequence() {
         journal.count().expect("count") as usize,
         first.reads_persisted + second.reads_persisted
     );
-}
-
-/// Blocks until the journal holds at least `wanted` reads, or gives up and says why.
-///
-/// Reads the database from a second connection while the writer still holds it, which WAL
-/// mode permits — and which is itself worth exercising, since `reads tail` will do exactly
-/// this during a live event.
-async fn wait_for_reads(database: &std::path::Path, wanted: u64) {
-    const ATTEMPTS: u32 = 100;
-
-    for _ in 0..ATTEMPTS {
-        if let Ok(journal) = SqliteJournal::open(database) {
-            if journal.count().unwrap_or(0) >= wanted {
-                return;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("the journal never reached {wanted} reads; the simulation is not writing");
 }
 
 /// Runs the binary against a database and returns stdout, failing loudly if it did not.

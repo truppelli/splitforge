@@ -127,9 +127,20 @@ impl RawReadJournal for SqliteJournal {
 
 fn configure(conn: &Connection) -> Result<(), StorageError> {
     conn.busy_timeout(StdDuration::from_secs(5))?;
+
     // WAL so exports and `reads tail` never block the writer. An in-memory database
     // reports "memory" instead and that is fine — nothing durable is expected of it.
-    let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    //
+    // Read the current mode first and only set it if it needs setting. `PRAGMA
+    // journal_mode = WAL` takes an exclusive lock, and — unlike almost everything else in
+    // SQLite — it does *not* invoke the busy handler, so `busy_timeout` above does not
+    // cover it. Setting it unconditionally therefore makes opening a second connection
+    // fail intermittently while a write is in flight, which is precisely the moment an
+    // operator runs `reads tail` to check the timer is alive.
+    let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") && !mode.eq_ignore_ascii_case("memory") {
+        let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    }
     // FULL, not NORMAL: an acknowledged read must survive an unannounced power cut. This
     // costs write latency and SD card wear, and both are the correct trade here.
     conn.pragma_update(None, "synchronous", "FULL")?;
