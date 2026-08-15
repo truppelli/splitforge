@@ -1,0 +1,16 @@
+[package]
+name = "splitforge-domain"
+description = "Pure domain types, invariants, and port traits for SplitForge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

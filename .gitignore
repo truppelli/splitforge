@@ -13,6 +13,26 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# SplitForge event data — NEVER commit these.
+# Event databases contain participant names and timing data. A committed SQLite file is
+# a privacy incident that is very hard to undo once pushed.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+/data/
+/var/
+
+# Local configuration, including integration credentials
+.env
+*.local.toml
+/config.local/
+
+# Diagnostic captures may contain raw reader payloads
+/captures/
+*.pcap
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

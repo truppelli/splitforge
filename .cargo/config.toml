@@ -1,0 +1,14 @@
+# Cross-compilation for the Raspberry Pi target (ADR-0002).
+#
+# Requires a cross linker on the host:
+#   Debian/Ubuntu:  sudo apt-get install gcc-aarch64-linux-gnu
+#   macOS:          brew install aarch64-unknown-linux-gnu  (or use `cross`)
+#
+# Then:
+#   rustup target add aarch64-unknown-linux-gnu
+#   cargo build --release --target aarch64-unknown-linux-gnu -p splitforge-edge
+#
+# This setting only applies when that target is selected, so it does not affect
+# native development builds on any platform.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

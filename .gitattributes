@@ -1,0 +1,12 @@
+# Normalize line endings. Development happens on Windows and macOS; deployment is Linux.
+# Without this, a CRLF that survives into a shell script or systemd unit fails on the Pi
+# in a way that is genuinely annoying to diagnose in the field.
+* text=auto eol=lf
+
+# Binary files git should never touch
+*.png binary
+*.jpg binary
+*.pcap binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

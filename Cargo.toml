@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/truppelli/splitforge"
+homepage = "https://github.com/truppelli/splitforge"
+authors = ["SplitForge contributors"]
+publish = false
+
+# Shared dependency versions are declared here and referenced from member crates with
+# `foo.workspace = true`, so the workspace has exactly one opinion per dependency.
+#
+# Deliberately empty: this is the Milestone 0 planning scaffold and every crate is empty.
+# Dependencies arrive with the code that needs them. See docs/roadmap.md.
+[workspace.dependencies]
+
+[workspace.lints.rust]
+# SplitForge parses untrusted binary input from the network. Rust's memory safety is a
+# large part of why it was chosen; opting out of it needs a very good argument.
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+
+# NOTE: `clippy::unwrap_used` and `clippy::expect_used` are intentionally NOT set
+# workspace-wide — they fire throughout test code, where unwrapping is correct. They will
+# be enabled per-crate on the crates reachable during an event (`splitforge-llrp`,
+# `splitforge-storage`, `splitforge-engine`) once those crates have content.
+# See CONTRIBUTING.md, "Code standards".
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

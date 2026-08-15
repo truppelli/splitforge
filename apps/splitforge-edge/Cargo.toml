@@ -1,0 +1,16 @@
+[package]
+name = "splitforge-edge"
+description = "Raspberry Pi production service: the composition root that wires every adapter."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
