@@ -15,13 +15,14 @@ flowchart LR
 
     M3 -.->|"gate:<br/>real hardware<br/>in hand"| M3
     style M0 fill:#2d6a4f,color:#fff
+    style M1 fill:#2d6a4f,color:#fff
 ```
 
 ---
 
 ## Milestone 0 — Project charter
 
-**Status: this pull request.**
+**Status: complete.**
 
 - `README.md` with the project promise, scope, and non-goals
 - License settled — **GPL-3.0-or-later** ([ADR-0007](adr/0007-license-selection.md))
@@ -38,21 +39,50 @@ given piece of code belongs, and which rules it must not break.
 
 ## Milestone 1 — Simulation-first vertical slice
 
+**Status: this pull request.**
+
 **Build no reader integration.** The point is to prove the data path before adding the
 hardware variable.
 
-- `splitforge-simulator` emits synthetic reads through the same `ReaderProvider` port a
-  real reader will use
-- One fixture event: race, checkpoint, participant roster, chip assignments
-- Raw reads persist to the append-only journal
-- A chip crossing a checkpoint many times deduplicates to one accepted read
-- Accepted reads visible as CLI JSON output
-- Process restart leaves the journal intact
-- Fixture-driven tests for a 5K finish and a multi-lap event
+- [x] `splitforge-simulator` emits synthetic reads through the same `ReaderProvider` port a
+      real reader will use
+- [x] One fixture event: race, checkpoint, participant roster, chip assignments — two, in
+      fact: a 5K and a four-lap criterium
+- [x] Raw reads persist to the append-only journal
+- [x] A chip crossing a checkpoint many times deduplicates to one accepted read
+- [x] Accepted reads visible as CLI JSON output
+- [x] Process restart leaves the journal intact
+- [x] Fixture-driven tests for a 5K finish and a multi-lap event
 
 **Exit criterion:** a simulated event produces durable raw and accepted reads, entirely
 offline, and duplicate reads are preserved raw while reducing to one accepted timing event
 — both before and after a process restart.
+
+**Observed:**
+
+```console
+$ splitforge simulate --database event.db --fixture five-k --format compact
+{"fixture":"five-k","reader":"mat","planned_crossings":24,"reads_scripted":638,
+ "reads_received":638,"reads_persisted":638,"journal_total":638,...}
+
+$ splitforge derive --database event.db --fixture five-k --format compact
+{"raw_reads":638,"accepted":24,"rejected":614,"timing_events":23,
+ "unassigned_crossings":1,"rejections_by_reason":{"duplicate_within_window":614},...}
+```
+
+638 raw reads preserved; 24 crossings; 614 suppressed reads each naming the crossing that
+suppressed it. Re-deriving in a second process, from the same file, produces byte-identical
+output — including the derived identifiers. A process killed mid-race leaves a journal whose
+sequence numbers are contiguous from 1.
+
+Four questions were closed on the way: [ADR-0009](adr/0009-rusqlite-for-sqlite-access.md),
+[ADR-0010](adr/0010-time-crate-for-timestamps.md),
+[ADR-0011](adr/0011-append-only-enforced-by-triggers.md),
+[ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md).
+
+**Deliberately not done here:** results, placement, gun/chip time, statuses, or exports.
+Milestone 1 proves the evidence path. What is *derived* from that evidence is Milestone 4,
+and doing it early would mean doing it before the operator interface exists to check it.
 
 ---
 

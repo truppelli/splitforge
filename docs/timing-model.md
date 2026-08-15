@@ -128,7 +128,8 @@ reader's message identity where one exists. The clock-related fields are specifi
 Rules:
 
 - **Append-only.** No `UPDATE`, no `DELETE` on any normal path. Enforced by convention
-  now; **OPEN:** enforce with a SQLite trigger — see [Q8](open-questions.md#q8-enforcing-append-only-in-sqlite).
+  now, **and** enforced by `BEFORE UPDATE` / `BEFORE DELETE` triggers that abort — see
+  [ADR-0011](adr/0011-append-only-enforced-by-triggers.md).
 - **Store before deciding.** The read is persisted before dedup, before chip resolution,
   before anything looks at whether it "makes sense."
 - **Store unrecognized chips.** An EPC with no participant mapping is still recorded. It

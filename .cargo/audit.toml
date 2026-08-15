@@ -1,0 +1,14 @@
+# cargo-audit configuration.
+#
+# Kept in step with the `[advisories] ignore` list in deny.toml — the two tools read
+# different files but must never disagree about what this project has accepted. Every entry
+# needs the same thing: a reason, and a condition under which it gets deleted.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0009 — stack exhaustion in `time`'s RFC 2822 parser (fixed in 0.3.47).
+    # Unreachable here: SplitForge parses and emits RFC 3339 exclusively. Held back because
+    # `time` >= 0.3.47 requires Rust 1.88 and the MSRV is 1.85. See deny.toml for the full
+    # rationale and the conditions under which this entry must be removed.
+    "RUSTSEC-2026-0009",
+]

@@ -68,4 +68,5 @@ trust the card.
 
 - [timing-model.md](../timing-model.md)
 - [ADR-0005](0005-raw-read-append-only-journal.md)
-- [Q1: rusqlite vs sqlx](../open-questions.md#q1-sqlite-crate-rusqlite-vs-sqlx)
+- [ADR-0009: `rusqlite` for SQLite access](0009-rusqlite-for-sqlite-access.md) — resolves the
+  crate choice this ADR left open

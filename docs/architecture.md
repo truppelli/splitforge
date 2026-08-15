@@ -103,8 +103,9 @@ The rule that earns its keep is **`engine` must not depend on `llrp`**. It is wh
 a second reader protocol — or a serial timing box, or a barcode scanner, or a CSV import
 of somebody else's reads — a new adapter rather than a rewrite.
 
-**OPEN:** these rules are currently documented, not enforced. See
-[Q6](open-questions.md#q6-enforcing-crate-dependency-rules).
+These rules are **enforced**, not merely documented: `crates/splitforge-testkit/tests/dependency_rules.rs`
+parses every member manifest and fails the test suite on a violation. See
+[ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md).
 
 ### Ports and adapters
 
@@ -223,12 +224,12 @@ topologies are deliberately out of scope until one reader works reliably for a f
 |---|---|---|
 | Async runtime | Tokio | Reader I/O, API, and sync are all concurrent I/O |
 | Database | SQLite, WAL mode | Single device, transactional, no server. [ADR-0003](adr/0003-sqlite-wal-local-persistence.md) |
-| SQLite crate | **OPEN** — `rusqlite` vs `sqlx` | [Q1](open-questions.md#q1-sqlite-crate-rusqlite-vs-sqlx) |
+| SQLite crate | `rusqlite`, `bundled` | Thin and synchronous, so the durability contract stays legible. [ADR-0009](adr/0009-rusqlite-for-sqlite-access.md) |
 | Serialization | Serde | — |
 | CLI | Clap | — |
 | HTTP | Axum | Aligns with Tokio; local API only |
 | Tracing | `tracing` + `tracing-subscriber` | Structured, journald-friendly |
-| Time | **OPEN** — `time` vs `chrono` | [Q2](open-questions.md#q2-time-crate-time-vs-chrono) |
+| Time | `time`, UTC everywhere | Smaller surface, no local-time footgun. [ADR-0010](adr/0010-time-crate-for-timestamps.md) |
 | Errors | `thiserror` in libs, `anyhow` at app boundaries | — |
 
 No GUI framework. A local API plus a CLI is easier to test, deploy, recover, and drive
