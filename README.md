@@ -1,5 +1,9 @@
 # SplitForge
 
+<div align="center">
+  <img src="images/Split_Forge_Logo.png" alt="SplitForge logo" width="300">
+</div>
+
 Offline-first, open-source race timing software written in Rust, built to run at a race
 checkpoint on a Raspberry Pi.
 
