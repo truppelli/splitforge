@@ -16,7 +16,6 @@ is in the timing model.
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | M5 | — |
 | [Q12](#q12-leap-second-handling) | Leap-second policy | M4 | — |
-| [Q13](#q13-msrv-policy) | How is the MSRV chosen, and when does it move? | M2 | — |
 
 ---
 
@@ -121,37 +120,6 @@ vanishingly unlikely.
 Low probability, non-zero impact, cheap to at least *record*. Deciding to ignore it is
 fine; doing so without noticing is not.
 
-### Q13: MSRV policy
-
-**Raised in:** Milestone 1 implementation,
-[ADR-0010](adr/0010-time-crate-for-timestamps.md)
-
-The workspace pins `rust-version = "1.85"`. That is no longer a theoretical cost.
-
-`time` >= 0.3.47 requires Rust 1.88, so the workspace holds at `time` 0.3.45 — which
-carries **[RUSTSEC-2026-0009](https://rustsec.org/advisories/RUSTSEC-2026-0009)**, a stack
-exhaustion in its RFC 2822 parser. SplitForge cannot reach it: every timestamp it parses or
-emits is RFC 3339, and `Rfc2822` appears nowhere in the workspace. The advisory is
-therefore accepted, with the reasoning and the revisit conditions recorded in `deny.toml`
-and `.cargo/audit.toml`.
-
-That is a defensible position and an uncomfortable one. Holding an MSRV is now costing a
-known-vulnerable dependency in the tree, for a project whose entire claim is that its
-records can be trusted. `AntennaMap::resolve` is also written without a let-chain for the
-same reason, which is trivial by comparison but the same shape of cost.
-
-The question is what the policy actually is:
-
-- Is the MSRV a **promise to packagers** (Debian and Raspberry Pi OS ship older toolchains),
-  or just the version the author happened to have?
-- Does it follow a rule — N latest stable releases, or "whatever Raspberry Pi OS stable
-  ships" — or move ad hoc when a dependency forces it?
-- Does raising it need an ADR, or is it a routine dependency decision?
-
-Worth answering before Milestone 2 adds more dependencies, because the cost of an MSRV is
-paid every time one of them moves — and the next accepted advisory may not be one that
-happens to be unreachable.
-
 ---
 
 ## Resolved
@@ -164,6 +132,7 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q2](#q2-time-crate-time-vs-chrono) | `time` or `chrono`? | [ADR-0010](adr/0010-time-crate-for-timestamps.md) |
 | [Q6](#q6-enforcing-crate-dependency-rules) | Enforcing crate dependency rules | [ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md) |
 | [Q8](#q8-enforcing-append-only-in-sqlite) | Enforcing append-only at the database level | [ADR-0011](adr/0011-append-only-enforced-by-triggers.md) |
+| [Q13](#q13-msrv-policy) | How is the MSRV chosen, and when does it move? | [ADR-0013](adr/0013-msrv-policy.md) |
 
 ### Q1: SQLite crate, `rusqlite` vs `sqlx`
 
@@ -200,3 +169,17 @@ rule people need to understand rather than obey.
 by the storage layer into `JournalError::AppendOnlyViolation`. A guardrail against the
 accident, which is the failure that actually happens — not a defense against someone with
 write access to the file, which nothing at this layer could be.
+
+### Q13: MSRV policy
+
+**Resolved — [ADR-0013](adr/0013-msrv-policy.md): a tested floor, now 1.88.**
+
+The MSRV was protecting nobody. Every crate here is `publish = false`, no distribution
+packages SplitForge, and [ADR-0002](adr/0002-raspberry-pi-target.md) means the Pi never
+compiles anything — it receives cross-compiled binaries. Meanwhile holding 1.85 kept `time`
+below the release that fixed
+[RUSTSEC-2026-0009](https://rustsec.org/advisories/RUSTSEC-2026-0009), so the project was
+carrying a known-vulnerable dependency to defend a version number nobody had chosen.
+
+The MSRV is now the oldest toolchain CI tests against, and it moves when a security advisory
+cannot be cleared without moving it. `deny.toml`'s ignore list is empty again.

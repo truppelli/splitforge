@@ -20,6 +20,7 @@ this?" two years from now, the ADR is the answer.
 | [0010](0010-time-crate-for-timestamps.md) | The `time` crate for all timestamps | Accepted |
 | [0011](0011-append-only-enforced-by-triggers.md) | Append-only enforced by database triggers | Accepted |
 | [0012](0012-architecture-rules-enforced-by-tests.md) | Crate dependency rules enforced by a test | Accepted |
+| [0013](0013-msrv-policy.md) | The MSRV is a tested floor, not a compatibility promise | Accepted |
 
 ## Process
 

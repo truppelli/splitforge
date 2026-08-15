@@ -14,23 +14,10 @@ all-features = true
 version = 2
 yanked = "deny"
 # Add advisory IDs here only with a comment explaining why the risk is accepted.
-ignore = [
-    # RUSTSEC-2026-0009 — stack exhaustion in `time`'s RFC **2822** parser, fixed in
-    # 0.3.47. SplitForge cannot reach it: every timestamp it parses or emits is RFC 3339
-    # (`time::serde::rfc3339`), and the string `Rfc2822` does not appear anywhere in this
-    # workspace. No dependency enables `time`'s RFC 2822 path either.
-    #
-    # Not simply upgrading because `time` >= 0.3.47 requires Rust 1.88 and this workspace
-    # pins `rust-version = "1.85"`. That trade is Q13 in docs/open-questions.md, and this
-    # entry is the reason it stopped being theoretical.
-    #
-    # REVISIT when either happens, whichever comes first:
-    #   - the MSRV moves to 1.88 or later — then delete this and upgrade
-    #   - anything in this workspace starts parsing RFC 2822 (an email header, an HTTP
-    #     date, a vendor export) — then the advisory becomes reachable and the MSRV has to
-    #     move regardless
-    "RUSTSEC-2026-0009",
-]
+# Empty, and worth keeping that way. RUSTSEC-2026-0009 lived here briefly because the MSRV
+# held `time` below the release that fixed it; raising the MSRV to 1.88 (ADR-0013) removed
+# the reason, so the entry went with it.
+ignore = []
 
 [licenses]
 version = 2

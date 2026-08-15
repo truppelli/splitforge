@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*"]
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/truppelli/splitforge"
 homepage = "https://github.com/truppelli/splitforge"
@@ -34,7 +34,7 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
-time = { version = "0.3.45", features = [
+time = { version = "0.3.47", features = [
     "formatting",
     "macros",
     "parsing",

@@ -103,7 +103,7 @@ Four rules constrain every design decision in this repository:
 
 ## Development quick start
 
-Requires a current stable Rust toolchain (edition 2024, MSRV 1.85).
+Requires a current stable Rust toolchain (edition 2024, MSRV 1.88).
 
 ```bash
 git clone git@github.com:truppelli/splitforge.git

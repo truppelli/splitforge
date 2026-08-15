@@ -13,7 +13,7 @@ crate boundary or changes a stored data shape needs an
 
 ## Development setup
 
-Requires a current stable Rust toolchain (edition 2024, MSRV 1.85).
+Requires a current stable Rust toolchain (edition 2024, MSRV 1.88).
 
 ```bash
 cargo test --workspace
