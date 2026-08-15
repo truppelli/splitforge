@@ -14,7 +14,5 @@
 //! Enforcing them in CI is an open question (Q6 in `docs/open-questions.md`).
 
 fn main() {
-    println!(
-        "splitforge-edge is not implemented yet. See docs/roadmap.md for the milestone plan."
-    );
+    println!("splitforge-edge is not implemented yet. See docs/roadmap.md.");
 }
