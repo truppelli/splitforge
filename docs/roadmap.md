@@ -39,7 +39,7 @@ given piece of code belongs, and which rules it must not break.
 
 ## Milestone 1 — Simulation-first vertical slice
 
-**Status: this pull request.**
+**Status: complete.**
 
 **Build no reader integration.** The point is to prove the data path before adding the
 hardware variable.
@@ -88,25 +88,52 @@ and doing it early would mean doing it before the operator interface exists to c
 
 ## Milestone 2 — Local event console
 
+**Status: this pull request.**
+
 Minimum operator interface. CLI first; a web UI only after the core behavior is proven.
 
 ```bash
 splitforge init
-splitforge event create
-splitforge roster import participants.csv
-splitforge chips import assignments.csv
-splitforge reader add
-splitforge reader status
-splitforge reads tail
+splitforge event create   --name "Spring Series"
+splitforge race create    --name 5K --start 2026-04-11T08:00:00Z
+splitforge checkpoint add --name finish --kind finish
+splitforge roster import  participants.csv
+splitforge chips import   assignments.csv
+splitforge reader add     --id mat
+splitforge reader map     --reader mat --antenna 2 --checkpoint finish
+splitforge policy set     --checkpoint finish --selection-rule first-above-rssi:-62
 splitforge race start
+splitforge reads --follow
 splitforge race stop
-splitforge export results --format csv
-splitforge backup create
+splitforge derive
+splitforge export crossings --as csv
+splitforge backup create  snapshot.db
 splitforge doctor
+splitforge audit
 ```
 
 **Exit criterion:** a simulated race can be configured and operated end to end without
 ever touching the database directly.
+
+**Two corrections to this milestone as originally written**, both made deliberately rather
+than silently:
+
+- **`export results` became `export crossings`.** Results — placement, statuses, gun and
+  chip time — are Milestone 4, which owns them explicitly. Exporting a column named `place`
+  before the scoring rules exist would be a number somebody publishes and nobody can
+  defend. M2 exports what it actually knows: crossings joined to the roster.
+- **The command list above is longer than the original.** `race create`,
+  `checkpoint add`, `reader map`, and `policy set` are not optional extras — without them
+  there is no way to reach a configured race, so the exit criterion could not be met by the
+  original list.
+
+Two decisions were closed on the way:
+[ADR-0014](adr/0014-mutable-configuration-immutable-evidence.md),
+[ADR-0015](adr/0015-race-start-records-the-gun.md).
+
+**Deliberately not done here:** placement, statuses, gun/chip time, result revisions, and
+any web interface. Also no reader protocol — `reader status` reports configuration and what
+the journal has observed, and claims nothing about a connection it has no way to open.
 
 ---
 

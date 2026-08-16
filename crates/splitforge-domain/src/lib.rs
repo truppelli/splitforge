@@ -43,12 +43,15 @@ pub use derived::{
 };
 pub use entity::{
     AntennaMap, Checkpoint, CheckpointKind, ChipAssignment, ChipRegistry, Event, Participant, Race,
+    RaceConfig, RaceSession, Reader, SessionAction,
 };
 pub use error::DomainError;
 pub use ids::{
     AcceptedReadId, Bib, CheckpointId, ChipId, EventId, ParticipantId, RaceId, RawReadId, ReaderId,
     SPLITFORGE_NAMESPACE, TimingEventId,
 };
-pub use policy::{CheckpointPolicy, DEFAULT_MIN_INTERVAL_MS, SelectionRule, TimingPolicy};
+pub use policy::{
+    CheckpointPolicy, DEFAULT_MIN_INTERVAL_MS, SelectionRule, TimestampTrust, TimingPolicy,
+};
 pub use ports::{JournalError, RawReadJournal};
 pub use read::{DeviceClockState, FallbackReason, RawRead, StoredRawRead, TimestampSource};

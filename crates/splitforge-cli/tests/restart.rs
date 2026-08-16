@@ -39,7 +39,7 @@ async fn reopening_the_database_yields_the_same_derivation_bit_for_bit() {
             "{slug}: the journal changed across a reopen"
         );
 
-        let rederived = common::derive_from(&slice.fixture, &recovered);
+        let rederived = common::derive_from(&slice.config, &recovered);
         assert_eq!(
             rederived, slice.derivation,
             "{slug}: re-deriving after a restart reached a different conclusion"
@@ -52,38 +52,23 @@ async fn a_second_process_sees_every_read_the_first_one_wrote() {
     let directory = TempDir::new().expect("temp dir");
     let database = directory.path().join("event.db");
 
-    let simulate = Command::new(BINARY)
-        .args(["simulate", "--format", "compact", "--fixture", "five-k"])
-        .arg("--database")
-        .arg(&database)
-        .output()
-        .await
-        .expect("run splitforge simulate");
-    assert!(
-        simulate.status.success(),
-        "simulate failed: {}",
-        String::from_utf8_lossy(&simulate.stderr)
-    );
-    let written: serde_json::Value =
-        serde_json::from_slice(&simulate.stdout).expect("simulate emits JSON");
+    seed_config(&database, "five-k").await;
+    let written: serde_json::Value = serde_json::from_str(
+        &run_ok(
+            &["simulate", "--format", "compact", "--scenario", "five-k"],
+            &database,
+        )
+        .await,
+    )
+    .expect("simulate emits JSON");
     let persisted = written["reads_persisted"].as_u64().expect("a count");
     assert!(persisted > 0);
 
-    // A completely separate process, opening the same file from scratch.
-    let derive = Command::new(BINARY)
-        .args(["derive", "--format", "compact", "--fixture", "five-k"])
-        .arg("--database")
-        .arg(&database)
-        .output()
-        .await
-        .expect("run splitforge derive");
-    assert!(
-        derive.status.success(),
-        "derive failed: {}",
-        String::from_utf8_lossy(&derive.stderr)
-    );
+    // A completely separate process, opening the same file from scratch — and reading its
+    // roster, checkpoints, and policy out of the database rather than from a fixture.
     let derived: serde_json::Value =
-        serde_json::from_slice(&derive.stdout).expect("derive emits JSON");
+        serde_json::from_str(&run_ok(&["derive", "--format", "compact"], &database).await)
+            .expect("derive emits JSON");
 
     assert_eq!(derived["raw_reads"].as_u64(), Some(persisted));
     assert_eq!(derived["accepted"], 24);
@@ -98,9 +83,10 @@ async fn deriving_twice_in_two_processes_produces_identical_output() {
     let directory = TempDir::new().expect("temp dir");
     let database = directory.path().join("event.db");
 
-    run_ok(&["simulate", "--fixture", "multi-lap"], &database).await;
-    let first = run_ok(&["derive", "--fixture", "multi-lap"], &database).await;
-    let second = run_ok(&["derive", "--fixture", "multi-lap"], &database).await;
+    seed_config(&database, "multi-lap").await;
+    run_ok(&["simulate", "--scenario", "multi-lap"], &database).await;
+    let first = run_ok(&["derive"], &database).await;
+    let second = run_ok(&["derive"], &database).await;
 
     assert_eq!(first, second);
     assert!(first.contains("\"accepted\": 30"));
@@ -115,7 +101,8 @@ async fn a_process_killed_mid_race_leaves_an_intact_journal() {
     // that were already acknowledged, and seeding makes that question answerable without
     // depending on how much the *killed* process managed to write — which is a function of
     // the runner's fsync latency and therefore not something to assert on.
-    run_ok(&["simulate", "--fixture", "five-k"], &database).await;
+    seed_config(&database, "five-k").await;
+    run_ok(&["simulate", "--scenario", "five-k"], &database).await;
     let acknowledged = SqliteJournal::open(&database)
         .expect("seed run leaves a readable database")
         .count()
@@ -124,9 +111,19 @@ async fn a_process_killed_mid_race_leaves_an_intact_journal() {
 
     // Now a second run, accelerated so the process is genuinely mid-write when it dies. An
     // immediate run would very likely finish before the kill arrives, and a test that
-    // silently stops testing anything is worse than no test.
+    // silently stops testing anything is worse than no test. A different race, on a
+    // different reader, so its reads are distinguishable from the seeded ones.
+    seed_config(&database, "multi-lap").await;
     let mut child = Command::new(BINARY)
-        .args(["simulate", "--fixture", "multi-lap", "--speed", "300"])
+        .args([
+            "simulate",
+            "--race",
+            "Criterium",
+            "--scenario",
+            "multi-lap",
+            "--speed",
+            "300",
+        ])
         .arg("--database")
         .arg(&database)
         .stdout(Stdio::null())
@@ -171,7 +168,8 @@ async fn a_process_killed_mid_race_leaves_an_intact_journal() {
     // special-casing anything. Derived against the seeded fixture, so the criterium's
     // partial reads land as unmapped rather than as crossings — which is itself the right
     // behavior: an unrecognized reader withholds interpretation, it does not discard.
-    let derivation = common::derive_from(&five_k(), &recovered);
+    let config = common::reload_config(&database, five_k().config.race.id);
+    let derivation = common::derive_from(&config, &recovered);
     assert_eq!(
         derivation.accepted.len() + derivation.rejected.len(),
         recovered.len()
@@ -190,8 +188,9 @@ async fn a_second_process_can_read_the_journal_while_a_race_is_running() {
     let directory = TempDir::new().expect("temp dir");
     let database = directory.path().join("event.db");
 
+    seed_config(&database, "five-k").await;
     let mut child = Command::new(BINARY)
-        .args(["simulate", "--fixture", "five-k", "--speed", "200"])
+        .args(["simulate", "--scenario", "five-k", "--speed", "200"])
         .arg("--database")
         .arg(&database)
         .stdout(Stdio::null())
@@ -243,18 +242,32 @@ async fn a_restart_appends_rather_than_restarting_the_sequence() {
     let database = directory.path().join("event.db");
     let fixture = FixtureEvent::by_slug("five-k").expect("fixture");
 
+    let mut store = splitforge_storage::ConfigStore::open(&database).expect("open store");
+    splitforge_cli::load_fixture(&mut store, "test", "five-k").expect("load config");
+    let config = store.load(fixture.config.race.id).expect("load config");
+
     let mut journal = SqliteJournal::open(&database).expect("open");
-    let first =
-        splitforge_cli::into_journal(&fixture, &mut journal, 1, splitforge_cli::Speed::Immediate)
-            .await
-            .expect("first run");
+    let first = splitforge_cli::into_journal(
+        &config,
+        "five-k",
+        &mut journal,
+        1,
+        splitforge_cli::Speed::Immediate,
+    )
+    .await
+    .expect("first run");
     drop(journal);
 
     let mut journal = SqliteJournal::open(&database).expect("reopen");
-    let second =
-        splitforge_cli::into_journal(&fixture, &mut journal, 2, splitforge_cli::Speed::Immediate)
-            .await
-            .expect("second run");
+    let second = splitforge_cli::into_journal(
+        &config,
+        "five-k",
+        &mut journal,
+        2,
+        splitforge_cli::Speed::Immediate,
+    )
+    .await
+    .expect("second run");
 
     assert_eq!(first.first_seq, Some(1));
     assert_eq!(
@@ -266,6 +279,15 @@ async fn a_restart_appends_rather_than_restarting_the_sequence() {
         journal.count().expect("count") as usize,
         first.reads_persisted + second.reads_persisted
     );
+}
+
+/// Writes a fixture's configuration into the database, through the binary.
+///
+/// Every subprocess test needs configuration in the database before it can simulate or
+/// derive anything — which is itself the Milestone 2 change worth noticing: there is no
+/// longer a `--fixture` flag that lets a command conjure a roster out of the binary.
+async fn seed_config(database: &std::path::Path, slug: &str) {
+    run_ok(&["fixture", "load", "--fixture", slug], database).await;
 }
 
 /// Runs the binary against a database and returns stdout, failing loudly if it did not.

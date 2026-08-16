@@ -13,11 +13,16 @@
 //!
 //! ## What a fixture is
 //!
-//! A [`FixtureEvent`] is a complete, self-consistent event: race, checkpoints, roster, chip
-//! assignments, antenna map, timing policy, and — crucially — a list of
-//! [`PlannedCrossing`]s that states **what should happen**. The fixture is the oracle. A
-//! test asserts that the engine agrees with it, rather than restating the engine's own
-//! arithmetic back to itself.
+//! A [`FixtureEvent`] is a complete, self-consistent event: a
+//! [`RaceConfig`](splitforge_domain::RaceConfig) — race, checkpoints, roster, chip
+//! assignments, readers, antenna map, timing policy — plus a list of [`PlannedCrossing`]s
+//! that states **what should happen**. The fixture is the oracle. A test asserts that the
+//! engine agrees with it, rather than restating the engine's own arithmetic back to itself.
+//!
+//! The configuration half is deliberately the *same type* `splitforge-storage` loads from
+//! the database. A fixture can therefore be written into a real database and read back, and
+//! `splitforge fixture load` does exactly that. Were these two parallel shapes, the fixtures
+//! would drift from the loader and the tests would stop proving anything about it.
 //!
 //! ## Why fixture identifiers are deterministic
 //!
@@ -31,8 +36,9 @@
 
 use splitforge_domain::{
     AntennaMap, Bib, Checkpoint, CheckpointId, CheckpointKind, CheckpointPolicy, ChipAssignment,
-    ChipId, ChipRegistry, DomainError, Event, EventId, Participant, ParticipantId, Race, RaceId,
-    ReaderId, SPLITFORGE_NAMESPACE, SelectionRule, TimingPolicy,
+    ChipId, ChipRegistry, DomainError, Event, EventId, Participant, ParticipantId, Race,
+    RaceConfig, RaceId, Reader, ReaderId, SPLITFORGE_NAMESPACE, SelectionRule, TimestampTrust,
+    TimingPolicy,
 };
 use time::macros::datetime;
 use time::{Duration, OffsetDateTime};
@@ -61,6 +67,23 @@ fn fixture_id(kind: &str, name: &str) -> Uuid {
 /// An EPC-96 style chip identifier, 24 hex characters, derived from a bib number.
 fn chip_for(bib: u32) -> ChipId {
     ChipId::new(format!("E2801160600002{bib:010}"))
+}
+
+/// The name every fixture race day shares.
+const FIXTURE_EVENT_NAME: &str = "SplitForge Fixture Day";
+
+/// The one event both fixtures belong to.
+///
+/// Deliberately shared rather than one event per fixture. They are the 5K and the criterium
+/// of the same race day, which is what an `event` is for — and loading both into one
+/// database is then a supported thing to do rather than a name collision. It also means the
+/// multi-race paths (`--race`, the race-scoped antenna map) get exercised by the fixtures
+/// instead of only by unit tests.
+fn fixture_event() -> Event {
+    Event {
+        id: EventId::from_uuid(fixture_id("event", "fixture-day")),
+        name: FIXTURE_EVENT_NAME.to_owned(),
+    }
 }
 
 /// What the fixture says must happen to a crossing.
@@ -103,20 +126,8 @@ pub struct PlannedCrossing {
 pub struct FixtureEvent {
     /// Short stable name, used by the CLI to select a fixture.
     pub slug: &'static str,
-    /// The race day.
-    pub event: Event,
-    /// The race.
-    pub race: Race,
-    /// Checkpoints on the course, in sequence order.
-    pub checkpoints: Vec<Checkpoint>,
-    /// The roster.
-    pub participants: Vec<Participant>,
-    /// Time-bounded chip assignments.
-    pub assignments: Vec<ChipAssignment>,
-    /// Reader and antenna to checkpoint mapping.
-    pub antennas: AntennaMap,
-    /// The rules the engine should be run with.
-    pub policy: TimingPolicy,
+    /// The configuration, in exactly the shape `splitforge-storage` loads from a database.
+    pub config: RaceConfig,
     /// Every crossing that happens during the event, in chronological order.
     pub crossings: Vec<PlannedCrossing>,
 }
@@ -138,6 +149,12 @@ impl FixtureEvent {
         vec![five_k(), multi_lap()]
     }
 
+    /// Every fixture slug this crate ships.
+    #[must_use]
+    pub fn slugs() -> Vec<&'static str> {
+        Self::all().iter().map(|fixture| fixture.slug).collect()
+    }
+
     /// Builds the chip registry for this fixture.
     ///
     /// # Errors
@@ -145,23 +162,25 @@ impl FixtureEvent {
     /// Returns [`DomainError`] if the fixture's own assignments overlap, which would mean
     /// the fixture is malformed.
     pub fn chips(&self) -> Result<ChipRegistry, DomainError> {
-        ChipRegistry::from_assignments(self.assignments.iter().cloned())
+        self.config.chips()
     }
 
     /// Looks up a checkpoint by name.
     #[must_use]
     pub fn checkpoint(&self, name: &str) -> Option<&Checkpoint> {
-        self.checkpoints
-            .iter()
-            .find(|checkpoint| checkpoint.name == name)
+        self.config.checkpoint(name)
     }
 
     /// Looks up a participant by bib.
     #[must_use]
     pub fn participant(&self, bib: &str) -> Option<&Participant> {
-        self.participants
-            .iter()
-            .find(|participant| participant.bib.as_str() == bib)
+        self.config.participant(bib)
+    }
+
+    /// The reader this fixture's crossings pass through.
+    #[must_use]
+    pub fn reader(&self) -> Option<&Reader> {
+        self.config.readers.first()
     }
 
     /// How many crossings must become accepted reads, credited or not.
@@ -201,10 +220,7 @@ pub fn five_k() -> FixtureEvent {
     const FINISH_ORDER: [u32; 11] = [104, 101, 107, 102, 111, 105, 108, 103, 112, 106, 110];
     const DNF_BIB: u32 = 109;
 
-    let event = Event {
-        id: EventId::from_uuid(fixture_id("event", SLUG)),
-        name: "SplitForge Fixture Day".to_owned(),
-    };
+    let event = fixture_event();
     let race = Race {
         id: RaceId::from_uuid(fixture_id("race", SLUG)),
         event: event.id,
@@ -232,6 +248,14 @@ pub fn five_k() -> FixtureEvent {
     let mut antennas = AntennaMap::new();
     antennas.map_antenna(reader.clone(), 1, start.id);
     antennas.map_antenna(reader.clone(), 2, finish.id);
+    let readers = vec![Reader {
+        id: reader.clone(),
+        label: "Start/finish mat".to_owned(),
+        // No endpoint: there is no reader protocol until Milestone 3, and a stored address
+        // nothing connects to would be a claim this project has not earned.
+        endpoint: None,
+        timestamp_trust: TimestampTrust::Auto,
+    }];
 
     // The finish mat reaches past the line, so the earliest detection is a runner still
     // approaching. An RSSI floor credits the first read taken at the mat instead. The
@@ -308,13 +332,19 @@ pub fn five_k() -> FixtureEvent {
 
     FixtureEvent {
         slug: SLUG,
-        event,
-        race,
-        checkpoints: vec![start, finish],
-        participants,
-        assignments,
-        antennas,
-        policy,
+        config: RaceConfig {
+            event,
+            race,
+            checkpoints: vec![start, finish],
+            participants,
+            assignments,
+            readers,
+            antennas,
+            policy,
+            // Nothing recorded: the fixture races start at their scheduled time, which is
+            // what `RaceConfig::gun_time` falls back to.
+            sessions: Vec::new(),
+        },
         crossings,
     }
 }
@@ -335,10 +365,7 @@ pub fn multi_lap() -> FixtureEvent {
     /// The rider who loiters at the mat, as a zero-based index into the field.
     const LOITERER: u32 = 2;
 
-    let event = Event {
-        id: EventId::from_uuid(fixture_id("event", SLUG)),
-        name: "SplitForge Fixture Day".to_owned(),
-    };
+    let event = fixture_event();
     let race = Race {
         id: RaceId::from_uuid(fixture_id("race", SLUG)),
         event: event.id,
@@ -358,6 +385,12 @@ pub fn multi_lap() -> FixtureEvent {
     let reader = ReaderId::new("lap-mat");
     let mut antennas = AntennaMap::new();
     antennas.map_reader(reader.clone(), lap.id);
+    let readers = vec![Reader {
+        id: reader.clone(),
+        label: "Lap mat".to_owned(),
+        endpoint: None,
+        timestamp_trust: TimestampTrust::Auto,
+    }];
 
     let policy = TimingPolicy {
         min_lap_ms: Some(MIN_LAP_MS),
@@ -417,13 +450,17 @@ pub fn multi_lap() -> FixtureEvent {
 
     FixtureEvent {
         slug: SLUG,
-        event,
-        race,
-        checkpoints: vec![lap],
-        participants,
-        assignments,
-        antennas,
-        policy,
+        config: RaceConfig {
+            event,
+            race,
+            checkpoints: vec![lap],
+            participants,
+            assignments,
+            readers,
+            antennas,
+            policy,
+            sessions: Vec::new(),
+        },
         crossings,
     }
 }
@@ -436,7 +473,7 @@ mod tests {
     fn fixture_identifiers_are_stable_across_builds() {
         // If this ever fails, every derived id in every stored fixture expectation has
         // moved, and restart comparisons are silently meaningless.
-        assert_eq!(five_k().race.id, five_k().race.id);
+        assert_eq!(five_k().config.race.id, five_k().config.race.id);
         assert_eq!(
             five_k()
                 .checkpoint("finish")
@@ -451,12 +488,18 @@ mod tests {
     fn every_fixture_has_a_consistent_roster_and_antenna_map() {
         for fixture in FixtureEvent::all() {
             let chips = fixture.chips().expect("assignments must not overlap");
-            assert!(!fixture.antennas.is_empty(), "{}", fixture.slug);
-            assert_eq!(chips.len(), fixture.participants.len(), "{}", fixture.slug);
+            assert!(!fixture.config.antennas.is_empty(), "{}", fixture.slug);
+            assert_eq!(
+                chips.len(),
+                fixture.config.participants.len(),
+                "{}",
+                fixture.slug
+            );
 
             for crossing in &fixture.crossings {
                 assert_eq!(
                     fixture
+                        .config
                         .antennas
                         .resolve(&crossing.reader, crossing.antenna)
                         .as_ref(),
@@ -492,7 +535,7 @@ mod tests {
         let finish = fixture.checkpoint("finish").expect("finish").id;
         let dnf_chip = chip_for(109);
 
-        assert_eq!(fixture.participants.len(), 12);
+        assert_eq!(fixture.config.participants.len(), 12);
         assert_eq!(
             fixture
                 .crossings
@@ -533,9 +576,10 @@ mod tests {
     #[test]
     fn every_genuine_lap_is_comfortably_longer_than_the_minimum() {
         let fixture = multi_lap();
-        let min_lap = i64::try_from(fixture.policy.min_lap_ms.expect("configured")).expect("fits");
+        let min_lap =
+            i64::try_from(fixture.config.policy.min_lap_ms.expect("configured")).expect("fits");
 
-        for participant in &fixture.participants {
+        for participant in &fixture.config.participants {
             let chip = chip_for(
                 participant
                     .bib

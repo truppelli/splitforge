@@ -10,6 +10,55 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::CheckpointId;
 
+/// How far a reader's own clock is trusted.
+///
+/// Policy rather than protocol, which is why it lives here rather than in
+/// `splitforge-reader`: it is an operator's judgement about a specific piece of hardware,
+/// it is configured per reader and stored with the rest of the event, and a result revision
+/// has to be able to record which setting produced it. The *decision procedure* that acts
+/// on it stays in `splitforge_reader::Ingest`.
+///
+/// Thresholds and defaults are still open — see Q3 in `docs/open-questions.md`, which is
+/// gated on measurements from real hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampTrust {
+    /// Always use the reader's UTC timestamp when it supplies one.
+    Trusted,
+    /// Never use it. Always fall back to device receipt time.
+    Untrusted,
+    /// Use it unless the measured offset exceeds the configured threshold.
+    #[default]
+    Auto,
+}
+
+impl TimestampTrust {
+    /// Parses an operator-supplied name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the accepted values if the input is not one of them. Guessing which was
+    /// meant would silently change how every read on that reader is timed.
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "trusted" => Ok(Self::Trusted),
+            "untrusted" => Ok(Self::Untrusted),
+            "auto" => Ok(Self::Auto),
+            _ => Err("expected one of: trusted, untrusted, auto"),
+        }
+    }
+
+    /// The stable name used in storage and JSON output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Untrusted => "untrusted",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 /// Which read within a burst becomes the crossing.
 ///
 /// The right answer depends on physics, so it is configurable per checkpoint.
@@ -143,6 +192,25 @@ mod tests {
         );
         assert_eq!(policy.min_interval_ms_for(checkpoint), 500);
         assert_eq!(policy.selection_rule_for(checkpoint), SelectionRule::First);
+    }
+
+    #[test]
+    fn timestamp_trust_round_trips_through_its_stored_name() {
+        for trust in [
+            TimestampTrust::Trusted,
+            TimestampTrust::Untrusted,
+            TimestampTrust::Auto,
+        ] {
+            assert_eq!(TimestampTrust::parse(trust.as_str()), Ok(trust));
+        }
+        assert_eq!(TimestampTrust::parse(" AUTO "), Ok(TimestampTrust::Auto));
+    }
+
+    #[test]
+    fn an_unrecognized_trust_setting_is_refused_rather_than_guessed() {
+        // Silently defaulting would change how every read on that reader is timed.
+        assert!(TimestampTrust::parse("yes").is_err());
+        assert!(TimestampTrust::parse("").is_err());
     }
 
     #[test]

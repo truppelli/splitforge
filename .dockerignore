@@ -1,0 +1,5 @@
+# The CI image copies only `docker/ci.sh`; the working tree arrives as a bind mount at run
+# time. Keeping the build context small is what stops a 5 GB `target/` from being shipped
+# to the daemon on every `docker build`.
+*
+!docker/ci.sh

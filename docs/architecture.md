@@ -1,7 +1,9 @@
 # SplitForge Architecture
 
-> Status: proposed. Nothing here is implemented yet. Decisions marked **OPEN** are
-> tracked in [open-questions.md](open-questions.md).
+> Status: partly implemented. `domain`, `reader`, `storage`, `engine`, `simulator`,
+> `testkit`, and `cli` exist; `llrp`, `results`, `export`, `api`, `sync`, and `edge` are
+> still empty — see the [roadmap](roadmap.md). Decisions marked **OPEN** are tracked in
+> [open-questions.md](open-questions.md).
 
 ## 1. System context
 
@@ -227,6 +229,7 @@ topologies are deliberately out of scope until one reader works reliably for a f
 | SQLite crate | `rusqlite`, `bundled` | Thin and synchronous, so the durability contract stays legible. [ADR-0009](adr/0009-rusqlite-for-sqlite-access.md) |
 | Serialization | Serde | — |
 | CLI | Clap | — |
+| CSV | `csv` | Roster and chip-assignment import. Deliberately not on the read path — nothing between a reader report and a durable write parses CSV |
 | HTTP | Axum | Aligns with Tokio; local API only |
 | Tracing | `tracing` + `tracing-subscriber` | Structured, journald-friendly |
 | Time | `time`, UTC everywhere | Smaller surface, no local-time footgun. [ADR-0010](adr/0010-time-crate-for-timestamps.md) |

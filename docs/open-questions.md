@@ -10,7 +10,7 @@ is in the timing model.
 |---|---|---|---|
 | [Q3](#q3-reader-clock-trust-defaults) | Reader clock trust defaults and alarm thresholds | M3 | — |
 | [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
-| [Q5](#q5-local-api-authentication-model) | Local API authentication model | M2 | — |
+| [Q5](#q5-local-api-authentication-model) | Local API authentication model | First networked interface | — |
 | [Q7](#q7-corruption-recovery-strategy) | Database corruption recovery strategy | M5 | — |
 | [Q9](#q9-first-reader-model) | Which physical reader model comes first? | **M3 — hard gate** | — |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
@@ -53,6 +53,12 @@ SSH (simplest and most secure, but rules out a browser console later).
 Whatever is chosen must not make the timer unusable at 6 a.m. in the cold — an
 authentication scheme that gets bypassed in practice is worse than a simple one that gets
 used.
+
+**Re-scoped after Milestone 2.** This was listed as blocking M2, which turned out to be
+wrong: M2 is a CLI running as a local process over SSH, and it opens no socket. Nothing was
+deferred to dodge the question — there was simply nothing to authenticate. It blocks the
+first interface that listens on the network, which is `splitforge-api` and any browser
+console built on it.
 
 ### Q7: Corruption recovery strategy
 

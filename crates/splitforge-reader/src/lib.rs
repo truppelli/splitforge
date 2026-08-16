@@ -32,6 +32,11 @@ use serde::{Deserialize, Serialize};
 use splitforge_domain::{
     ChipId, DeviceClockState, FallbackReason, RawRead, RawReadId, ReaderId, TimestampSource,
 };
+// The *setting* is operator policy stored with the event, so it lives in the domain; the
+// decision procedure that acts on it is [`Ingest`], below. Re-exported because every caller
+// that configures an `Ingest` needs both, and having to import them from two crates would
+// suggest they are two separate concerns.
+pub use splitforge_domain::TimestampTrust;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
@@ -76,19 +81,6 @@ pub struct ReaderMessage {
     pub rssi_dbm: Option<i16>,
     /// The bytes the reader sent.
     pub raw_payload: Vec<u8>,
-}
-
-/// How far a reader's own clock is trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TimestampTrust {
-    /// Always use the reader's UTC timestamp when it supplies one.
-    Trusted,
-    /// Never use it. Always fall back to device receipt time.
-    Untrusted,
-    /// Use it unless the measured offset exceeds the configured threshold.
-    #[default]
-    Auto,
 }
 
 /// Default offset threshold for [`TimestampTrust::Auto`]: 5 s.

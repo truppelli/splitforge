@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 
 use splitforge_cli::Speed;
 use splitforge_domain::{
-    AcceptedRead, Checkpoint, ChipId, Derivation, RawReadJournal, RejectionReason, StoredRawRead,
+    AcceptedRead, Checkpoint, ChipId, Derivation, RaceConfig, RawReadJournal, RejectionReason,
+    StoredRawRead,
 };
 use splitforge_engine::{DerivationInput, derive};
-use splitforge_storage::SqliteJournal;
+use splitforge_storage::{ConfigStore, SqliteJournal};
 use splitforge_testkit::{CrossingExpectation, FixtureEvent, PlannedCrossing};
 use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
@@ -34,6 +35,8 @@ pub struct Slice {
     pub database: PathBuf,
     /// The fixture that was run.
     pub fixture: FixtureEvent,
+    /// The configuration as **loaded back from the database**, not as the fixture built it.
+    pub config: RaceConfig,
     /// Every raw read, in journal order.
     pub reads: Vec<StoredRawRead>,
     /// What the engine concluded.
@@ -41,14 +44,26 @@ pub struct Slice {
 }
 
 /// Runs a fixture end to end.
+///
+/// The fixture's configuration is written into a real database and read back before
+/// anything else happens, so every assertion below is made against the loaded copy. That
+/// is the Milestone 2 difference: these tests now exercise the storage round-trip rather
+/// than an in-memory struct that never touched SQLite.
 pub async fn run(fixture: FixtureEvent) -> Slice {
     let directory = TempDir::new().expect("temp dir");
     let database = directory.path().join("event.db");
 
+    let mut store = ConfigStore::open(&database).expect("open config store");
+    splitforge_cli::load_fixture(&mut store, "test", fixture.slug).expect("load fixture config");
+    let config = store
+        .load(fixture.config.race.id)
+        .expect("load config back out of the database");
+
     let mut journal = SqliteJournal::open(&database).expect("open journal");
-    let report = splitforge_cli::into_journal(&fixture, &mut journal, SEED, Speed::Immediate)
-        .await
-        .expect("simulation must not lose a read");
+    let report =
+        splitforge_cli::into_journal(&config, fixture.slug, &mut journal, SEED, Speed::Immediate)
+            .await
+            .expect("simulation must not lose a read");
 
     assert_eq!(
         report.reads_received, report.reads_scripted,
@@ -61,25 +76,34 @@ pub async fn run(fixture: FixtureEvent) -> Slice {
     assert_eq!(report.journal_total as usize, report.reads_persisted);
 
     let reads = journal.read_all().expect("read journal");
-    let derivation = derive_from(&fixture, &reads);
+    let derivation = derive_from(&config, &reads);
     Slice {
         _directory: directory,
         database,
         fixture,
+        config,
         reads,
         derivation,
     }
 }
 
 /// Derives from an explicit set of reads. Used to re-derive after a reopen.
-pub fn derive_from(fixture: &FixtureEvent, reads: &[StoredRawRead]) -> Derivation {
-    let chips = fixture.chips().expect("fixture assignments");
+pub fn derive_from(config: &RaceConfig, reads: &[StoredRawRead]) -> Derivation {
+    let chips = config.chips().expect("stored assignments");
     derive(&DerivationInput {
         reads,
-        policy: &fixture.policy,
+        policy: &config.policy,
         chips: &chips,
-        antennas: &fixture.antennas,
+        antennas: &config.antennas,
     })
+}
+
+/// Reopens the configuration store and loads a race, as a second process would.
+pub fn reload_config(database: &Path, race: splitforge_domain::RaceId) -> RaceConfig {
+    ConfigStore::open(database)
+        .expect("reopen config store")
+        .load(race)
+        .expect("load config")
 }
 
 /// Opens an existing database and reads every row.

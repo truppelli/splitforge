@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+csv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 splitforge-domain.workspace = true
@@ -28,9 +29,10 @@ splitforge-engine.workspace = true
 splitforge-reader.workspace = true
 splitforge-simulator.workspace = true
 splitforge-storage.workspace = true
-# Milestone 1 has no event storage, so the roster, checkpoints, and policy come from a
-# fixture. This dependency is temporary and disappears in Milestone 2, when
-# `event create` / `roster import` put that configuration in the database where it belongs.
+# Only for `splitforge fixture load`, which writes a built-in fixture's configuration into
+# a real database so a simulated race is one command away instead of eight. Configuration
+# itself now lives in SQLite (Milestone 2) — nothing here reads a fixture at derivation
+# time any more.
 splitforge-testkit.workspace = true
 time.workspace = true
 tokio.workspace = true

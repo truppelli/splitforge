@@ -14,8 +14,9 @@ checkpoint on a Raspberry Pi.
 > tested, and there is no results or scoring layer yet.** Do not use SplitForge to time a
 > real event.
 >
-> Milestones [0](docs/roadmap.md#milestone-0--project-charter) and
-> [1](docs/roadmap.md#milestone-1--simulation-first-vertical-slice) are complete.
+> Milestones [0](docs/roadmap.md#milestone-0--project-charter),
+> [1](docs/roadmap.md#milestone-1--simulation-first-vertical-slice), and
+> [2](docs/roadmap.md#milestone-2--local-event-console) are complete.
 > Milestone 3 is gated on physical hardware — see
 > [hardware support](docs/hardware-support.md).
 
@@ -119,19 +120,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ### Time a simulated race
 
-No hardware, no network, no configuration. The simulator speaks the same `ReaderProvider`
-port a real reader will, so nothing downstream can tell the difference.
+No hardware and no network. The simulator speaks the same `ReaderProvider` port a real
+reader will, so nothing downstream can tell the difference.
 
 ```bash
+alias splitforge='cargo run --quiet --bin splitforge -- --database event.db'
+
 # A 5K: 12 entrants over a start mat and a finish mat, one of them a DNF,
-# plus one chip that is not on the roster.
-cargo run --bin splitforge -- simulate --database event.db --fixture five-k
+# plus one chip that is not on the roster. `fixture load` writes that
+# configuration into the database as ordinary rows.
+splitforge fixture load --fixture five-k
+splitforge race start --at 2026-04-11T08:00:00Z
+splitforge simulate --scenario five-k
 
 # Every read, exactly as recorded — hundreds of them, one crossing each.
-cargo run --bin splitforge -- reads --database event.db --limit 5
+splitforge reads --limit 5
 
 # What the engine concluded from that evidence.
-cargo run --bin splitforge -- accepted --database event.db --fixture five-k
+splitforge accepted
 ```
 
 ```json
@@ -159,13 +165,55 @@ Run `simulate` twice against the same database and the sequence continues rather
 restarting; run `derive` in any process afterwards and it reaches the same conclusions,
 identifiers included.
 
+### Configure a real event
+
+`fixture load` is a shortcut for trying things out. A real event is configured with the
+commands an operator actually uses, and nothing else — no fixture, no SQLite prompt:
+
+```bash
+splitforge init
+splitforge event create   --name "Spring Series"
+splitforge race create    --name 5K --start 2026-04-11T08:00:00Z
+splitforge checkpoint add --name start  --kind start
+splitforge checkpoint add --name finish --kind finish
+splitforge roster import  participants.csv     # bib,name
+splitforge chips import   assignments.csv      # bib,chip[,valid_from,valid_until]
+splitforge reader add     --id mat --label "Start/finish mat"
+splitforge reader map     --reader mat --antenna 1 --checkpoint start
+splitforge reader map     --reader mat --antenna 2 --checkpoint finish
+splitforge policy set     --checkpoint finish --selection-rule first-above-rssi:-62
+
+splitforge doctor                              # before the gun, not after
+splitforge race start
+splitforge reads --follow                       # safe against a live race
+splitforge race stop
+
+splitforge export crossings --as csv --output crossings.csv
+splitforge backup create snapshot.db            # safe mid-race; never overwrites
+splitforge audit                                # who changed what, and when
+```
+
+`--race` is optional whenever only one race is configured. With several, leaving it off is
+an error that lists the candidates rather than picking one.
+
+`doctor` exits non-zero when it finds something that will produce wrong results, so
+`splitforge doctor && splitforge race start` is a usable pre-race gate.
+
 ### Cross-compiling for the Pi
 
 ```bash
 rustup target add aarch64-unknown-linux-gnu
 sudo apt-get install -y gcc-aarch64-linux-gnu   # linker, see .cargo/config.toml
 
-cargo build --release --target aarch64-unknown-linux-gnu -p splitforge-edge
+cargo build --release --target aarch64-unknown-linux-gnu --workspace
+```
+
+That cross toolchain is a Linux package. On Windows or macOS, run the gate — or all seven
+of them — in the CI image instead:
+
+```bash
+docker build -t splitforge-ci -f docker/Dockerfile .
+docker run --rm -v "$PWD:/repo" -v splitforge-target:/build splitforge-ci
 ```
 
 Cross-compilation catches build failures. It does **not** validate reader behavior,

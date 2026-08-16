@@ -2,6 +2,13 @@
 //!
 //! SQLite persistence for SplitForge: schema, migrations, repositories, and backups.
 //!
+//! ## Two stores, one file
+//!
+//! [`SqliteJournal`] holds evidence and never rewrites it. [`ConfigStore`] holds
+//! configuration and rewrites it constantly. They share a file, a schema, and an open path
+//! (`connection`), and nothing else — the separation is the point, and it is why the type
+//! that can `UPDATE` has no way to reach `raw_reads`.
+//!
 //! ## Boundaries
 //!
 //! - **May depend on:** splitforge-domain
@@ -26,11 +33,16 @@
 // the point. See CONTRIBUTING.md, "Code standards".
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod backup;
+mod config;
+mod connection;
 mod journal;
 mod migrations;
 
 use thiserror::Error;
 
+pub use backup::{BackupReport, create as create_backup};
+pub use config::{AuditEntry, ConfigStore, ImportSummary, RaceSelection, parse_checkpoint_kind};
 pub use journal::SqliteJournal;
 pub use migrations::{MIGRATIONS, Migration, SCHEMA_VERSION};
 
