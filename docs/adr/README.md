@@ -21,6 +21,8 @@ this?" two years from now, the ADR is the answer.
 | [0011](0011-append-only-enforced-by-triggers.md) | Append-only enforced by database triggers | Accepted |
 | [0012](0012-architecture-rules-enforced-by-tests.md) | Crate dependency rules enforced by a test | Accepted |
 | [0013](0013-msrv-policy.md) | The MSRV is a tested floor, not a compatibility promise | Accepted |
+| [0014](0014-mutable-configuration-immutable-evidence.md) | Configuration is mutable; evidence and the audit trail are not | Accepted |
+| [0015](0015-race-start-records-the-gun.md) | `race start` records the gun; it does not gate ingestion | Accepted |
 
 ## Process
 

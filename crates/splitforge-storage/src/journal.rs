@@ -1,9 +1,8 @@
 //! The append-only raw read journal.
 
 use std::path::Path;
-use std::time::Duration as StdDuration;
 
-use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+use rusqlite::{Connection, Row, Transaction, params};
 use sha2::{Digest, Sha256};
 use splitforge_domain::{
     ChipId, DeviceClockState, FallbackReason, JournalError, RawRead, RawReadId, RawReadJournal,
@@ -13,7 +12,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::StorageError;
-use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
+use crate::connection::{self, from_micros, to_micros};
 
 const SELECT_COLUMNS: &str = "seq, id, source, antenna, chip, reader_timestamp_us, \
      reader_uptime_us, received_at_us, received_at_monotonic_ns, rssi_dbm, \
@@ -34,7 +33,9 @@ impl SqliteJournal {
     /// Returns [`StorageError`] if the file cannot be opened, the pragmas cannot be set,
     /// or migrations fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        Self::from_connection(Connection::open(path)?)
+        Ok(Self {
+            conn: connection::open(path)?,
+        })
     }
 
     /// Opens a private in-memory journal. For tests and dry runs only — nothing survives.
@@ -43,13 +44,9 @@ impl SqliteJournal {
     ///
     /// Returns [`StorageError`] if the database cannot be created or migrated.
     pub fn open_in_memory() -> Result<Self, StorageError> {
-        Self::from_connection(Connection::open_in_memory()?)
-    }
-
-    fn from_connection(mut conn: Connection) -> Result<Self, StorageError> {
-        configure(&conn)?;
-        migrate(&mut conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: connection::open_in_memory()?,
+        })
     }
 
     /// The schema version currently applied to this database.
@@ -58,11 +55,7 @@ impl SqliteJournal {
     ///
     /// Returns [`StorageError`] if the migration table cannot be read.
     pub fn schema_version(&self) -> Result<i64, StorageError> {
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-            [],
-            |row| row.get(0),
-        )?)
+        connection::schema_version(&self.conn)
     }
 
     fn insert_all(&mut self, reads: &[RawRead]) -> Result<Vec<StoredRawRead>, StorageError> {
@@ -123,73 +116,6 @@ impl RawReadJournal for SqliteJournal {
             .map_err(StorageError::from)?;
         Ok(u64::try_from(count).unwrap_or(0))
     }
-}
-
-fn configure(conn: &Connection) -> Result<(), StorageError> {
-    conn.busy_timeout(StdDuration::from_secs(5))?;
-
-    // WAL so exports and `reads tail` never block the writer. An in-memory database
-    // reports "memory" instead and that is fine — nothing durable is expected of it.
-    //
-    // Read the current mode first and only set it if it needs setting. `PRAGMA
-    // journal_mode = WAL` takes an exclusive lock, and — unlike almost everything else in
-    // SQLite — it does *not* invoke the busy handler, so `busy_timeout` above does not
-    // cover it. Setting it unconditionally therefore makes opening a second connection
-    // fail intermittently while a write is in flight, which is precisely the moment an
-    // operator runs `reads tail` to check the timer is alive.
-    let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") && !mode.eq_ignore_ascii_case("memory") {
-        let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-    }
-    // FULL, not NORMAL: an acknowledged read must survive an unannounced power cut. This
-    // costs write latency and SD card wear, and both are the correct trade here.
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(())
-}
-
-fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
-    let has_migrations_table = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
-            [],
-            |_| Ok(true),
-        )
-        .optional()?
-        .unwrap_or(false);
-
-    let current: i64 = if has_migrations_table {
-        conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-            [],
-            |row| row.get(0),
-        )?
-    } else {
-        0
-    };
-
-    if current > SCHEMA_VERSION {
-        // Refusing to run beats silently misreading a schema we do not understand.
-        return Err(StorageError::SchemaTooNew {
-            found: current,
-            supported: SCHEMA_VERSION,
-        });
-    }
-
-    for migration in MIGRATIONS.iter().filter(|m| m.version > current) {
-        let tx = conn.transaction()?;
-        tx.execute_batch(migration.sql)?;
-        tx.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at_us) VALUES (?1, ?2, ?3)",
-            params![
-                migration.version,
-                migration.name,
-                to_micros(OffsetDateTime::now_utc())?
-            ],
-        )?;
-        tx.commit()?;
-    }
-    Ok(())
 }
 
 fn insert_one(
@@ -378,23 +304,8 @@ fn fallback_from_str(text: &str) -> Result<FallbackReason, StorageError> {
     }
 }
 
-/// Microseconds since the Unix epoch. Integers sort correctly, survive round-tripping
-/// exactly, and match LLRP's native resolution.
-fn to_micros(value: OffsetDateTime) -> Result<i64, StorageError> {
-    // `div_euclid` rather than `/` so pre-epoch instants floor rather than truncate
-    // toward zero. Not expected in a race, but silent asymmetry around a boundary is
-    // exactly the kind of thing that surfaces once and is never explained.
-    i64::try_from(value.unix_timestamp_nanos().div_euclid(1_000))
-        .map_err(|_| StorageError::TimestampOutOfRange)
-}
-
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64, StorageError> {
     i64::try_from(value).map_err(|_| StorageError::Decode(format!("{field} exceeds i64 range")))
-}
-
-fn from_micros(micros: i64) -> Result<OffsetDateTime, StorageError> {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(micros) * 1_000)
-        .map_err(|_| StorageError::TimestampOutOfRange)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -538,44 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn migrations_are_idempotent_across_reopens() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("event.db");
-
-        let first = SqliteJournal::open(&path).expect("open");
-        assert_eq!(first.schema_version().expect("version"), SCHEMA_VERSION);
-        drop(first);
-
-        let second = SqliteJournal::open(&path).expect("reopen");
-        assert_eq!(second.schema_version().expect("version"), SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn a_database_from_a_newer_build_is_refused_rather_than_misread() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("event.db");
-        {
-            let journal = SqliteJournal::open(&path).expect("open");
-            journal
-                .conn
-                .execute(
-                    "INSERT INTO schema_migrations (version, name, applied_at_us) VALUES (999, 'from the future', 0)",
-                    [],
-                )
-                .expect("insert future migration");
-        }
-
-        let error = SqliteJournal::open(&path).expect_err("must refuse a newer schema");
-        assert!(matches!(
-            error,
-            StorageError::SchemaTooNew { found: 999, .. }
-        ));
-    }
-
-    #[test]
-    fn timestamps_survive_microsecond_round_trips() {
-        let value = OffsetDateTime::UNIX_EPOCH + Duration::nanoseconds(1_700_000_000_123_456_000);
-        let micros = to_micros(value).expect("to micros");
-        assert_eq!(from_micros(micros).expect("from micros"), value);
+    fn the_journal_reports_the_schema_version_it_migrated_to() {
+        let journal = SqliteJournal::open_in_memory().expect("open");
+        assert_eq!(
+            journal.schema_version().expect("version"),
+            crate::SCHEMA_VERSION
+        );
     }
 }

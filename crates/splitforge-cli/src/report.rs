@@ -11,10 +11,11 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use splitforge_domain::{
-    AcceptedRead, AcceptedReadId, ChipId, Derivation, DeviceClockState, ParticipantId, RawReadId,
-    ReaderId, StoredRawRead, TimestampSource, TimingEventOrigin,
+    AcceptedRead, AcceptedReadId, Checkpoint, ChipId, Derivation, DeviceClockState, Event,
+    ParticipantId, Race, RaceConfig, RaceSession, RawReadId, Reader, ReaderId, StoredRawRead,
+    TimestampSource, TimingEventOrigin, TimingPolicy,
 };
-use splitforge_testkit::FixtureEvent;
+use splitforge_storage::{AuditEntry, ImportSummary};
 use time::OffsetDateTime;
 
 /// Result of creating or migrating a database.
@@ -26,6 +27,8 @@ pub struct InitReport {
     pub schema_version: i64,
     /// Reads already present. Non-zero means the database was not new.
     pub reads: u64,
+    /// Races already configured.
+    pub races: usize,
 }
 
 /// A raw read, as an operator wants to see it.
@@ -91,13 +94,275 @@ impl RawReadView {
     }
 }
 
-/// What the journal holds, without deriving anything from it.
+/// An event.
+#[derive(Debug, Serialize)]
+pub struct EventView {
+    /// Identifier.
+    pub id: String,
+    /// Name.
+    pub name: String,
+}
+
+impl EventView {
+    /// Builds a view.
+    #[must_use]
+    pub fn of(event: &Event) -> Self {
+        Self {
+            id: event.id.to_string(),
+            name: event.name.clone(),
+        }
+    }
+}
+
+/// A race.
+#[derive(Debug, Serialize)]
+pub struct RaceView {
+    /// Identifier.
+    pub id: String,
+    /// Name.
+    pub name: String,
+    /// The event it belongs to.
+    pub event: String,
+    /// Scheduled start.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub scheduled_start: Option<OffsetDateTime>,
+    /// Laps expected.
+    pub expected_laps: u16,
+}
+
+impl RaceView {
+    /// Builds a view.
+    #[must_use]
+    pub fn of(race: &Race) -> Self {
+        Self {
+            id: race.id.to_string(),
+            name: race.name.clone(),
+            event: race.event.to_string(),
+            scheduled_start: race.scheduled_start,
+            expected_laps: race.expected_laps,
+        }
+    }
+}
+
+/// A checkpoint.
+#[derive(Debug, Serialize)]
+pub struct CheckpointView {
+    /// Identifier.
+    pub id: String,
+    /// Name.
+    pub name: String,
+    /// Role on the course.
+    pub kind: String,
+    /// Position in the expected sequence.
+    pub sequence: u16,
+}
+
+impl CheckpointView {
+    /// Builds a view.
+    #[must_use]
+    pub fn of(checkpoint: &Checkpoint) -> Self {
+        Self {
+            id: checkpoint.id.to_string(),
+            name: checkpoint.name.clone(),
+            kind: format!("{:?}", checkpoint.kind).to_lowercase(),
+            sequence: checkpoint.sequence,
+        }
+    }
+}
+
+/// A participant, with the chips assigned to them.
+#[derive(Debug, Serialize)]
+pub struct ParticipantView {
+    /// Bib.
+    pub bib: String,
+    /// Name.
+    pub name: String,
+    /// Identifier.
+    pub id: ParticipantId,
+    /// Chips assigned to them, in window order.
+    pub chips: Vec<String>,
+}
+
+/// A chip assignment.
+#[derive(Debug, Serialize)]
+pub struct AssignmentView {
+    /// The chip.
+    pub chip: String,
+    /// The bib wearing it.
+    pub bib: Option<String>,
+    /// Start of validity.
+    #[serde(with = "time::serde::rfc3339")]
+    pub valid_from: OffsetDateTime,
+    /// End of validity, exclusive.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub valid_until: Option<OffsetDateTime>,
+}
+
+/// What an import changed.
+#[derive(Debug, Serialize)]
+pub struct ImportReport {
+    /// The file read.
+    pub file: String,
+    /// The race it applied to.
+    pub race: String,
+    /// Rows that did not exist before.
+    pub inserted: usize,
+    /// Rows that existed and were changed.
+    pub updated: usize,
+    /// Rows that existed and already matched.
+    pub unchanged: usize,
+    /// Rows considered.
+    pub total: usize,
+}
+
+impl ImportReport {
+    /// Builds a report.
+    #[must_use]
+    pub fn of(file: &str, race: &str, summary: ImportSummary) -> Self {
+        Self {
+            file: file.to_owned(),
+            race: race.to_owned(),
+            inserted: summary.inserted,
+            updated: summary.updated,
+            unchanged: summary.unchanged,
+            total: summary.total(),
+        }
+    }
+}
+
+/// A configured reader, with what the journal has seen from it.
+///
+/// Connection state is deliberately absent. No reader protocol exists until Milestone 3, so
+/// everything here is either configuration or an observation from the journal — never a
+/// claim about a link this build cannot open. See `docs/hardware-support.md`.
+#[derive(Debug, Serialize)]
+pub struct ReaderStatusView {
+    /// Operator-assigned identifier.
+    pub id: String,
+    /// Human-readable description.
+    pub label: String,
+    /// Configured address, if any. Unused until Milestone 3.
+    pub endpoint: Option<String>,
+    /// How far its clock is trusted.
+    pub timestamp_trust: String,
+    /// Checkpoints it covers, as `antenna → checkpoint`.
+    pub covers: Vec<String>,
+    /// Reads in the journal from this reader.
+    pub reads: usize,
+    /// Reads within the recent window.
+    pub reads_recent: usize,
+    /// The most recent read from it.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub last_read_at: Option<OffsetDateTime>,
+    /// How wide the recent window was.
+    pub window_secs: u64,
+}
+
+/// A recorded start or stop.
+#[derive(Debug, Serialize)]
+pub struct SessionView {
+    /// Sequence within the database.
+    pub seq: u64,
+    /// What happened.
+    pub action: String,
+    /// The instant recorded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// Who recorded it.
+    pub actor: String,
+    /// Why, when the operator said.
+    pub note: Option<String>,
+    /// When the row was written.
+    #[serde(with = "time::serde::rfc3339")]
+    pub recorded_at: OffsetDateTime,
+}
+
+impl SessionView {
+    /// Builds a view.
+    #[must_use]
+    pub fn of(session: &RaceSession) -> Self {
+        Self {
+            seq: session.seq,
+            action: session.action.as_str().to_owned(),
+            at: session.at,
+            actor: session.actor.clone(),
+            note: session.note.clone(),
+            recorded_at: session.recorded_at,
+        }
+    }
+}
+
+/// One audit trail entry.
+#[derive(Debug, Serialize)]
+pub struct AuditView {
+    /// Sequence within the database.
+    pub seq: u64,
+    /// When.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// Who.
+    pub actor: String,
+    /// What.
+    pub action: String,
+    /// What it applied to.
+    pub subject: Option<String>,
+    /// Structured detail, when the action recorded any.
+    pub detail: Option<serde_json::Value>,
+}
+
+impl AuditView {
+    /// Builds a view, parsing the stored detail when it is valid JSON.
+    #[must_use]
+    pub fn of(entry: &AuditEntry) -> Self {
+        Self {
+            seq: entry.seq,
+            at: entry.at,
+            actor: entry.actor.clone(),
+            action: entry.action.clone(),
+            subject: entry.subject.clone(),
+            detail: entry
+                .detail
+                .as_deref()
+                .and_then(|text| serde_json::from_str(text).ok()),
+        }
+    }
+}
+
+/// The timing policy in force.
+#[derive(Debug, Serialize)]
+pub struct PolicyView {
+    /// The race.
+    pub race: String,
+    /// The policy itself.
+    pub policy: TimingPolicy,
+    /// Per-checkpoint overrides, keyed by checkpoint name rather than id.
+    pub per_checkpoint_names: BTreeMap<String, String>,
+}
+
+/// What the database holds.
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
     /// Where the database lives.
     pub database: String,
     /// Schema version.
     pub schema_version: i64,
+    /// The race summarized, when one was resolved.
+    pub race: Option<String>,
+    /// Roster size.
+    pub participants: usize,
+    /// Checkpoints configured.
+    pub checkpoints: usize,
+    /// Chip assignments configured.
+    pub chip_assignments: usize,
+    /// Readers configured.
+    pub readers: usize,
+    /// Antenna mappings configured.
+    pub antenna_mappings: usize,
+    /// The gun time in force, recorded or scheduled.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub gun_time: Option<OffsetDateTime>,
+    /// Whether the race has been started and not since stopped.
+    pub running: bool,
     /// Reads in the journal.
     pub raw_reads: usize,
     /// Earliest authoritative timestamp.
@@ -113,8 +378,56 @@ pub struct StatusReport {
     pub untrusted_clock_reads: usize,
     /// Reads timed by this device rather than by the reader.
     pub device_timed_reads: usize,
-    /// Which fixture this database was populated from, when the caller said.
-    pub fixture: Option<String>,
+}
+
+/// One thing `doctor` found.
+#[derive(Debug, Serialize)]
+pub struct Finding {
+    /// How much it matters: `error` or `warning`.
+    pub severity: String,
+    /// A dotted machine-readable name.
+    pub check: String,
+    /// What is wrong, in the operator's terms.
+    pub detail: String,
+}
+
+impl Finding {
+    /// Something that will produce wrong results or lose data.
+    #[must_use]
+    pub fn error(check: &str, detail: impl Into<String>) -> Self {
+        Self {
+            severity: "error".to_owned(),
+            check: check.to_owned(),
+            detail: detail.into(),
+        }
+    }
+
+    /// Something worth knowing before the gun.
+    #[must_use]
+    pub fn warning(check: &str, detail: impl Into<String>) -> Self {
+        Self {
+            severity: "warning".to_owned(),
+            check: check.to_owned(),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// What `doctor` concluded.
+#[derive(Debug, Serialize)]
+pub struct DoctorReport {
+    /// Where the database lives.
+    pub database: String,
+    /// Schema version.
+    pub schema_version: i64,
+    /// Checks that ran.
+    pub checks_run: usize,
+    /// Problems that will produce wrong results or lose data.
+    pub errors: usize,
+    /// Problems worth knowing before the gun.
+    pub warnings: usize,
+    /// The findings themselves.
+    pub findings: Vec<Finding>,
 }
 
 /// A crossing, joined against the roster.
@@ -151,8 +464,8 @@ pub struct AcceptedReadView {
 /// Everything derivation concluded, with the counts worth checking.
 #[derive(Debug, Serialize)]
 pub struct DerivationReport {
-    /// Which fixture supplied the roster and policy.
-    pub fixture: String,
+    /// Which race supplied the roster and policy.
+    pub race: String,
     /// Reads in the journal.
     pub raw_reads: usize,
     /// Crossings.
@@ -170,9 +483,9 @@ pub struct DerivationReport {
 }
 
 impl DerivationReport {
-    /// Joins a derivation against the fixture that produced it.
+    /// Joins a derivation against the configuration that produced it.
     #[must_use]
-    pub fn build(fixture: &FixtureEvent, raw_reads: usize, derivation: &Derivation) -> Self {
+    pub fn build(config: &RaceConfig, raw_reads: usize, derivation: &Derivation) -> Self {
         let laps: BTreeMap<AcceptedReadId, u16> = derivation
             .timing_events
             .iter()
@@ -192,11 +505,11 @@ impl DerivationReport {
         let accepted_reads: Vec<AcceptedReadView> = derivation
             .accepted
             .iter()
-            .map(|crossing| view(fixture, crossing, laps.get(&crossing.id).copied()))
+            .map(|crossing| view(config, crossing, laps.get(&crossing.id).copied()))
             .collect();
 
         Self {
-            fixture: fixture.slug.to_owned(),
+            race: config.race.name.clone(),
             raw_reads,
             accepted: derivation.accepted.len(),
             rejected: derivation.rejected.len(),
@@ -212,19 +525,14 @@ impl DerivationReport {
 }
 
 /// Joins one crossing against the roster and checkpoint list.
-fn view(fixture: &FixtureEvent, crossing: &AcceptedRead, lap: Option<u16>) -> AcceptedReadView {
-    let checkpoint = fixture
-        .checkpoints
-        .iter()
-        .find(|checkpoint| checkpoint.id == crossing.checkpoint)
+fn view(config: &RaceConfig, crossing: &AcceptedRead, lap: Option<u16>) -> AcceptedReadView {
+    let checkpoint = config
+        .checkpoint_by_id(crossing.checkpoint)
         .map_or_else(|| crossing.checkpoint.to_string(), |c| c.name.clone());
 
-    let participant = crossing.participant.and_then(|id| {
-        fixture
-            .participants
-            .iter()
-            .find(|participant| participant.id == id)
-    });
+    let participant = crossing
+        .participant
+        .and_then(|id| config.participant_by_id(id));
 
     AcceptedReadView {
         id: crossing.id,
@@ -244,13 +552,15 @@ fn view(fixture: &FixtureEvent, crossing: &AcceptedRead, lap: Option<u16>) -> Ac
 /// What a simulated run did.
 #[derive(Debug, Serialize)]
 pub struct SimulationReport {
-    /// Which fixture ran.
-    pub fixture: String,
+    /// Which crossing plan ran.
+    pub scenario: String,
+    /// Which race the reads belong to.
+    pub race: String,
     /// The reader it ran on.
     pub reader: ReaderId,
     /// The seed. Replaying with the same seed replays the same race.
     pub seed: u64,
-    /// Crossings the fixture planned.
+    /// Crossings the plan contained.
     pub planned_crossings: usize,
     /// Reads the simulator was going to emit.
     pub reads_scripted: usize,
@@ -270,26 +580,79 @@ pub struct SimulationReport {
     pub last_seq: Option<u64>,
 }
 
+/// Builds a reader status view.
+#[must_use]
+pub fn reader_status(
+    reader: &Reader,
+    config: &RaceConfig,
+    reads: &[StoredRawRead],
+    window_secs: u64,
+) -> ReaderStatusView {
+    let mine: Vec<&StoredRawRead> = reads
+        .iter()
+        .filter(|stored| stored.read.source == reader.id)
+        .collect();
+
+    let last_read_at = mine
+        .last()
+        .map(|stored| stored.read.authoritative_timestamp());
+    let cutoff = last_read_at
+        .map(|last| last - time::Duration::seconds(i64::try_from(window_secs).unwrap_or(i64::MAX)));
+
+    let covers: Vec<String> = config
+        .antennas
+        .entries()
+        .filter(|(mapped, _, _)| **mapped == reader.id)
+        .map(|(_, antenna, checkpoint)| {
+            let name = config
+                .checkpoint_by_id(checkpoint)
+                .map_or_else(|| checkpoint.to_string(), |c| c.name.clone());
+            match antenna {
+                Some(antenna) => format!("antenna {antenna} → {name}"),
+                None => format!("all antennas → {name}"),
+            }
+        })
+        .collect();
+
+    ReaderStatusView {
+        id: reader.id.as_str().to_owned(),
+        label: reader.label.clone(),
+        endpoint: reader.endpoint.clone(),
+        timestamp_trust: reader.timestamp_trust.as_str().to_owned(),
+        covers,
+        reads: mine.len(),
+        reads_recent: cutoff.map_or(0, |cutoff| {
+            mine.iter()
+                .filter(|stored| stored.read.authoritative_timestamp() >= cutoff)
+                .count()
+        }),
+        last_read_at,
+        window_secs,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use splitforge_domain::{ChipId, RejectedRead, RejectionReason};
 
+    fn config() -> RaceConfig {
+        splitforge_testkit::five_k().config
+    }
+
     #[test]
     fn an_empty_derivation_reports_zeroes_rather_than_omitting_fields() {
-        let fixture = splitforge_testkit::five_k();
-        let report = DerivationReport::build(&fixture, 0, &Derivation::default());
+        let report = DerivationReport::build(&config(), 0, &Derivation::default());
         let json = serde_json::to_value(&report).expect("serialize");
 
         assert_eq!(json["accepted"], 0);
         assert_eq!(json["raw_reads"], 0);
-        assert_eq!(json["fixture"], "five-k");
+        assert_eq!(json["race"], "5K");
         assert!(json["rejections_by_reason"].is_object());
     }
 
     #[test]
     fn rejections_are_counted_by_rule() {
-        let fixture = splitforge_testkit::five_k();
         let derivation = Derivation {
             rejected: vec![
                 RejectedRead {
@@ -317,15 +680,15 @@ mod tests {
             ..Derivation::default()
         };
 
-        let report = DerivationReport::build(&fixture, 3, &derivation);
+        let report = DerivationReport::build(&config(), 3, &derivation);
         assert_eq!(report.rejections_by_reason["unmapped_reader"], 2);
         assert_eq!(report.rejections_by_reason["below_min_lap"], 1);
     }
 
     #[test]
     fn a_crossing_by_an_unrostered_chip_is_reported_as_such() {
-        let fixture = splitforge_testkit::five_k();
-        let finish = fixture.checkpoint("finish").expect("finish");
+        let config = config();
+        let finish = config.checkpoint("finish").expect("finish");
         let raw = RawReadId::new();
         let crossing = AcceptedRead::new(
             finish.id,
@@ -341,10 +704,41 @@ mod tests {
             ..Derivation::default()
         };
 
-        let report = DerivationReport::build(&fixture, 1, &derivation);
+        let report = DerivationReport::build(&config, 1, &derivation);
         assert_eq!(report.unassigned_crossings, 1);
         assert_eq!(report.accepted_reads[0].checkpoint, "finish");
         assert_eq!(report.accepted_reads[0].bib, None);
         assert_eq!(report.accepted_reads[0].lap, None);
+    }
+
+    #[test]
+    fn reader_status_reports_coverage_without_claiming_a_connection() {
+        let config = config();
+        let reader = config.readers.first().expect("a reader");
+        let view = reader_status(reader, &config, &[], 60);
+
+        assert_eq!(view.id, "mat");
+        assert_eq!(view.reads, 0);
+        assert_eq!(view.covers.len(), 2, "two antennas, two checkpoints");
+        assert!(view.covers.iter().any(|line| line.contains("finish")));
+
+        // The point of the assertion: there is no field that could carry a fabricated
+        // connection state, because none exists until Milestone 3.
+        let json = serde_json::to_value(&view).expect("serialize");
+        assert!(json.get("connected").is_none());
+        assert_eq!(json["endpoint"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn an_audit_detail_that_is_not_json_does_not_break_the_view() {
+        let entry = AuditEntry {
+            seq: 1,
+            at: splitforge_testkit::RACE_START,
+            actor: "phillip".to_owned(),
+            action: "roster.import".to_owned(),
+            subject: Some("5K".to_owned()),
+            detail: Some("not json at all".to_owned()),
+        };
+        assert_eq!(AuditView::of(&entry).detail, None);
     }
 }

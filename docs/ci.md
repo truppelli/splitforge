@@ -17,6 +17,41 @@ pull request and every push to `main`.
 
 Run all of them locally before pushing — the commands are identical.
 
+## Running the gates locally
+
+Six of the seven need nothing but a Rust toolchain. The **cross-build does not**: `rusqlite`
+is built with the `bundled` feature ([ADR-0009](adr/0009-rusqlite-for-sqlite-access.md)), so
+SQLite is compiled from C source for `aarch64`, which needs `gcc-aarch64-linux-gnu` and the
+matching target libc. On Debian or Ubuntu:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+sudo apt-get install -y gcc-aarch64-linux-gnu   # pulls libc6-dev-arm64-cross
+```
+
+Everywhere else — Windows, macOS — that toolchain is not installable, which would leave the
+gate most likely to catch a newly added dependency unrunnable by the developer who added it.
+So it ships as an image:
+
+```bash
+docker build -t splitforge-ci -f docker/Dockerfile .
+
+# every gate, in the same order, with the same commands
+docker run --rm -v "$PWD:/repo" -v splitforge-target:/build splitforge-ci
+
+# or just one
+docker run --rm -v "$PWD:/repo" -v splitforge-target:/build splitforge-ci cross
+```
+
+Gates: `fmt`, `clippy`, `test`, `msrv`, `audit`, `deny`, `cross`. The build directory is a
+named volume rather than the repo's `target/`, so a Linux build never fights the host's
+artifacts over the same directory.
+
+[`docker/ci.sh`](../docker/ci.sh) is a transcription of the workflow, not a paraphrase of
+it. If a command there stops matching [`ci.yml`](../.github/workflows/ci.yml), the script is
+the thing that is wrong — a local run that is "basically the same" is a local run that
+passes while CI fails.
+
 ## What CI does not prove
 
 The cross-build job is the one most likely to be misread. It proves the code **compiles**
@@ -41,6 +76,7 @@ Not built yet; listed so the gaps are visible rather than forgotten.
 | ~~Crate dependency rule enforcement~~ | ~~M1~~ | **Done.** `crates/splitforge-testkit/tests/dependency_rules.rs` makes `engine` → `llrp` a test failure. [ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md) |
 | **Fuzzing the LLRP decoder** | M3 | Highest-risk code in the project: binary parsing of untrusted network input |
 | ~~Durability tests in CI~~ | ~~M1~~ | **Done.** `crates/splitforge-cli/tests/restart.rs` kills the process mid-write, reopens, and asserts the journal is contiguous and re-derives identically |
+| ~~Operator interface tested through the binary~~ | ~~M2~~ | **Done.** `crates/splitforge-cli/tests/console.rs` configures a race entirely through subcommands and CSV imports, then times, derives, exports, and backs it up — reaching for no library type the operator does not have |
 | **Capture-driven reader tests** | M3 | Recorded protocol captures so reader behavior is testable without hardware |
 | **Hardware-in-the-loop validation** | M3 | A self-hosted Pi runner with a real reader attached. The only thing that validates the claims above |
 | **Release artifacts** | M5 | Signed `aarch64` binaries and a deployment bundle |

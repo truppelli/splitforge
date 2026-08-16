@@ -7,6 +7,7 @@ use time::OffsetDateTime;
 
 use crate::error::DomainError;
 use crate::ids::{Bib, CheckpointId, ChipId, EventId, ParticipantId, RaceId, ReaderId};
+use crate::policy::{TimestampTrust, TimingPolicy};
 
 /// A race day, which may contain several races.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +115,86 @@ impl ChipAssignment {
     }
 }
 
+/// A configured reader.
+///
+/// Identity is the operator-assigned [`ReaderId`], not a network address: a reader that
+/// picks up a new DHCP lease is still the same reader, and evidence already in the journal
+/// must not become ambiguous because the network changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reader {
+    /// Operator-assigned identifier, recorded on every read this reader produces.
+    pub id: ReaderId,
+    /// Human-readable description, for the operator rather than the machine.
+    pub label: String,
+    /// Where to reach it, once there is something to reach.
+    ///
+    /// Unused until Milestone 3 — no reader protocol exists yet, and a stored address that
+    /// nothing connects to would be a claim this project has not earned.
+    pub endpoint: Option<String>,
+    /// How far this reader's own clock is trusted.
+    pub timestamp_trust: TimestampTrust,
+}
+
+/// What an operator did to a race clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    /// The gun went off.
+    Start,
+    /// The race was closed.
+    Stop,
+}
+
+impl SessionAction {
+    /// Parses an operator-supplied name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the accepted values if the input is not one of them.
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "start" => Ok(Self::Start),
+            "stop" => Ok(Self::Stop),
+            _ => Err("expected one of: start, stop"),
+        }
+    }
+
+    /// The stable name used in storage and JSON output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// A recorded start or stop, and who recorded it.
+///
+/// Append-only, because an operator typed it — the same status
+/// `docs/timing-model.md` § 6 gives a manual entry. A recorded start is an *input to
+/// scoring*, never a filter on evidence: reads are journalled whether or not anybody
+/// remembered to type `race start`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaceSession {
+    /// Monotonic sequence within the database.
+    pub seq: u64,
+    /// The race.
+    pub race: RaceId,
+    /// What happened.
+    pub action: SessionAction,
+    /// The instant being recorded — the gun time for a start.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// Who recorded it.
+    pub actor: String,
+    /// Why, when the operator said.
+    pub note: Option<String>,
+    /// When the row was written. Differs from `at` when a start is backdated.
+    #[serde(with = "time::serde::rfc3339")]
+    pub recorded_at: OffsetDateTime,
+}
+
 /// Time-aware chip to participant resolution.
 #[derive(Debug, Clone, Default)]
 pub struct ChipRegistry {
@@ -218,6 +299,130 @@ impl AntennaMap {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.exact.is_empty() && self.wildcard.is_empty()
+    }
+
+    /// Every mapping, as `(reader, antenna, checkpoint)`.
+    ///
+    /// `antenna` is `None` for a reader-wide wildcard. Wildcards come first so the output
+    /// reads the way the map resolves: the general rule, then the exceptions to it.
+    pub fn entries(&self) -> impl Iterator<Item = (&ReaderId, Option<u16>, CheckpointId)> {
+        let wildcards = self
+            .wildcard
+            .iter()
+            .map(|(reader, checkpoint)| (reader, None, *checkpoint));
+        let exact = self
+            .exact
+            .iter()
+            .map(|((reader, antenna), checkpoint)| (reader, Some(*antenna), *checkpoint));
+        wildcards.chain(exact)
+    }
+
+    /// How many mappings the map holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.exact.len() + self.wildcard.len()
+    }
+}
+
+/// Everything needed to interpret one race's reads.
+///
+/// The complete configuration of a race, assembled in one place: who is entered, what they
+/// are wearing, which antenna covers which checkpoint, and the rules for turning reads into
+/// crossings. Derivation is a pure function of this plus the journal.
+///
+/// Both sides of the system build one. `splitforge-storage` loads it from the database;
+/// `splitforge-testkit` constructs one in code for fixtures. Having a single type means the
+/// fixtures exercise the same shape the real loader produces, rather than a parallel one
+/// that can drift.
+#[derive(Debug, Clone)]
+pub struct RaceConfig {
+    /// The race day.
+    pub event: Event,
+    /// The race.
+    pub race: Race,
+    /// Checkpoints, in sequence order.
+    pub checkpoints: Vec<Checkpoint>,
+    /// The roster.
+    pub participants: Vec<Participant>,
+    /// Time-bounded chip assignments.
+    pub assignments: Vec<ChipAssignment>,
+    /// Configured readers.
+    pub readers: Vec<Reader>,
+    /// Reader and antenna to checkpoint mapping, built from `readers`.
+    pub antennas: AntennaMap,
+    /// The rules in force.
+    pub policy: TimingPolicy,
+    /// Recorded starts and stops, oldest first.
+    pub sessions: Vec<RaceSession>,
+}
+
+impl RaceConfig {
+    /// Builds the chip registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::OverlappingChipAssignment`] if one chip is assigned to two
+    /// participants at the same instant.
+    pub fn chips(&self) -> Result<ChipRegistry, DomainError> {
+        ChipRegistry::from_assignments(self.assignments.iter().cloned())
+    }
+
+    /// Looks up a checkpoint by name.
+    #[must_use]
+    pub fn checkpoint(&self, name: &str) -> Option<&Checkpoint> {
+        self.checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.name == name)
+    }
+
+    /// Looks up a checkpoint by identifier.
+    #[must_use]
+    pub fn checkpoint_by_id(&self, id: CheckpointId) -> Option<&Checkpoint> {
+        self.checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.id == id)
+    }
+
+    /// Looks up a participant by bib.
+    #[must_use]
+    pub fn participant(&self, bib: &str) -> Option<&Participant> {
+        self.participants
+            .iter()
+            .find(|participant| participant.bib.as_str() == bib)
+    }
+
+    /// Looks up a participant by identifier.
+    #[must_use]
+    pub fn participant_by_id(&self, id: ParticipantId) -> Option<&Participant> {
+        self.participants
+            .iter()
+            .find(|participant| participant.id == id)
+    }
+
+    /// The gun time in force: the most recently recorded start.
+    ///
+    /// The *last* start rather than the first, because a restarted race is a real thing —
+    /// a false start, a delayed wave, a mat that was not live when the gun went. Earlier
+    /// starts are not erased; they stay in [`RaceConfig::sessions`] and in the audit trail,
+    /// which is what lets "why did the times move?" be answered.
+    ///
+    /// Falls back to [`Race::scheduled_start`] when nothing has been recorded, so a race
+    /// configured but never formally started is still scorable.
+    #[must_use]
+    pub fn gun_time(&self) -> Option<OffsetDateTime> {
+        self.sessions
+            .iter()
+            .rfind(|session| session.action == SessionAction::Start)
+            .map(|session| session.at)
+            .or(self.race.scheduled_start)
+    }
+
+    /// Whether the race has been started and not since stopped.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.sessions
+            .last()
+            .is_some_and(|session| session.action == SessionAction::Start)
     }
 }
 

@@ -281,6 +281,19 @@ result_revisions       result_entries
 audit_log              outbox_messages        schema_migrations
 ```
 
+As of Milestone 2 the following exist: `events`, `races`, `checkpoints`, `participants`,
+`chip_assignments`, `readers`, `reader_antennas`, `timing_policies`, `race_sessions`,
+`raw_reads`, `audit_log`, `schema_migrations`. The rest arrive with the milestone that
+needs them.
+
+`race_sessions` is not in the original list above. It records when an operator declared the
+gun — append-only, because they typed it — and is the input gun-time scoring measures from.
+See [ADR-0015](adr/0015-race-start-records-the-gun.md).
+
+Which of these may be rewritten, and which may not, is
+[ADR-0014](adr/0014-mutable-configuration-immutable-evidence.md): configuration is mutable,
+evidence and `audit_log` are append-only and enforced by triggers.
+
 Operational requirements on the schema:
 
 - Backups are one CLI command, plus an automatic pre-race snapshot

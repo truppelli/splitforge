@@ -9,9 +9,17 @@
 //! If the process dies between the append and whatever comes next, the read survives and
 //! derivation recomputes it on restart. Reordered, a crash could produce a timing event
 //! with no evidence behind it — see `docs/architecture.md` § 3.
+//!
+//! ## Where the pieces come from now
+//!
+//! The *crossing plan* — who crosses which antenna when — comes from a fixture, because
+//! inventing a plausible race is what the testkit is for. Everything else (the reader, its
+//! trust setting, which antenna covers which checkpoint) comes from the **database**, which
+//! is the Milestone 2 change: the simulator now runs against configuration an operator
+//! could have typed, rather than configuration compiled into the binary.
 
-use anyhow::{Context, Result};
-use splitforge_domain::{DeviceClockState, RawReadJournal};
+use anyhow::{Context, Result, anyhow, bail};
+use splitforge_domain::{DeviceClockState, RaceConfig, RawReadJournal};
 use splitforge_reader::{Ingest, ReaderProvider};
 use splitforge_simulator::{BurstProfile, Scenario, SimulatedReader, Transport, detection_time};
 use splitforge_storage::SqliteJournal;
@@ -27,23 +35,55 @@ use crate::report::SimulationReport;
 /// `splitforge-reader`, not by pretending the fixture hardware is broken.
 const SIMULATED_CLOCK_STATE: DeviceClockState = DeviceClockState::GpsLocked;
 
-/// Runs a fixture event into a journal.
+/// Runs a scenario's crossings into a journal, against configuration from the database.
 ///
 /// # Errors
 ///
-/// Returns an error if any read cannot be made durable. That is fatal on purpose: a timer
-/// that cannot persist evidence must stop and say so, not keep counting.
+/// Returns an error if the scenario is unknown, the race has no reader configured, or any
+/// read cannot be made durable. The last is fatal on purpose: a timer that cannot persist
+/// evidence must stop and say so, not keep counting.
 pub async fn into_journal(
-    fixture: &FixtureEvent,
+    config: &RaceConfig,
+    scenario_slug: &str,
     journal: &mut SqliteJournal,
     seed: u64,
     speed: Speed,
 ) -> Result<SimulationReport> {
+    let fixture = FixtureEvent::by_slug(scenario_slug).ok_or_else(|| {
+        anyhow!(
+            "unknown scenario {scenario_slug:?}; known scenarios: {}",
+            FixtureEvent::slugs().join(", ")
+        )
+    })?;
+
     let reader_id = fixture
         .crossings
         .first()
         .map(|crossing| crossing.reader.clone())
-        .context("the fixture plans no crossings")?;
+        .context("the scenario plans no crossings")?;
+
+    // The scenario names a reader; the database has to agree it exists. Otherwise the run
+    // would write reads that derivation then rejects as unmapped, and the operator would be
+    // left comparing two counts with no explanation for the gap.
+    if !config.readers.iter().any(|reader| reader.id == reader_id) {
+        let known: Vec<&str> = config
+            .readers
+            .iter()
+            .map(|reader| reader.id.as_str())
+            .collect();
+        bail!(
+            "scenario {scenario_slug:?} emits from reader {:?}, which race {:?} has not \
+             configured. Configured readers: {}. Run `splitforge fixture load --fixture \
+             {scenario_slug}`, or add the reader with `splitforge reader add`.",
+            reader_id.as_str(),
+            config.race.name,
+            if known.is_empty() {
+                "none".to_owned()
+            } else {
+                known.join(", ")
+            }
+        );
+    }
 
     let mut scenario = Scenario::new(reader_id.clone(), BurstProfile::default(), seed);
     for crossing in &fixture.crossings {
@@ -53,7 +93,18 @@ pub async fn into_journal(
     let provider = SimulatedReader::new(&scenario, speed.into());
     let reads_scripted = provider.scripted_reads();
 
-    let ingest = Ingest::default();
+    // The trust setting is the operator's, read back from the database — the same value a
+    // real reader will be ingested under in Milestone 3.
+    let ingest = Ingest {
+        trust: config
+            .readers
+            .iter()
+            .find(|reader| reader.id == reader_id)
+            .map(|reader| reader.timestamp_trust)
+            .unwrap_or_default(),
+        ..Ingest::default()
+    };
+
     // Seeded from the scenario so that transport delay is part of the same reproducible
     // race. Offset so the two streams do not share a sequence of random values.
     let mut transport = Transport::new(seed ^ 0xA5A5_A5A5_A5A5_A5A5);
@@ -64,18 +115,15 @@ pub async fn into_journal(
     let mut first_seq = None;
     let mut last_seq = None;
 
+    let fallback = config.gun_time().unwrap_or(splitforge_testkit::RACE_START);
+
     while let Some(message) = receiver.recv().await {
         reads_received += 1;
 
         // A reader that supplies no timestamp still has to be given a receipt time. Using
-        // the previous receipt keeps the simulation reproducible; the real device clock
+        // the race's own start keeps the simulation reproducible; the real device clock
         // takes over here in Milestone 3.
-        let sent_at = detection_time(&message).unwrap_or_else(|| {
-            fixture
-                .race
-                .scheduled_start
-                .unwrap_or(splitforge_testkit::RACE_START)
-        });
+        let sent_at = detection_time(&message).unwrap_or(fallback);
         let receipt = transport.receipt(sent_at);
 
         let read = ingest.normalize(
@@ -95,7 +143,8 @@ pub async fn into_journal(
     }
 
     Ok(SimulationReport {
-        fixture: fixture.slug.to_owned(),
+        scenario: scenario_slug.to_owned(),
+        race: config.race.name.clone(),
         reader: reader_id,
         seed,
         planned_crossings: fixture.crossings.len(),
