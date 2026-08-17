@@ -10,15 +10,17 @@ checkpoint on a Raspberry Pi.
 > ### Status: pre-alpha — simulated events only
 >
 > The data path works end to end **against a synthetic reader**: reads are journalled
-> durably, deduplicated into crossings, and emitted as JSON. **No RFID reader has been
-> tested, and there is no results or scoring layer yet.** Do not use SplitForge to time a
-> real event.
+> durably, deduplicated into crossings, scored into placements and statuses, and published
+> as immutable result revisions. **No RFID reader has ever been tested against SplitForge.**
+> Do not use it to time a real event.
 >
 > Milestones [0](docs/roadmap.md#milestone-0--project-charter),
-> [1](docs/roadmap.md#milestone-1--simulation-first-vertical-slice), and
-> [2](docs/roadmap.md#milestone-2--local-event-console) are complete.
+> [1](docs/roadmap.md#milestone-1--simulation-first-vertical-slice),
+> [2](docs/roadmap.md#milestone-2--local-event-console), and
+> [4](docs/roadmap.md#milestone-4--timing-and-results) are complete.
 > Milestone 3 is gated on physical hardware — see
-> [hardware support](docs/hardware-support.md).
+> [hardware support](docs/hardware-support.md) — and Milestone 4 was built ahead of it
+> rather than waiting.
 
 ## What SplitForge is
 
@@ -193,6 +195,41 @@ splitforge backup create snapshot.db            # safe mid-race; never overwrite
 splitforge audit                                # who changed what, and when
 ```
 
+### Score it, and correct it without lying about it
+
+Results are published as **immutable revisions**. A correction never edits one — it
+supersedes it, and both stay in the database.
+
+```bash
+splitforge policy set --start-mode chip          # or gun, the default
+splitforge results preview                       # rehearse the irreversible command
+splitforge results publish --status provisional --reason "provisional results"
+
+# The referee disqualifies the winner an hour later.
+splitforge results declare --bib 104 --status dq --reason "cut the course"
+splitforge results publish --status final --reason "bib 104 disqualified after review"
+
+splitforge results diff --from 1 --to 2
+splitforge export results --as csv --revision 1  # exactly as it was published
+```
+
+```json
+{"from":1,"to":2,"changed":11,"unchanged":1}
+  {"bib":"104","change":"status","status_from":"finished","status_to":"dq",
+   "reason":"cut the course"}
+  {"bib":"101","change":"placement","place_from":2,"place_to":1}
+```
+
+Ten runners move up a place, and revision 1 still says bib 104 won — in the words it was
+published in, because it *was* published and somebody screenshotted it. A disqualified
+runner keeps their measured time and takes no place; the clock did not lie about when they
+crossed, the decision was about whether it counted.
+
+Only an operator can disqualify: no arrangement of chip reads implies "cut the course", so a
+DQ enters as a declaration recording who decided it and why
+([ADR-0016](docs/adr/0016-status-declarations-are-evidence.md)). Reversing one appends
+another rather than deleting the first.
+
 `--race` is optional whenever only one race is configured. With several, leaving it off is
 an error that lists the candidates rather than picking one.
 
@@ -239,8 +276,8 @@ apps/
   splitforge-simulator   Synthetic readers and race scenarios
 ```
 
-`domain`, `reader`, `storage`, `engine`, `simulator`, `testkit`, and `cli` have content.
-`llrp`, `results`, `export`, `api`, `sync`, and `edge` are still empty — see the
+`domain`, `reader`, `storage`, `engine`, `results`, `export`, `simulator`, `testkit`, and
+`cli` have content. `llrp`, `api`, `sync`, and `edge` are still empty — see the
 [roadmap](docs/roadmap.md) for when each lands.
 
 The dependency rules between them come from

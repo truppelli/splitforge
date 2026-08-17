@@ -24,7 +24,7 @@ use crate::ids::{
 ///
 /// Parts are joined with an ASCII unit separator, which cannot occur in a UUID, an EPC, or
 /// a decimal number — so distinct inputs cannot collide by concatenation.
-fn derived_uuid(kind: &str, parts: &[&str]) -> Uuid {
+pub(crate) fn derived_uuid(kind: &str, parts: &[&str]) -> Uuid {
     let mut name = String::with_capacity(64);
     name.push_str(kind);
     for part in parts {

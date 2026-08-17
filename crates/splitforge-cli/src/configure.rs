@@ -462,23 +462,71 @@ pub(crate) fn parse_selection_rule(value: &str) -> Result<SelectionRule> {
     }
 }
 
+/// What `policy set` was asked to change. Every field is optional; omitted ones are left
+/// exactly as they were, so setting one rule never silently resets another.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PolicyChange<'a> {
+    /// Apply to one checkpoint instead of the whole race.
+    pub(crate) checkpoint: Option<&'a str>,
+    /// New deduplication window.
+    pub(crate) min_interval_ms: Option<u64>,
+    /// New minimum lap time. Race-wide only.
+    pub(crate) min_lap_ms: Option<u64>,
+    /// New selection rule.
+    pub(crate) selection_rule: Option<&'a str>,
+    /// New start mode. Race-wide only.
+    pub(crate) start_mode: Option<&'a str>,
+}
+
 /// Applies a policy change, race-wide or to one checkpoint.
 pub(crate) fn set_policy(
     store: &mut ConfigStore,
     actor: &str,
     race: &Race,
-    checkpoint: Option<&str>,
-    min_interval_ms: Option<u64>,
-    min_lap_ms: Option<u64>,
-    selection_rule: Option<&str>,
+    change: &PolicyChange<'_>,
 ) -> Result<TimingPolicy> {
-    if min_interval_ms.is_none() && min_lap_ms.is_none() && selection_rule.is_none() {
+    let PolicyChange {
+        checkpoint,
+        min_interval_ms,
+        min_lap_ms,
+        selection_rule,
+        start_mode,
+    } = *change;
+
+    if min_interval_ms.is_none()
+        && min_lap_ms.is_none()
+        && selection_rule.is_none()
+        && start_mode.is_none()
+    {
         bail!(
-            "nothing to set; pass at least one of --min-interval-ms, --min-lap-ms, or \
-             --selection-rule"
+            "nothing to set; pass at least one of --min-interval-ms, --min-lap-ms, \
+             --selection-rule, or --start-mode"
         );
     }
     let rule = selection_rule.map(parse_selection_rule).transpose()?;
+    let mode = start_mode
+        .map(crate::results::parse_start_mode)
+        .transpose()?;
+
+    if mode.is_some() && checkpoint.is_some() {
+        bail!(
+            "--start-mode is race-wide; placement is measured from one clock for everyone, \
+             not per checkpoint"
+        );
+    }
+    if let Some(mode) = mode {
+        store.set_start_mode(race.id, mode)?;
+    }
+
+    // Only the start mode was requested, so leave the dedup policy alone rather than
+    // rewriting it with itself.
+    if min_interval_ms.is_none() && min_lap_ms.is_none() && selection_rule.is_none() {
+        let policy = store.policy(race.id)?;
+        let detail = serde_json::to_string(&policy).unwrap_or_default();
+        store.record_audit(actor, "policy.set", Some(&race.name), Some(&detail))?;
+        return Ok(policy);
+    }
+
     let mut policy = store.policy(race.id)?;
 
     match checkpoint {

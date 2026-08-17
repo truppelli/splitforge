@@ -26,7 +26,9 @@ serde.workspace = true
 serde_json.workspace = true
 splitforge-domain.workspace = true
 splitforge-engine.workspace = true
+splitforge-export.workspace = true
 splitforge-reader.workspace = true
+splitforge-results.workspace = true
 splitforge-simulator.workspace = true
 splitforge-storage.workspace = true
 # Only for `splitforge fixture load`, which writes a built-in fixture's configuration into

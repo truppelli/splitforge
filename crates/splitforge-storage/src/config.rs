@@ -26,7 +26,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use splitforge_domain::{
     AntennaMap, Bib, Checkpoint, CheckpointId, CheckpointKind, ChipAssignment, ChipId, Event,
     EventId, Participant, ParticipantId, Race, RaceConfig, RaceId, RaceSession, Reader, ReaderId,
-    SessionAction, TimestampTrust, TimingPolicy,
+    SessionAction, StartMode, TimestampTrust, TimingPolicy,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -690,6 +690,55 @@ impl ConfigStore {
         }
     }
 
+    /// Sets which clock a race's placement is measured from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the write fails.
+    pub fn set_start_mode(&mut self, race: RaceId, mode: StartMode) -> Result<(), StorageError> {
+        // The row may not exist yet: an operator can choose chip timing before touching any
+        // dedup setting. Insert the default policy alongside it rather than silently doing
+        // nothing.
+        let policy_json = serde_json::to_string(&TimingPolicy::default())
+            .map_err(|error| StorageError::Decode(format!("serializing timing policy: {error}")))?;
+        self.conn.execute(
+            "INSERT INTO timing_policies (race_id, policy_json, updated_at_us, start_mode)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (race_id) DO UPDATE SET
+                 start_mode = excluded.start_mode, updated_at_us = excluded.updated_at_us",
+            params![
+                race.to_string(),
+                policy_json,
+                to_micros(OffsetDateTime::now_utc())?,
+                mode.as_str(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Which clock a race's placement is measured from. Defaults to the gun.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the stored value is not a mode this build understands.
+    pub fn start_mode(&self, race: RaceId) -> Result<StartMode, StorageError> {
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT start_mode FROM timing_policies WHERE race_id = ?1",
+                [race.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match stored {
+            Some(value) => StartMode::parse(&value).map_err(|expected| {
+                StorageError::Decode(format!("start mode {value:?}: {expected}"))
+            }),
+            None => Ok(StartMode::default()),
+        }
+    }
+
     // ---- race sessions ----------------------------------------------------------
 
     /// Records a start or a stop. Append-only.
@@ -854,6 +903,7 @@ impl ConfigStore {
             readers: self.readers()?,
             antennas: self.antenna_map_for(race.id)?,
             policy: self.policy(race.id)?,
+            start_mode: self.start_mode(race.id)?,
             sessions: self.sessions(race.id)?,
             event,
             race,

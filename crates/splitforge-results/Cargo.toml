@@ -11,6 +11,12 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+splitforge-domain.workspace = true
+thiserror.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -41,6 +41,7 @@ mod cli;
 mod configure;
 mod operate;
 mod report;
+mod results;
 mod simulate;
 
 use std::path::Path;
@@ -48,12 +49,12 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use splitforge_domain::{RaceConfig, RawReadJournal, SessionAction};
 use splitforge_engine::{DerivationInput, derive};
-use splitforge_storage::{ConfigStore, SqliteJournal};
+use splitforge_storage::{ConfigStore, ResultStore, SqliteJournal};
 
 pub use cli::{
     BackupCommand, CheckpointCommand, ChipsCommand, Cli, Command, EventCommand, ExportCommand,
     ExportFormat, FixtureCommand, Format, PolicyCommand, RaceCommand, RaceRef, ReaderCommand,
-    RosterCommand, Speed,
+    ResultsCommand, RosterCommand, Speed,
 };
 pub use configure::load_fixture;
 pub use report::{
@@ -310,16 +311,20 @@ pub async fn run(cli: Cli) -> Result<()> {
                     min_interval_ms,
                     min_lap_ms,
                     selection_rule,
+                    start_mode,
                 } => {
                     let race = configure::resolve_race(&store, race.race.as_deref())?;
                     let policy = configure::set_policy(
                         &mut store,
                         &actor,
                         &race,
-                        checkpoint.as_deref(),
-                        min_interval_ms,
-                        min_lap_ms,
-                        selection_rule.as_deref(),
+                        &configure::PolicyChange {
+                            checkpoint: checkpoint.as_deref(),
+                            min_interval_ms,
+                            min_lap_ms,
+                            selection_rule: selection_rule.as_deref(),
+                            start_mode: start_mode.as_deref(),
+                        },
                     )?;
                     emit(&policy_view(&store, &race, policy)?, format)
                 }
@@ -376,6 +381,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             emit(&report, format)
         }
 
+        Command::Results(command) => run_results(&database, &actor, format, command),
+
         Command::Export(ExportCommand::Crossings {
             race,
             shape,
@@ -385,6 +392,25 @@ pub async fn run(cli: Cli) -> Result<()> {
             let config = load_config(&store, race.race.as_deref())?;
             let journal = open_journal(&database)?;
             operate::export_crossings(&config, &journal, shape, output.as_deref())?;
+            Ok(())
+        }
+
+        Command::Export(ExportCommand::Results {
+            race,
+            revision,
+            shape,
+            output,
+        }) => {
+            let store = open_store(&database)?;
+            let config = load_config(&store, race.race.as_deref())?;
+            let results = open_results(&database)?;
+            let revision = results::load_revision(&results, &config, revision)?;
+            let body = results::export(&revision, shape)?;
+            match output.as_deref() {
+                Some(path) => std::fs::write(path, &body)
+                    .with_context(|| format!("writing export to {}", path.display()))?,
+                None => println!("{body}"),
+            }
             Ok(())
         }
 
@@ -492,6 +518,138 @@ fn open_store(database: &Path) -> Result<ConfigStore> {
         .with_context(|| format!("opening configuration at {}", database.display()))
 }
 
+/// Opens the results store against the same file.
+fn open_results(database: &Path) -> Result<ResultStore> {
+    ResultStore::open(database)
+        .with_context(|| format!("opening results at {}", database.display()))
+}
+
+/// Dispatches the `results` subtree.
+///
+/// Split out of [`run`] rather than inlined because that match arm is already long enough
+/// to need `#[allow(clippy::too_many_lines)]`, and adding seven more branches to it would
+/// make the one function nobody wants to read even harder to read.
+fn run_results(
+    database: &Path,
+    actor: &str,
+    format: Format,
+    command: ResultsCommand,
+) -> Result<()> {
+    let store = open_store(database)?;
+
+    match command {
+        ResultsCommand::Preview { race } => {
+            let config = load_config(&store, race.race.as_deref())?;
+            let journal = open_journal(database)?;
+            let results = open_results(database)?;
+            emit(&results::preview(&config, &journal, &results)?, format)
+        }
+
+        ResultsCommand::Publish {
+            race,
+            status,
+            reason,
+            allow_unchanged,
+        } => {
+            let config = load_config(&store, race.race.as_deref())?;
+            let journal = open_journal(database)?;
+            let mut results = open_results(database)?;
+            let status = results::parse_revision_status(&status)?;
+            let view = results::publish(
+                &config,
+                &journal,
+                &mut results,
+                actor,
+                status,
+                &reason,
+                allow_unchanged,
+            )?;
+
+            // The audit trail has to explain what changed between revisions, so the digest
+            // and the counts go in the row, not just the revision number.
+            let mut audit = open_store(database)?;
+            audit.record_audit(
+                actor,
+                "results.publish",
+                Some(&config.race.name),
+                Some(&serde_json::to_string(&view).unwrap_or_default()),
+            )?;
+            emit(&view, format)
+        }
+
+        ResultsCommand::Show { race, revision } => {
+            let config = load_config(&store, race.race.as_deref())?;
+            let results = open_results(database)?;
+            let revision = results::load_revision(&results, &config, revision)?;
+            emit(
+                &results::RevisionView::build(&revision, &config.race.name),
+                format,
+            )
+        }
+
+        ResultsCommand::List { race } => {
+            let config = load_config(&store, race.race.as_deref())?;
+            let results = open_results(database)?;
+            emit(&results::list(&results, &config)?, format)
+        }
+
+        ResultsCommand::Diff { race, from, to } => {
+            let config = load_config(&store, race.race.as_deref())?;
+            let results = open_results(database)?;
+            emit(&results::diff(&results, &config, from, to)?, format)
+        }
+
+        ResultsCommand::Declare {
+            race,
+            bib,
+            status,
+            reason,
+        } => {
+            let config = load_config(&store, race.race.as_deref())?;
+            let mut results = open_results(database)?;
+            let status = results::parse_status(&status)?;
+            let declaration =
+                results::declare(&mut results, &config, actor, &bib, status, &reason)?;
+
+            let mut audit = open_store(database)?;
+            audit.record_audit(
+                actor,
+                "results.declare",
+                Some(&config.race.name),
+                Some(
+                    &serde_json::json!({
+                        "bib": bib,
+                        "status": status.as_str(),
+                        "reason": reason,
+                        "seq": declaration.seq,
+                    })
+                    .to_string(),
+                ),
+            )?;
+            emit(
+                &serde_json::json!({
+                    "seq": declaration.seq,
+                    "bib": bib,
+                    "status": status.as_str(),
+                    "reason": reason,
+                    "actor": declaration.actor,
+                    "declared_at": declaration
+                        .declared_at
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                }),
+                format,
+            )
+        }
+
+        ResultsCommand::Declarations { race } => {
+            let config = load_config(&store, race.race.as_deref())?;
+            let results = open_results(database)?;
+            emit(&results::declarations(&results, &config)?, format)
+        }
+    }
+}
+
 /// Resolves a race and loads its complete configuration.
 fn load_config(store: &ConfigStore, selector: Option<&str>) -> Result<RaceConfig> {
     let race = configure::resolve_race(store, selector)?;
@@ -522,6 +680,7 @@ fn load_only_race_config(store: &ConfigStore) -> Result<RaceConfig> {
             readers: store.readers()?,
             antennas: store.antenna_map()?,
             policy: splitforge_domain::TimingPolicy::default(),
+            start_mode: splitforge_domain::StartMode::default(),
             sessions: Vec::new(),
         }),
     }
@@ -581,6 +740,7 @@ fn policy_view(
     Ok(PolicyView {
         race: race.name.clone(),
         policy,
+        start_mode: store.start_mode(race.id)?.as_str(),
         per_checkpoint_names,
     })
 }

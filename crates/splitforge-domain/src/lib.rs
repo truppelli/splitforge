@@ -37,6 +37,7 @@ mod ids;
 mod policy;
 mod ports;
 mod read;
+mod result;
 
 pub use derived::{
     AcceptedRead, Derivation, RejectedRead, RejectionReason, TimingEvent, TimingEventOrigin,
@@ -48,10 +49,14 @@ pub use entity::{
 pub use error::DomainError;
 pub use ids::{
     AcceptedReadId, Bib, CheckpointId, ChipId, EventId, ParticipantId, RaceId, RawReadId, ReaderId,
-    SPLITFORGE_NAMESPACE, TimingEventId,
+    ResultRevisionId, SPLITFORGE_NAMESPACE, StatusDeclarationId, TimingEventId,
 };
 pub use policy::{
     CheckpointPolicy, DEFAULT_MIN_INTERVAL_MS, SelectionRule, TimestampTrust, TimingPolicy,
 };
 pub use ports::{JournalError, RawReadJournal};
 pub use read::{DeviceClockState, FallbackReason, RawRead, StoredRawRead, TimestampSource};
+pub use result::{
+    ResultEntry, ResultFlag, ResultRevision, ResultStatus, RevisionStatus, ScoringPolicy,
+    StartMode, StatusDeclaration, StatusSource,
+};

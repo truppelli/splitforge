@@ -23,6 +23,8 @@ this?" two years from now, the ADR is the answer.
 | [0013](0013-msrv-policy.md) | The MSRV is a tested floor, not a compatibility promise | Accepted |
 | [0014](0014-mutable-configuration-immutable-evidence.md) | Configuration is mutable; evidence and the audit trail are not | Accepted |
 | [0015](0015-race-start-records-the-gun.md) | `race start` records the gun; it does not gate ingestion | Accepted |
+| [0016](0016-status-declarations-are-evidence.md) | A disqualification is evidence, not a column | Accepted |
+| [0017](0017-placement-semantics.md) | What takes a place, and what a place is worth | Accepted |
 
 ## Process
 

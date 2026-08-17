@@ -8,16 +8,28 @@ not done because the code exists; it is done because the exit criterion has been
 flowchart LR
     M0["<b>M0</b><br/>Charter"] --> M1["<b>M1</b><br/>Simulation<br/>vertical slice"]
     M1 --> M2["<b>M2</b><br/>Operator CLI"]
-    M2 --> M3["<b>M3</b><br/>One physical<br/>reader"]
-    M3 --> M4["<b>M4</b><br/>Timing &<br/>results"]
+    M2 --> M4["<b>M4</b><br/>Timing &<br/>results"]
+    M2 -.-> M3["<b>M3</b><br/>One physical<br/>reader"]
     M4 --> M5["<b>M5</b><br/>Field<br/>reliability"]
+    M3 --> M5
     M5 --> M6["<b>M6</b><br/>Integrations"]
 
     M3 -.->|"gate:<br/>real hardware<br/>in hand"| M3
     style M0 fill:#2d6a4f,color:#fff
     style M1 fill:#2d6a4f,color:#fff
     style M2 fill:#2d6a4f,color:#fff
+    style M4 fill:#2d6a4f,color:#fff
 ```
+
+**M3 and M4 swapped.** The original order put the physical reader first, because reader risk
+is the larger risk and this roadmap is ordered by risk retired. That ordering assumed the
+hardware would be available when M2 finished; it was not, and
+[Q9](open-questions.md#q9-first-reader-model) still has no owner. Blocking on an unbought
+reader would have stopped the project rather than sequenced it, so M4 — which needs no
+hardware at all — was built while M3 waits.
+
+Nothing was skipped and no exit criterion was weakened. M3 remains gated exactly as written,
+and M5 now depends on both.
 
 ---
 
@@ -127,7 +139,7 @@ $ splitforge roster import participants.csv
 {"race":"5K","inserted":12,"updated":0,"unchanged":0,"total":12}
 
 $ splitforge doctor
-{"schema_version":2,"checks_run":12,"errors":0,"warnings":0,"findings":[]}
+{"errors":0,"warnings":0,"findings":[]}
 
 $ splitforge simulate --scenario five-k
 {"scenario":"five-k","race":"5K","reader":"mat","planned_crossings":24,
@@ -195,23 +207,79 @@ reader believes it sent matches the count in the journal.
 
 ## Milestone 4 — Timing and results
 
+**Status: complete.** Built ahead of Milestone 3, which is gated on hardware — see the note
+under the diagram above.
+
 Simple, transparent rules first. Complexity here is where scoring bugs live.
 
-- One start checkpoint, one finish checkpoint
-- Gun-time and chip-time calculation
-- First valid finish per participant
-- Configurable duplicate window
-- Statuses: `Finished`, `DNS`, `DNF`, `DQ`
-- Immutable result revisions with policy snapshots
-- Overall placement by the selected timing policy
-- CSV and JSON exports
+- [x] One start checkpoint, one finish checkpoint
+- [x] Gun-time and chip-time calculation
+- [x] First valid finish per participant
+- [x] Configurable duplicate window
+- [x] Statuses: `Finished`, `DNS`, `DNF`, `DQ`
+- [x] Immutable result revisions with policy snapshots
+- [x] Overall placement by the selected timing policy
+- [x] CSV and JSON exports
+
+```bash
+splitforge policy set  --start-mode chip        # or gun, the default
+splitforge results preview                       # the rehearsal for the irreversible command
+splitforge results publish --status provisional --reason "provisional results"
+splitforge results declare --bib 104 --status dq --reason "cut the course"
+splitforge results publish --status final --reason "bib 104 disqualified after review"
+splitforge results diff --from 1 --to 2
+splitforge results list
+splitforge export results --as csv --revision 1
+```
 
 **Deliberately excluded:** age-group scoring, waves, complex course layouts, penalties,
-relay teams, live public pages.
+relay teams, live public pages. `StartMode` deliberately does not parse `wave` or `rolling`:
+a mode that parsed and then scored like `gun` would be a wrong answer that looks like a
+right one.
 
 **Exit criterion:** a test event imports a roster, records reads, publishes a provisional
 revision, applies a DQ correction, and retains **both** revisions with a complete audit
 trail explaining the difference.
+
+**Observed.** The same 5K, configured through the operator commands alone:
+
+```console
+$ splitforge results publish --status provisional --reason "provisional results"
+{"revision":1,"status":"provisional","digest":"f7ab46341dd35a0c91b372a6870b6a1a",
+ "entries":12,"finished":11,"dnf":1,"dns":0,"dq":0,"changed":true}
+
+$ splitforge results declare --bib 104 --status dq --reason "cut the course at the turnaround"
+{"seq":1,"bib":"104","status":"dq","actor":"operator"}
+
+$ splitforge results publish --status final --reason "bib 104 disqualified after review"
+{"revision":2,"status":"final","digest":"07de72201e2e5b5dbca383037c53b236",
+ "entries":12,"finished":10,"dnf":1,"dns":0,"dq":1,"changed":true}
+
+$ splitforge results diff --from 1 --to 2
+{"from":1,"to":2,"changed":11,"unchanged":1}
+  {"bib":"101","change":"placement","place_from":2,"place_to":1}
+  {"bib":"107","change":"placement","place_from":3,"place_to":2}
+
+$ splitforge results show --revision 1
+{"revision":1,"bib":"104","status":"finished","place":1,"gun_time":"0:17:32.132"}
+```
+
+The last line is the milestone. Revision 2 disqualifies bib 104 and moves ten runners up a
+place; revision 1 still says they won, in the words it was published in. Both are in the
+database, the audit trail holds both publications with their differing digests, and the
+declaration that separates them records who decided it and why.
+
+The one unchanged entry is the runner who did not finish — a DQ ahead of you does not move
+you up when you have no place to move.
+
+Two decisions were closed on the way:
+[ADR-0016](adr/0016-status-declarations-are-evidence.md),
+[ADR-0017](adr/0017-placement-semantics.md). A third was re-scoped rather than answered:
+[Q12](open-questions.md#q12-leap-second-handling), which turned out to constrain clock
+discipline rather than scoring.
+
+**Deliberately not done here:** any web interface, and any claim about reader behavior. The
+scoring path has never seen a physical reader — that is Milestone 3, and it is still gated.
 
 ---
 
