@@ -11,7 +11,6 @@ is in the timing model.
 | [Q3](#q3-reader-clock-trust-defaults) | Reader clock trust defaults and alarm thresholds | M3 | — |
 | [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
 | [Q5](#q5-local-api-authentication-model) | Local API authentication model | First networked interface | — |
-| [Q7](#q7-corruption-recovery-strategy) | Database corruption recovery strategy | M5 | — |
 | [Q9](#q9-first-reader-model) | Which physical reader model comes first? | **M3 — hard gate** | — |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | M5 | — |
@@ -59,19 +58,6 @@ wrong: M2 is a CLI running as a local process over SSH, and it opens no socket. 
 deferred to dodge the question — there was simply nothing to authenticate. It blocks the
 first interface that listens on the network, which is `splitforge-api` and any browser
 console built on it.
-
-### Q7: Corruption recovery strategy
-
-**Raised in:** [architecture.md § 4](architecture.md#4-failure-behavior),
-[threat-model.md O4](threat-model.md#operational-risks)
-
-If the SQLite file is corrupt mid-event, what is the operator supposed to do? Options: fail
-over to a fresh database and reconcile later; run in a degraded append-to-flat-file mode;
-stop and restore from snapshot.
-
-The right answer probably involves a **write-ahead text journal** — a plain append-only
-log file written alongside the database, cheap to write and trivially recoverable, so
-"database is corrupt" never means "reads are gone." Needs design.
 
 ### Q9: First reader model
 
@@ -167,6 +153,7 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q6](#q6-enforcing-crate-dependency-rules) | Enforcing crate dependency rules | [ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md) |
 | [Q8](#q8-enforcing-append-only-in-sqlite) | Enforcing append-only at the database level | [ADR-0011](adr/0011-append-only-enforced-by-triggers.md) |
 | [Q13](#q13-msrv-policy) | How is the MSRV chosen, and when does it move? | [ADR-0013](adr/0013-msrv-policy.md) |
+| [Q7](#q7-corruption-recovery-strategy) | Database corruption recovery strategy | [ADR-0018](adr/0018-write-ahead-sidecar-journal.md) |
 
 ### Q1: SQLite crate, `rusqlite` vs `sqlx`
 
@@ -217,3 +204,25 @@ carrying a known-vulnerable dependency to defend a version number nobody had cho
 
 The MSRV is now the oldest toolchain CI tests against, and it moves when a security advisory
 cannot be cleared without moving it. `deny.toml`'s ignore list is empty again.
+
+### Q7: Corruption recovery strategy
+
+**Resolved — [ADR-0018](adr/0018-write-ahead-sidecar-journal.md): a write-ahead text sidecar.**
+
+The instinct recorded here while the question was open turned out to be right, and the
+design that closed it is the one this entry guessed at: every raw read is appended to a
+plain-text file beside the database and fsynced **before** the database transaction opens,
+which makes the sidecar a superset of the journal at every instant.
+
+What the entry did not anticipate was the division of labour. The sidecar carries reads
+only. Configuration comes back from the pre-race snapshot, because the two halves of the
+problem have opposite shapes — the configuration barely changes and is small, the evidence
+changes every second and is the part nobody can retype. So `backup restore` brings back the
+race and `splitforge recover` brings back the reads, and a restore deliberately never
+touches the sidecar: it holds exactly the reads the snapshot is missing.
+
+Of the three options originally listed, "stop and restore from snapshot" survives as half
+the answer, "fail over to a fresh database and reconcile later" was rejected as a
+reconciliation nobody would have rehearsed, and "degraded append-to-flat-file mode" became
+the normal mode rather than the degraded one — which is the part worth remembering. A
+fallback that only runs when things are already wrong is a fallback nobody has tested.

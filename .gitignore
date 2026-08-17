@@ -24,6 +24,14 @@ target
 /data/
 /var/
 
+# The write-ahead sidecar holds every raw read in plain text — chip identifiers, antenna,
+# timestamps, and the reader's payload bytes. It is the same privacy exposure as the
+# database and is easier to commit by accident, because it looks like a log file.
+*.reads.jsonl
+
+# Databases moved aside by `backup restore`. Still event data, just superseded.
+*.superseded.*
+
 # Local configuration, including integration credentials
 .env
 *.local.toml

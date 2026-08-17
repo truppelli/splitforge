@@ -355,10 +355,40 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             let store = open_store(&database)?;
             let config = load_config(&store, race.race.as_deref())?;
-            let mut journal = open_journal(&database)?;
+            // The writing path, so recovery runs here. A mechanism exercised only during a
+            // disaster is a mechanism whose first real execution is during a disaster.
+            let (mut journal, recovery) = SqliteJournal::open_recovering(&database)
+                .with_context(|| format!("opening journal at {}", database.display()))?;
+            if recovery.repaired_anything() {
+                emit(&operate::RecoveryView::of(&recovery), format)?;
+            }
             let report =
                 simulate::into_journal(&config, &scenario, &mut journal, seed, speed).await?;
             emit(&report, format)
+        }
+
+        Command::Recover { sidecar } => {
+            let mut journal = match sidecar {
+                Some(path) => SqliteJournal::open_with_sidecar(&database, path),
+                None => SqliteJournal::open(&database),
+            }
+            .with_context(|| format!("opening journal at {}", database.display()))?;
+
+            let recovery = journal.reconcile()?;
+            let mut store = open_store(&database)?;
+            store.record_audit(
+                &actor,
+                "journal.recover",
+                journal
+                    .sidecar_path()
+                    .map(|p| p.display().to_string())
+                    .as_deref(),
+                Some(
+                    &serde_json::to_string(&operate::RecoveryView::of(&recovery))
+                        .context("encoding recovery detail")?,
+                ),
+            )?;
+            emit(&operate::RecoveryView::of(&recovery), format)
         }
 
         Command::Reads {
@@ -428,6 +458,34 @@ pub async fn run(cli: Cli) -> Result<()> {
                     "path": report.path,
                     "bytes": report.bytes,
                     "raw_reads": report.raw_reads,
+                }),
+                format,
+            )
+        }
+
+        Command::Backup(BackupCommand::Restore { snapshot, replace }) => {
+            let report = splitforge_storage::restore_backup(&snapshot, &database, replace)?;
+            // Audited into the *restored* database, so the record travels with the file it
+            // describes rather than living in the one that was moved aside.
+            let mut store = open_store(&database)?;
+            store.record_audit(
+                &actor,
+                "backup.restore",
+                Some(&report.source),
+                Some(&format!(
+                    r#"{{"raw_reads":{},"displaced":{}}}"#,
+                    report.raw_reads,
+                    serde_json::to_string(&report.displaced).context("encoding displaced")?
+                )),
+            )?;
+            emit(
+                &serde_json::json!({
+                    "source": report.source,
+                    "destination": report.destination,
+                    "displaced": report.displaced,
+                    "bytes": report.bytes,
+                    "raw_reads": report.raw_reads,
+                    "next": "run `splitforge recover` to replay reads the snapshot predates",
                 }),
                 format,
             )

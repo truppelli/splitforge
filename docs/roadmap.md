@@ -293,10 +293,63 @@ Operational safety, not features. This milestone is what separates a demo from a
 - **Clock discipline:** DS3231 RTC support, GPS/PPS integration, Pi as LAN NTP server,
   clock state as a blocking pre-race check
   ([clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms))
-- Manual backup and **restore drills** — restore is rehearsed, not discovered
+- [x] Manual backup and **restore drills** — restore is rehearsed, not discovered
+- [x] Corruption recovery ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
 - Graceful shutdown on power loss where the hardware permits
 - Pi deployment guide: external power, wired Ethernet first, race-day Wi-Fi treated as a
   known risk
+
+**Two items landed early**, for the same reason Milestone 4 did: they need no hardware, and
+leaving them until after Milestone 3 would have meant timing a real event with a recovery
+story that existed only as an open question. `backup restore` and `splitforge recover` are
+built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed.
+
+**Observed.** The same 5K, with a snapshot taken before the gun. Between the second command
+and the third, `event.db`, `event.db-wal`, and `event.db-shm` were deleted outright — the
+sidecar was left alone, which is the whole point:
+
+```console
+$ splitforge backup create pre-race.db
+{"bytes":184320,"path":"pre-race.db","raw_reads":0}
+
+$ splitforge simulate --scenario five-k
+{"scenario":"five-k","race":"5K","reads_persisted":638,"journal_total":638,...}
+
+$ rm event.db event.db-wal event.db-shm        # the disaster
+
+$ splitforge doctor
+{"errors":1,"findings":[{"severity":"error","check":"journal.sidecar",
+ "detail":"638 read(s) are in the sidecar but not in the database.
+           Run `splitforge recover` to replay them."}]}
+
+$ splitforge backup restore pre-race.db --replace
+{"source":"pre-race.db","destination":"event.db","raw_reads":0,
+ "displaced":["event.db.superseded.1786986481"],
+ "next":"run `splitforge recover` to replay reads the snapshot predates"}
+
+$ splitforge recover
+{"sidecar_records":638,"replayed_into_database":638,"backfilled_into_sidecar":0,
+ "corrupt_lines":0,"torn_tail_bytes":0}
+
+$ splitforge derive
+{"race":"5K","raw_reads":638,"accepted":24,"rejected":614,"timing_events":23,
+ "unassigned_crossings":1,"rejections_by_reason":{"duplicate_within_window":614}}
+```
+
+That last line is byte-identical to the derivation taken before the database was destroyed —
+not merely the same counts, but the same 24 accepted reads carrying the same derived
+identifiers. The snapshot supplied the configuration and knew about none of the reads; the
+sidecar supplied all 638.
+
+`splitforge doctor` diagnoses and refuses to repair, which is why it appears above the
+restore rather than instead of it: a diagnostic that silently fixes things is a diagnostic
+describing a state it just changed. `crates/splitforge-cli/tests/recovery.rs` holds the same
+claim as nine tests that destroy the file three different ways — deleted, overwritten with
+garbage, and with no snapshot to restore from at all.
+
+What this does **not** retire is the reliability work that needs a Pi: whether an SD card
+honors `fsync` at all, what the second sync per reader report costs on real flash, and
+what happens to a write in flight when the power goes. Those stay exactly where they were.
 
 **Exit criterion:** a full-length event is timed on real hardware while an observer
 randomly pulls power, unplugs Ethernet, and restarts the service — and no acknowledged

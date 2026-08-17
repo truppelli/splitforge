@@ -58,8 +58,12 @@ The cross-build job is the one most likely to be misread. It proves the code **c
 for `aarch64-unknown-linux-gnu`. It says nothing about:
 
 - Whether a reader connects, stays connected, or reconnects
-- Write latency or SD card behavior under sustained journal writes
-- Recovery from power loss mid-write
+- Write latency or SD card behavior under sustained journal writes, including what the
+  second fsync per reader report ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
+  actually costs on real flash
+- Recovery from power loss mid-write. The recovery tests destroy files deliberately; they
+  do not reproduce a card losing its cache during a brownout
+- Whether an SD card honors `fsync` at all
 - Clock accuracy or drift
 - Memory headroom on 1 GB of RAM
 
@@ -78,6 +82,7 @@ Not built yet; listed so the gaps are visible rather than forgotten.
 | ~~Durability tests in CI~~ | ~~M1~~ | **Done.** `crates/splitforge-cli/tests/restart.rs` kills the process mid-write, reopens, and asserts the journal is contiguous and re-derives identically |
 | ~~Operator interface tested through the binary~~ | ~~M2~~ | **Done.** `crates/splitforge-cli/tests/console.rs` configures a race entirely through subcommands and CSV imports, then times, derives, exports, and backs it up — reaching for no library type the operator does not have |
 | ~~Scoring tested against hand-computed answers~~ | ~~M4~~ | **Done.** `crates/splitforge-results` is a pure function, so its tests state the expected placement directly rather than comparing against the implementation's own output. `crates/splitforge-cli/tests/results.rs` then publishes, disqualifies, republishes, and asserts the first revision is byte-identical afterwards |
+| ~~Recovery rehearsed rather than discovered~~ | ~~M5~~ | **Done.** `crates/splitforge-cli/tests/recovery.rs` deletes the database, overwrites it with garbage, and throws away the snapshot entirely — then asserts the event derives identically afterwards. [ADR-0018](adr/0018-write-ahead-sidecar-journal.md) |
 | **Capture-driven reader tests** | M3 | Recorded protocol captures so reader behavior is testable without hardware |
 | **Hardware-in-the-loop validation** | M3 | A self-hosted Pi runner with a real reader attached. The only thing that validates the claims above |
 | **Release artifacts** | M5 | Signed `aarch64` binaries and a deployment bundle |
