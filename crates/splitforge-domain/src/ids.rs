@@ -134,6 +134,22 @@ uuid_newtype! {
 }
 
 uuid_newtype! {
+    /// Identifies a published result revision.
+    ///
+    /// Random v4, not derived: publishing is an **act**, not a conclusion. Two revisions can
+    /// hold identical numbers and still be distinct events in the race's history — the
+    /// second one exists because somebody pressed publish again, and that fact is the
+    /// record. See `docs/timing-model.md` § 7.
+    ResultRevisionId
+}
+
+uuid_newtype! {
+    /// Identifies an operator's status declaration. Minted once, never reused: a declaration
+    /// is evidence that somebody said something.
+    StatusDeclarationId
+}
+
+uuid_newtype! {
     /// Identifies an event (a race day, which may contain several races).
     EventId
 }

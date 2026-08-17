@@ -149,11 +149,11 @@ pub enum Command {
         race: RaceRef,
     },
 
-    /// Export derived crossings.
-    ///
-    /// Crossings, not results: placement, statuses, and gun/chip time are Milestone 4, and
-    /// exporting a column named `place` before the scoring rules exist would be a promise
-    /// this build cannot keep.
+    /// Score the race, and publish or inspect result revisions.
+    #[command(subcommand)]
+    Results(ResultsCommand),
+
+    /// Export crossings or published results.
     #[command(subcommand)]
     Export(ExportCommand),
 
@@ -403,6 +403,13 @@ pub enum PolicyCommand {
         /// Which read in a burst wins: `first`, `peak-rssi`, or `first-above-rssi:<DBM>`.
         #[arg(long, value_name = "RULE")]
         selection_rule: Option<String>,
+
+        /// Which clock placement is measured from: `gun` or `chip`. Race-wide only.
+        ///
+        /// Snapshotted into every revision, so changing it later cannot restate what an
+        /// already-published sheet meant.
+        #[arg(long, value_name = "MODE")]
+        start_mode: Option<String>,
     },
     /// Show the timing policy in force.
     Show {
@@ -429,10 +436,110 @@ pub enum FixtureCommand {
     List,
 }
 
+/// Result scoring and revision commands.
+#[derive(Debug, Subcommand)]
+pub enum ResultsCommand {
+    /// Score the race and show what a revision would contain, without publishing.
+    ///
+    /// The command to run before the one that cannot be undone.
+    Preview {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+    },
+
+    /// Score the race and publish an immutable revision.
+    Publish {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+
+        /// `provisional` or `final`.
+        #[arg(long, value_name = "STATUS", default_value = "provisional")]
+        status: String,
+
+        /// Why this revision exists. Required: a revision nobody can explain is one nobody
+        /// can defend.
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+
+        /// Publish even when the results are identical to the previous revision.
+        #[arg(long)]
+        allow_unchanged: bool,
+    },
+
+    /// Show a published revision.
+    Show {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+
+        /// Which revision. Omit for the most recent.
+        #[arg(long, value_name = "N")]
+        revision: Option<u32>,
+    },
+
+    /// List every revision of a race, oldest first.
+    List {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+    },
+
+    /// Compare two revisions, line by line.
+    ///
+    /// What changed between provisional and final, and for whom.
+    Diff {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+
+        /// The earlier revision.
+        #[arg(long, value_name = "N")]
+        from: u32,
+
+        /// The later revision.
+        #[arg(long, value_name = "N")]
+        to: u32,
+    },
+
+    /// Declare how a participant's race ended, overriding what the crossings imply.
+    ///
+    /// The only way a disqualification enters the system: no arrangement of chip reads
+    /// implies "cut the course". Appends — reversing one means declaring again.
+    Declare {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+
+        /// Whose status.
+        #[arg(long, value_name = "BIB")]
+        bib: String,
+
+        /// `finished`, `dns`, `dnf`, or `dq`.
+        #[arg(long, value_name = "STATUS")]
+        status: String,
+
+        /// Why. Required.
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+    },
+
+    /// Show every status declaration, including superseded ones.
+    Declarations {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+    },
+}
+
 /// Export commands.
 #[derive(Debug, Subcommand)]
 pub enum ExportCommand {
     /// Export derived crossings, joined against the roster.
+    ///
+    /// A diagnostic view, not a published contract: it answers "why is this runner
+    /// missing?". The versioned contract is `export results`.
     Crossings {
         /// Which race.
         #[command(flatten)]
@@ -444,6 +551,25 @@ pub enum ExportCommand {
         /// field name is global across the tree, and `--format` is already the global JSON
         /// shape. Two arguments sharing an id panic at parse time rather than at build
         /// time, which is a failure worth not shipping.
+        #[arg(long = "as", value_enum, default_value_t = ExportFormat::Csv)]
+        shape: ExportFormat,
+
+        /// Write to a file instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+
+    /// Export a published result revision.
+    Results {
+        /// Which race.
+        #[command(flatten)]
+        race: RaceRef,
+
+        /// Which revision. Omit for the most recent.
+        #[arg(long, value_name = "N")]
+        revision: Option<u32>,
+
+        /// Output shape. Named `shape` for the reason given above.
         #[arg(long = "as", value_enum, default_value_t = ExportFormat::Csv)]
         shape: ExportFormat,
 
@@ -592,6 +718,46 @@ mod tests {
             &["splitforge", "derive"],
             &["splitforge", "export", "crossings", "--as", "csv"],
             &["splitforge", "export", "crossings", "--as", "json"],
+            &["splitforge", "export", "results", "--as", "csv"],
+            &["splitforge", "export", "results", "--as", "json"],
+            &["splitforge", "export", "results", "--revision", "2"],
+            &["splitforge", "policy", "set", "--start-mode", "chip"],
+            &["splitforge", "results", "preview"],
+            &[
+                "splitforge",
+                "results",
+                "publish",
+                "--status",
+                "provisional",
+                "--reason",
+                "initial",
+            ],
+            &[
+                "splitforge",
+                "results",
+                "publish",
+                "--status",
+                "final",
+                "--reason",
+                "after appeals",
+                "--allow-unchanged",
+            ],
+            &["splitforge", "results", "show"],
+            &["splitforge", "results", "show", "--revision", "1"],
+            &["splitforge", "results", "list"],
+            &["splitforge", "results", "diff", "--from", "1", "--to", "2"],
+            &[
+                "splitforge",
+                "results",
+                "declare",
+                "--bib",
+                "217",
+                "--status",
+                "dq",
+                "--reason",
+                "course cut",
+            ],
+            &["splitforge", "results", "declarations"],
             &["splitforge", "backup", "create", "snap.db"],
             &["splitforge", "doctor"],
             &["splitforge", "audit"],
@@ -626,6 +792,67 @@ mod tests {
             panic!("expected an export command");
         };
         assert_eq!(shape, ExportFormat::Json);
+    }
+
+    #[test]
+    fn the_two_status_arguments_mean_different_things_and_do_not_collide() {
+        // `results publish --status` takes provisional/final; `results declare --status`
+        // takes a result status. Distinct subcommands, so distinct argument ids — but the
+        // last time two arguments shared an id it panicked at parse time rather than build
+        // time, so this is asserted rather than assumed.
+        let publish = Cli::try_parse_from([
+            "splitforge",
+            "results",
+            "publish",
+            "--status",
+            "final",
+            "--reason",
+            "after appeals",
+        ])
+        .expect("publish parses");
+        let Command::Results(ResultsCommand::Publish { status, reason, .. }) = publish.command
+        else {
+            panic!("expected a publish command");
+        };
+        assert_eq!(status, "final");
+        assert_eq!(reason, "after appeals");
+
+        let declare = Cli::try_parse_from([
+            "splitforge",
+            "results",
+            "declare",
+            "--bib",
+            "217",
+            "--status",
+            "dq",
+            "--reason",
+            "course cut",
+        ])
+        .expect("declare parses");
+        let Command::Results(ResultsCommand::Declare { bib, status, .. }) = declare.command else {
+            panic!("expected a declare command");
+        };
+        assert_eq!(bib, "217");
+        assert_eq!(status, "dq");
+    }
+
+    #[test]
+    fn publishing_without_a_reason_is_refused_by_the_parser() {
+        // Not a runtime check that can be forgotten: a revision nobody can explain should
+        // not be reachable from the command line at all.
+        assert!(Cli::try_parse_from(["splitforge", "results", "publish"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "splitforge",
+                "results",
+                "declare",
+                "--bib",
+                "1",
+                "--status",
+                "dq"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -335,6 +335,8 @@ pub struct PolicyView {
     pub race: String,
     /// The policy itself.
     pub policy: TimingPolicy,
+    /// Which clock placement is measured from.
+    pub start_mode: &'static str,
     /// Per-checkpoint overrides, keyed by checkpoint name rather than id.
     pub per_checkpoint_names: BTreeMap<String, String>,
 }

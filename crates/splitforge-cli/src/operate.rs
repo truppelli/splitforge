@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
-use splitforge_domain::{CheckpointKind, RaceConfig, RawReadJournal};
+use splitforge_domain::{CheckpointKind, RaceConfig, RawReadJournal, StartMode};
 use splitforge_engine::{DerivationInput, derive};
 use splitforge_storage::{ConfigStore, SqliteJournal};
 
@@ -150,6 +150,67 @@ pub(crate) fn doctor(
                 "config.checkpoints",
                 format!(
                     "race {:?} has no finish or lap checkpoint; nothing will ever complete",
+                    race.name
+                ),
+            ));
+        }
+
+        // Scoring needs exactly one finish and, under chip timing, exactly one start. Both
+        // are checked here rather than only at `results publish`, because publishing happens
+        // after the race and a checkpoint cannot be added retroactively to a mat that was
+        // never there.
+        checks_run += 1;
+        let finishes = config
+            .checkpoints
+            .iter()
+            .filter(|c| c.kind == CheckpointKind::Finish)
+            .count();
+        if finishes > 1 {
+            findings.push(Finding::error(
+                "scoring.finish",
+                format!(
+                    "race {:?} has {finishes} finish checkpoints; scoring needs exactly one, \
+                     and choosing between them arbitrarily would silently decide which line \
+                     counted",
+                    race.name
+                ),
+            ));
+        }
+
+        checks_run += 1;
+        let starts = config
+            .checkpoints
+            .iter()
+            .filter(|c| c.kind == CheckpointKind::Start)
+            .count();
+        if starts > 1 {
+            findings.push(Finding::error(
+                "scoring.start",
+                format!(
+                    "race {:?} has {starts} start checkpoints; scoring needs exactly one",
+                    race.name
+                ),
+            ));
+        } else if config.start_mode == StartMode::Chip && starts == 0 {
+            findings.push(Finding::error(
+                "scoring.start",
+                format!(
+                    "race {:?} is scored on chip time but has no start checkpoint to measure \
+                     from; add one, or switch to `--start-mode gun`",
+                    race.name
+                ),
+            ));
+        }
+
+        // Gun-time scoring measures from the gun, and there may not be one. Recoverable
+        // afterwards with `race start --at`, but far easier to notice now.
+        checks_run += 1;
+        if config.start_mode == StartMode::Gun && config.gun_time().is_none() {
+            findings.push(Finding::warning(
+                "scoring.gun",
+                format!(
+                    "race {:?} is scored from the gun, but no start has been recorded and it \
+                     has no scheduled start; finishers will have no time until one exists",
                     race.name
                 ),
             ));

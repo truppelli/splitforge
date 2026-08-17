@@ -16,7 +16,7 @@ pub struct Migration {
 }
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Every migration, in order.
 pub const MIGRATIONS: &[Migration] = &[
@@ -29,6 +29,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "event_configuration",
         sql: EVENT_CONFIGURATION,
+    },
+    Migration {
+        version: 3,
+        name: "results_and_revisions",
+        sql: RESULTS_AND_REVISIONS,
     },
 ];
 
@@ -238,5 +243,131 @@ CREATE TRIGGER audit_log_no_delete
 BEFORE DELETE ON audit_log
 BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only: DELETE is not permitted');
+END;
+";
+
+// Results (Milestone 4). Two kinds of record here, and the difference is the whole design.
+//
+// `status_declarations` is **evidence**: an operator decided something. SplitForge cannot
+// derive a disqualification — no arrangement of chip reads implies "cut the course" — so a
+// DQ enters the system the same way a manual entry does, as a record that somebody said so.
+// Reversing one appends a newer declaration; the original stays exactly where it is, because
+// "disqualified at 11:04, reinstated at 11:31" is the true account and an organizer may have
+// to defend it.
+//
+// `result_revisions` and `result_entries` are **frozen derivations**: computed from evidence,
+// but immutable once published, because publication is an event in the world. Someone
+// screenshotted revision 1. Superseding it is honest; rewriting it is not
+// (docs/timing-model.md § 7).
+//
+// Both get append-only triggers, for different reasons: evidence because it is evidence,
+// revisions because they were published.
+const RESULTS_AND_REVISIONS: &str = r"
+-- Which clock placement is measured from. Race configuration, snapshotted into every
+-- revision (docs/timing-model.md § 7) — so changing it later cannot retroactively restate
+-- what an already-published sheet meant.
+--
+-- A column rather than a field inside `policy_json`, because `TimingPolicy` is what the
+-- engine uses to turn reads into crossings, and the engine has no business knowing that
+-- start modes exist.
+ALTER TABLE timing_policies ADD COLUMN start_mode TEXT NOT NULL DEFAULT 'gun';
+
+CREATE TABLE status_declarations (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT    NOT NULL UNIQUE,
+    race_id         TEXT    NOT NULL REFERENCES races (id),
+    participant_id  TEXT    NOT NULL REFERENCES participants (id),
+    status          TEXT    NOT NULL,
+    reason          TEXT    NOT NULL,
+    actor           TEXT    NOT NULL,
+    declared_at_us  INTEGER NOT NULL,
+    recorded_at_us  INTEGER NOT NULL
+) STRICT;
+
+-- Scoring asks for the newest declaration per participant, which is this index read
+-- backwards.
+CREATE INDEX status_declarations_race_idx
+    ON status_declarations (race_id, participant_id, seq);
+
+CREATE TRIGGER status_declarations_no_update
+BEFORE UPDATE ON status_declarations
+BEGIN
+    SELECT RAISE(ABORT, 'status_declarations is append-only: UPDATE is not permitted');
+END;
+
+CREATE TRIGGER status_declarations_no_delete
+BEFORE DELETE ON status_declarations
+BEGIN
+    SELECT RAISE(ABORT, 'status_declarations is append-only: DELETE is not permitted');
+END;
+
+-- `number` is monotonic within a race and unique, so 'revision 2' names one thing forever.
+-- `digest` fingerprints the scored rows only, which is what makes 'this republish changed
+-- nothing' a detectable fact rather than an opinion.
+CREATE TABLE result_revisions (
+    id               TEXT    PRIMARY KEY,
+    race_id          TEXT    NOT NULL REFERENCES races (id),
+    number           INTEGER NOT NULL,
+    status           TEXT    NOT NULL,
+    generated_at_us  INTEGER NOT NULL,
+    actor            TEXT    NOT NULL,
+    reason           TEXT    NOT NULL,
+    policy_json      TEXT    NOT NULL,
+    digest           TEXT    NOT NULL,
+    recorded_at_us   INTEGER NOT NULL,
+    UNIQUE (race_id, number)
+) STRICT;
+
+-- Bib and name are denormalized on purpose. A revision has to stay readable exactly as
+-- published, and a roster re-import that corrects a spelling must not retroactively edit
+-- what a published results sheet said.
+--
+-- `flags_json` and `timing_events_json` are JSON arrays for the same reason `policy_json`
+-- is: they round-trip verbatim, and a column layout would have to migrate in lockstep with
+-- the enum, making old revisions unreadable the first time a variant gains a field.
+CREATE TABLE result_entries (
+    revision_id      TEXT    NOT NULL REFERENCES result_revisions (id),
+    participant_id   TEXT    NOT NULL REFERENCES participants (id),
+    ordinal          INTEGER NOT NULL,
+    bib              TEXT    NOT NULL,
+    name             TEXT    NOT NULL,
+    status           TEXT    NOT NULL,
+    status_source    TEXT    NOT NULL,
+    status_reason    TEXT,
+    start_at_us      INTEGER,
+    finish_at_us     INTEGER,
+    gun_time_ms      INTEGER,
+    chip_time_ms     INTEGER,
+    scoring_time_ms  INTEGER,
+    place            INTEGER,
+    flags_json       TEXT    NOT NULL,
+    timing_events_json TEXT  NOT NULL,
+    PRIMARY KEY (revision_id, participant_id)
+) STRICT;
+
+CREATE INDEX result_entries_revision_idx ON result_entries (revision_id, ordinal);
+
+CREATE TRIGGER result_revisions_no_update
+BEFORE UPDATE ON result_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'result_revisions is immutable: publish a new revision instead');
+END;
+
+CREATE TRIGGER result_revisions_no_delete
+BEFORE DELETE ON result_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'result_revisions is immutable: DELETE is not permitted');
+END;
+
+CREATE TRIGGER result_entries_no_update
+BEFORE UPDATE ON result_entries
+BEGIN
+    SELECT RAISE(ABORT, 'result_entries is immutable: publish a new revision instead');
+END;
+
+CREATE TRIGGER result_entries_no_delete
+BEFORE DELETE ON result_entries
+BEGIN
+    SELECT RAISE(ABORT, 'result_entries is immutable: DELETE is not permitted');
 END;
 ";

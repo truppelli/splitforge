@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 use crate::error::DomainError;
 use crate::ids::{Bib, CheckpointId, ChipId, EventId, ParticipantId, RaceId, ReaderId};
 use crate::policy::{TimestampTrust, TimingPolicy};
+use crate::result::StartMode;
 
 /// A race day, which may contain several races.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +353,11 @@ pub struct RaceConfig {
     pub antennas: AntennaMap,
     /// The rules in force.
     pub policy: TimingPolicy,
+    /// Which clock placement is measured from.
+    ///
+    /// Separate from [`RaceConfig::policy`] because that is what the engine uses to turn
+    /// reads into crossings, and the engine has no business knowing that start modes exist.
+    pub start_mode: StartMode,
     /// Recorded starts and stops, oldest first.
     pub sessions: Vec<RaceSession>,
 }
