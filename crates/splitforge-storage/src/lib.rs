@@ -39,12 +39,16 @@ mod connection;
 mod journal;
 mod migrations;
 mod results;
+mod sidecar;
 
 use thiserror::Error;
 
-pub use backup::{BackupReport, create as create_backup};
+pub use backup::{
+    BackupReport, RestoreReport, create as create_backup, restore as restore_backup,
+    sidecar_path_for,
+};
 pub use config::{AuditEntry, ConfigStore, ImportSummary, RaceSelection, parse_checkpoint_kind};
-pub use journal::SqliteJournal;
+pub use journal::{RecoveryReport, SidecarStatus, SqliteJournal};
 pub use migrations::{MIGRATIONS, Migration, SCHEMA_VERSION};
 pub use results::{ResultStore, RevisionSummary};
 
@@ -65,6 +69,15 @@ pub enum StorageError {
     /// A timestamp fell outside the representable range.
     #[error("timestamp out of representable range")]
     TimestampOutOfRange,
+
+    /// The write-ahead sidecar could not be written, read, or decoded.
+    ///
+    /// On the append path this is fatal by design. The sidecar is written *before* the
+    /// database transaction, so a failure here means the read has no durable copy
+    /// anywhere — and reporting that to the caller is the whole contract. Swallowing it
+    /// would leave the process quietly running without the backstop it claims to have.
+    #[error("sidecar journal: {0}")]
+    Sidecar(String),
 
     /// The database was created by a newer build than this one.
     #[error("database schema version {found} is newer than this build supports ({supported})")]

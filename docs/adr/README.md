@@ -25,6 +25,7 @@ this?" two years from now, the ADR is the answer.
 | [0015](0015-race-start-records-the-gun.md) | `race start` records the gun; it does not gate ingestion | Accepted |
 | [0016](0016-status-declarations-are-evidence.md) | A disqualification is evidence, not a column | Accepted |
 | [0017](0017-placement-semantics.md) | What takes a place, and what a place is worth | Accepted |
+| [0018](0018-write-ahead-sidecar-journal.md) | Evidence is written to a text sidecar before it reaches the database | Accepted |
 
 ## Process
 

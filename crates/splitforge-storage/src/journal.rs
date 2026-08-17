@@ -1,6 +1,7 @@
 //! The append-only raw read journal.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Row, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -13,32 +14,125 @@ use uuid::Uuid;
 
 use crate::StorageError;
 use crate::connection::{self, from_micros, to_micros};
+use crate::sidecar::{self, Sidecar, SidecarRead};
 
 const SELECT_COLUMNS: &str = "seq, id, source, antenna, chip, reader_timestamp_us, \
      reader_uptime_us, received_at_us, received_at_monotonic_ns, rssi_dbm, \
      device_clock_state, timestamp_source, timestamp_fallback_reason, clock_offset_ms, \
      raw_payload, payload_sha256, recorded_at_us";
 
-/// A SQLite-backed [`RawReadJournal`].
+/// How far the database and its sidecar have drifted apart.
+///
+/// Produced without writing anything, so a read-only command can report the divergence
+/// that a writer would repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SidecarStatus {
+    /// Reads the sidecar holds and verified.
+    pub records: u64,
+    /// Lines that failed their digest or could not be decoded. Real damage.
+    pub corrupt_lines: u64,
+    /// Trailing bytes from a write that never finished. Expected after a power cut.
+    pub torn_tail_bytes: u64,
+    /// Reads in the sidecar that the database does not have. The recoverable case.
+    pub missing_from_database: u64,
+    /// Reads in the database that the sidecar does not have. Evidence without a backstop.
+    pub missing_from_sidecar: u64,
+}
+
+impl SidecarStatus {
+    /// Whether the two agree and nothing is damaged.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.corrupt_lines == 0
+            && self.torn_tail_bytes == 0
+            && self.missing_from_database == 0
+            && self.missing_from_sidecar == 0
+    }
+}
+
+/// What reconciliation actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecoveryReport {
+    /// The divergence found before anything was repaired.
+    pub found: SidecarStatus,
+    /// Reads replayed from the sidecar into the database.
+    pub replayed_into_database: u64,
+    /// Reads copied from the database into the sidecar, restoring its superset property.
+    pub backfilled_into_sidecar: u64,
+}
+
+impl RecoveryReport {
+    /// Whether anything was moved in either direction.
+    #[must_use]
+    pub const fn repaired_anything(&self) -> bool {
+        self.replayed_into_database > 0 || self.backfilled_into_sidecar > 0
+    }
+}
+
+/// A SQLite-backed [`RawReadJournal`], with a write-ahead sidecar beside it.
 #[derive(Debug)]
 pub struct SqliteJournal {
     conn: Connection,
+    /// `None` only for in-memory journals, which promise no durability of any kind.
+    sidecar: Option<Sidecar>,
 }
 
 impl SqliteJournal {
     /// Opens (creating if absent) a journal at `path`, applying any pending migrations.
     ///
+    /// Opening **does not** reconcile with the sidecar, deliberately. `reads --follow`
+    /// opens a journal, and an observer that repairs the thing it is observing is an
+    /// observer that writes to a database the operator believes it is only reading. Repair
+    /// belongs to the writing process ([`SqliteJournal::open_recovering`]) and to
+    /// [`SqliteJournal::reconcile`]; everyone else gets [`SqliteJournal::survey`] and
+    /// reports what it finds.
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError`] if the file cannot be opened, the pragmas cannot be set,
-    /// or migrations fail.
+    /// the sidecar cannot be created, or migrations fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref();
+        Self::open_with_sidecar(path, sidecar::path_for(path))
+    }
+
+    /// Opens a journal whose sidecar lives somewhere other than beside it.
+    ///
+    /// The recovery case: a fresh database pointed at the sidecar of a destroyed one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if either file cannot be opened or migrations fail.
+    pub fn open_with_sidecar(
+        path: impl AsRef<Path>,
+        sidecar: impl Into<PathBuf>,
+    ) -> Result<Self, StorageError> {
         Ok(Self {
             conn: connection::open(path)?,
+            sidecar: Some(Sidecar::open(sidecar.into())?),
         })
     }
 
+    /// Opens a journal and reconciles it with its sidecar.
+    ///
+    /// For the process that appends reads. Running recovery on every start of the writer —
+    /// rather than only when somebody notices a problem — is what keeps the recovery path
+    /// exercised. A mechanism that only ever runs during a disaster is a mechanism whose
+    /// first real execution is during a disaster.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the journal cannot be opened or the repair fails.
+    pub fn open_recovering(path: impl AsRef<Path>) -> Result<(Self, RecoveryReport), StorageError> {
+        let mut journal = Self::open(path)?;
+        let report = journal.reconcile()?;
+        Ok((journal, report))
+    }
+
     /// Opens a private in-memory journal. For tests and dry runs only — nothing survives.
+    ///
+    /// No sidecar: an in-memory database has no durability to back up, and writing a file
+    /// beside a database that does not exist would be worse than writing nothing.
     ///
     /// # Errors
     ///
@@ -46,7 +140,124 @@ impl SqliteJournal {
     pub fn open_in_memory() -> Result<Self, StorageError> {
         Ok(Self {
             conn: connection::open_in_memory()?,
+            sidecar: None,
         })
+    }
+
+    /// Where this journal's sidecar lives, if it has one.
+    #[must_use]
+    pub fn sidecar_path(&self) -> Option<&Path> {
+        self.sidecar.as_ref().map(Sidecar::path)
+    }
+
+    /// Compares the sidecar against the database without changing either.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the sidecar cannot be read or the database queried.
+    pub fn survey(&self) -> Result<SidecarStatus, StorageError> {
+        Ok(self
+            .compare()?
+            .map_or_else(SidecarStatus::default, |c| c.status))
+    }
+
+    /// Makes the database and the sidecar agree, in both directions.
+    ///
+    /// Reads the sidecar holds and the database lacks are inserted; reads the database
+    /// holds and the sidecar lacks are appended. Taking the union rather than picking a
+    /// winner is the only choice consistent with treating both as evidence — and the
+    /// backfill direction is also how a database written before the sidecar existed
+    /// acquires one.
+    ///
+    /// Idempotent: running it twice repairs nothing the second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if either side cannot be read or written.
+    pub fn reconcile(&mut self) -> Result<RecoveryReport, StorageError> {
+        let Some(comparison) = self.compare()? else {
+            return Ok(RecoveryReport::default());
+        };
+        let Comparison {
+            status,
+            replay,
+            backfill,
+        } = comparison;
+
+        let mut report = RecoveryReport {
+            found: status,
+            ..RecoveryReport::default()
+        };
+
+        if !replay.is_empty() {
+            let tx = self.conn.transaction()?;
+            for record in &replay {
+                insert_one(&tx, &record.read, record.recorded_at)?;
+            }
+            tx.commit()?;
+            report.replayed_into_database = replay.len() as u64;
+        }
+
+        if !backfill.is_empty()
+            && let Some(sidecar) = self.sidecar.as_mut()
+        {
+            sidecar.append_recorded(&backfill)?;
+            report.backfilled_into_sidecar = backfill.len() as u64;
+        }
+
+        Ok(report)
+    }
+
+    /// The shared half of [`SqliteJournal::survey`] and [`SqliteJournal::reconcile`], so
+    /// that what is reported and what is repaired can never disagree.
+    fn compare(&self) -> Result<Option<Comparison>, StorageError> {
+        let scan = match self.sidecar.as_ref() {
+            Some(sidecar) => sidecar.scan()?,
+            None => return Ok(None),
+        };
+        let sidecar_ids = Sidecar::ids(&scan);
+
+        let mut statement = self.conn.prepare("SELECT id FROM raw_reads")?;
+        let mut rows = statement.query([])?;
+        let mut stored_ids = HashSet::new();
+        while let Some(row) = rows.next()? {
+            stored_ids.insert(row.get::<_, String>(0)?);
+        }
+
+        let replay: Vec<SidecarRead> = scan
+            .records
+            .iter()
+            .filter(|record| !stored_ids.contains(&record.read.id.to_string()))
+            .cloned()
+            .collect();
+
+        // Only pay for loading every stored read when the sidecar is actually short. In
+        // the normal case it is a superset by construction and this never runs.
+        let backfill: Vec<SidecarRead> = if stored_ids.iter().all(|id| sidecar_ids.contains(id)) {
+            Vec::new()
+        } else {
+            let sql = format!("SELECT {SELECT_COLUMNS} FROM raw_reads ORDER BY seq");
+            self.select(&sql, &[])?
+                .into_iter()
+                .filter(|stored| !sidecar_ids.contains(&stored.read.id.to_string()))
+                .map(|stored| SidecarRead {
+                    read: stored.read,
+                    recorded_at: stored.recorded_at,
+                })
+                .collect()
+        };
+
+        Ok(Some(Comparison {
+            status: SidecarStatus {
+                records: scan.records.len() as u64,
+                corrupt_lines: scan.corrupt_lines,
+                torn_tail_bytes: scan.torn_tail_bytes,
+                missing_from_database: replay.len() as u64,
+                missing_from_sidecar: backfill.len() as u64,
+            },
+            replay,
+            backfill,
+        }))
     }
 
     /// The schema version currently applied to this database.
@@ -60,6 +271,17 @@ impl SqliteJournal {
 
     fn insert_all(&mut self, reads: &[RawRead]) -> Result<Vec<StoredRawRead>, StorageError> {
         let recorded_at = OffsetDateTime::now_utc();
+
+        // Write-ahead. The sidecar is appended and fsynced *before* the database
+        // transaction opens, which is what makes it a superset of the journal at every
+        // instant rather than a copy that races it. If the process dies between here and
+        // the commit below, the read is on disk and the next writer start replays it; if
+        // the order were reversed, the same crash would leave a read in a database nothing
+        // else has a copy of — which is precisely the situation this file exists to prevent.
+        if let Some(sidecar) = self.sidecar.as_mut() {
+            sidecar.append(reads, recorded_at)?;
+        }
+
         let tx = self.conn.transaction()?;
         let mut stored = Vec::with_capacity(reads.len());
         for read in reads {
@@ -116,6 +338,13 @@ impl RawReadJournal for SqliteJournal {
             .map_err(StorageError::from)?;
         Ok(u64::try_from(count).unwrap_or(0))
     }
+}
+
+/// The divergence, plus the work that would close it. Never leaves this module.
+struct Comparison {
+    status: SidecarStatus,
+    replay: Vec<SidecarRead>,
+    backfill: Vec<SidecarRead>,
 }
 
 fn insert_one(
@@ -260,7 +489,7 @@ fn row_to_stored(row: &Row<'_>) -> Result<StoredRawRead, StorageError> {
     })
 }
 
-const fn clock_state_to_str(state: DeviceClockState) -> &'static str {
+pub(crate) const fn clock_state_to_str(state: DeviceClockState) -> &'static str {
     match state {
         DeviceClockState::GpsLocked => "gps_locked",
         DeviceClockState::Rtc => "rtc",
@@ -270,7 +499,7 @@ const fn clock_state_to_str(state: DeviceClockState) -> &'static str {
     }
 }
 
-fn clock_state_from_str(text: &str) -> Result<DeviceClockState, StorageError> {
+pub(crate) fn clock_state_from_str(text: &str) -> Result<DeviceClockState, StorageError> {
     match text {
         "gps_locked" => Ok(DeviceClockState::GpsLocked),
         "rtc" => Ok(DeviceClockState::Rtc),
@@ -283,7 +512,7 @@ fn clock_state_from_str(text: &str) -> Result<DeviceClockState, StorageError> {
     }
 }
 
-const fn fallback_to_str(reason: FallbackReason) -> &'static str {
+pub(crate) const fn fallback_to_str(reason: FallbackReason) -> &'static str {
     match reason {
         FallbackReason::NoReaderTimestamp => "no_reader_timestamp",
         FallbackReason::ReaderUptimeOnly => "reader_uptime_only",
@@ -292,7 +521,7 @@ const fn fallback_to_str(reason: FallbackReason) -> &'static str {
     }
 }
 
-fn fallback_from_str(text: &str) -> Result<FallbackReason, StorageError> {
+pub(crate) fn fallback_from_str(text: &str) -> Result<FallbackReason, StorageError> {
     match text {
         "no_reader_timestamp" => Ok(FallbackReason::NoReaderTimestamp),
         "reader_uptime_only" => Ok(FallbackReason::ReaderUptimeOnly),
@@ -308,7 +537,7 @@ fn u64_to_i64(value: u64, field: &'static str) -> Result<i64, StorageError> {
     i64::try_from(value).map_err(|_| StorageError::Decode(format!("{field} exceeds i64 range")))
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -446,6 +675,160 @@ mod tests {
             assert_eq!(before.read, after.read);
             assert_eq!(before.seq, after.seq);
         }
+    }
+
+    #[test]
+    fn every_appended_read_is_in_the_sidecar_as_well_as_the_database() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+
+        let mut journal = SqliteJournal::open(&path).expect("open");
+        journal
+            .append_batch(&[sample_read("A", 0), sample_read("B", 1)])
+            .expect("append");
+
+        let status = journal.survey().expect("survey");
+        assert_eq!(status.records, 2);
+        assert!(status.is_clean(), "got: {status:?}");
+    }
+
+    #[test]
+    fn a_database_that_is_lost_entirely_is_rebuilt_from_the_sidecar() {
+        // The disaster this whole mechanism exists for: the SQLite file is gone or
+        // unreadable, and the only surviving copy of the evidence is a text file.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+
+        let written = {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            journal
+                .append_batch(&[
+                    sample_read("A", 0),
+                    sample_read("B", 1),
+                    sample_read("C", 2),
+                ])
+                .expect("append");
+            // Read back rather than trusting what `append_batch` returned: the value it
+            // hands back still carries nanosecond precision, while both the database and
+            // the sidecar persist microseconds. The claim under test is that what was
+            // stored comes back, so the comparison has to start from what was stored.
+            journal.read_all().expect("read all")
+        };
+
+        // Destroy the database and everything SQLite keeps beside it. The sidecar stays.
+        for suffix in ["", "-wal", "-shm"] {
+            let mut victim = path.as_os_str().to_owned();
+            victim.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(victim));
+        }
+        assert!(!path.exists());
+
+        let (recovered, report) = SqliteJournal::open_recovering(&path).expect("recover");
+        assert_eq!(report.replayed_into_database, 3);
+        assert_eq!(report.backfilled_into_sidecar, 0);
+        assert_eq!(report.found.missing_from_database, 3);
+
+        let after = recovered.read_all().expect("read all");
+        assert_eq!(after.len(), 3);
+        for (before, after) in written.iter().zip(after.iter()) {
+            assert_eq!(
+                before.read, after.read,
+                "a recovered read must be the read that was written, not an approximation"
+            );
+            assert_eq!(
+                before.recorded_at, after.recorded_at,
+                "recovery must not restamp evidence with the time of the recovery"
+            );
+        }
+        // Sequence numbers are reassigned by the fresh database, and contiguously — which
+        // is what `doctor`'s journal.sequence check needs to stay meaningful.
+        assert_eq!(
+            after.iter().map(|s| s.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn a_database_written_before_the_sidecar_existed_acquires_one() {
+        // The upgrade path: a Pi that timed an event on a Milestone 4 binary, handed a
+        // build that expects a sidecar. The evidence must gain a backstop, not a warning.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+
+        {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            journal
+                .append_batch(&[sample_read("A", 0), sample_read("B", 1)])
+                .expect("append");
+        }
+        std::fs::remove_file(sidecar::path_for(&path)).expect("remove sidecar");
+
+        let journal = SqliteJournal::open(&path).expect("reopen");
+        let status = journal.survey().expect("survey");
+        assert_eq!(status.missing_from_sidecar, 2);
+        assert_eq!(status.missing_from_database, 0);
+        assert!(!status.is_clean());
+
+        let (recovered, report) = SqliteJournal::open_recovering(&path).expect("recover");
+        assert_eq!(report.backfilled_into_sidecar, 2);
+        assert_eq!(report.replayed_into_database, 0);
+        assert!(
+            recovered.survey().expect("survey").is_clean(),
+            "after backfill the two must agree"
+        );
+    }
+
+    #[test]
+    fn reconciling_twice_repairs_nothing_the_second_time() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            journal.append(&sample_read("A", 0)).expect("append");
+        }
+        std::fs::remove_file(sidecar::path_for(&path)).expect("remove sidecar");
+
+        let (mut journal, first) = SqliteJournal::open_recovering(&path).expect("recover");
+        assert!(first.repaired_anything());
+
+        let second = journal.reconcile().expect("reconcile again");
+        assert!(
+            !second.repaired_anything(),
+            "recovery must be idempotent, or running it twice doubles the evidence"
+        );
+        assert_eq!(journal.count().expect("count"), 1);
+    }
+
+    #[test]
+    fn surveying_a_divergence_does_not_repair_it() {
+        // `reads --follow` opens a journal. An observer that writes is not an observer.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            journal.append(&sample_read("A", 0)).expect("append");
+        }
+        std::fs::remove_file(&path).expect("remove database");
+
+        let journal = SqliteJournal::open(&path).expect("reopen");
+        assert_eq!(journal.survey().expect("survey").missing_from_database, 1);
+        assert_eq!(
+            journal.count().expect("count"),
+            0,
+            "surveying must leave the database exactly as it found it"
+        );
+        assert_eq!(
+            journal.survey().expect("survey").missing_from_database,
+            1,
+            "and the divergence must still be there to report"
+        );
+    }
+
+    #[test]
+    fn an_in_memory_journal_has_no_sidecar_and_says_so() {
+        let journal = SqliteJournal::open_in_memory().expect("open");
+        assert!(journal.sidecar_path().is_none());
+        assert_eq!(journal.survey().expect("survey"), SidecarStatus::default());
     }
 
     #[test]

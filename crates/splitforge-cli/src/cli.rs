@@ -161,6 +161,18 @@ pub enum Command {
     #[command(subcommand)]
     Backup(BackupCommand),
 
+    /// Replay the write-ahead sidecar into the database, and the database into it.
+    ///
+    /// Runs automatically whenever the writing process starts. Run it by hand after a
+    /// restore, or when `doctor` reports the two have drifted apart.
+    Recover {
+        /// Read from this sidecar instead of the one beside the database.
+        ///
+        /// For rebuilding into a fresh database when the original file is gone.
+        #[arg(long, value_name = "PATH")]
+        sidecar: Option<PathBuf>,
+    },
+
     /// Check that the database and its configuration are sound.
     Doctor {
         /// Which race to check. Omit to check every configured race.
@@ -588,6 +600,23 @@ pub enum BackupCommand {
         #[arg(value_name = "PATH")]
         destination: PathBuf,
     },
+
+    /// Restore a snapshot over the event database.
+    ///
+    /// The snapshot is verified before anything is moved, the displaced database is
+    /// renamed rather than deleted, and the sidecar is left alone — it holds the reads the
+    /// snapshot predates. Follow this with `splitforge recover`.
+    Restore {
+        /// The snapshot to restore.
+        #[arg(value_name = "PATH")]
+        snapshot: PathBuf,
+
+        /// Move the existing database aside and restore over it.
+        ///
+        /// Without this, a restore onto an existing database is refused.
+        #[arg(long)]
+        replace: bool,
+    },
 }
 
 /// Shape of an export.
@@ -759,6 +788,10 @@ mod tests {
             ],
             &["splitforge", "results", "declarations"],
             &["splitforge", "backup", "create", "snap.db"],
+            &["splitforge", "backup", "restore", "snap.db"],
+            &["splitforge", "backup", "restore", "snap.db", "--replace"],
+            &["splitforge", "recover"],
+            &["splitforge", "recover", "--sidecar", "old.db.reads.jsonl"],
             &["splitforge", "doctor"],
             &["splitforge", "audit"],
             &["splitforge", "status"],
@@ -773,6 +806,45 @@ mod tests {
             let rendered = format!("{:?}", cli.command);
             assert!(!rendered.is_empty(), "{invocation:?}");
         }
+    }
+
+    #[test]
+    fn restoring_over_an_existing_database_requires_saying_so() {
+        let cli =
+            Cli::try_parse_from(["splitforge", "backup", "restore", "snap.db"]).expect("parse");
+        let Command::Backup(BackupCommand::Restore { replace, .. }) = cli.command else {
+            panic!("expected a restore command");
+        };
+        assert!(
+            !replace,
+            "the destructive form must be the one the operator has to type, not the default"
+        );
+
+        let cli = Cli::try_parse_from(["splitforge", "backup", "restore", "snap.db", "--replace"])
+            .expect("parse");
+        let Command::Backup(BackupCommand::Restore { replace, snapshot }) = cli.command else {
+            panic!("expected a restore command");
+        };
+        assert!(replace);
+        assert_eq!(snapshot, PathBuf::from("snap.db"));
+    }
+
+    #[test]
+    fn recover_can_be_pointed_at_a_sidecar_that_is_not_beside_the_database() {
+        let cli = Cli::try_parse_from([
+            "splitforge",
+            "--database",
+            "fresh.db",
+            "recover",
+            "--sidecar",
+            "destroyed.db.reads.jsonl",
+        ])
+        .expect("parse");
+        assert_eq!(cli.database, PathBuf::from("fresh.db"));
+        let Command::Recover { sidecar } = cli.command else {
+            panic!("expected a recover command");
+        };
+        assert_eq!(sidecar, Some(PathBuf::from("destroyed.db.reads.jsonl")));
     }
 
     #[test]

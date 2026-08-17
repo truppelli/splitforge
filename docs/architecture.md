@@ -135,6 +135,7 @@ it implements `ReaderProvider` and the engine cannot tell the difference.
 sequenceDiagram
     participant R as RFID reader
     participant A as Adapter (llrp)
+    participant W as Sidecar (text)
     participant J as Raw read journal
     participant E as Engine
     participant S as Results
@@ -142,6 +143,8 @@ sequenceDiagram
 
     R->>A: reader report (binary)
     A->>A: parse → RawRead (normalized)
+    A->>W: append + fsync
+    Note over W: Write-ahead. The sidecar is a<br/>superset of the journal, always.
     A->>J: append (fsync)
     Note over J: Durable. Immutable.<br/>Everything after this is derived.
     J-->>A: ack
@@ -156,10 +159,17 @@ sequenceDiagram
     Note over S: Revision N still exists,<br/>unchanged, forever.
 ```
 
-The ordering constraint is absolute: **the journal write completes before the engine is
-told anything.** If the process dies between those two steps, the read survives and the
-engine recomputes on restart. If they were reordered, a crash could produce a timing
-event with no evidence behind it.
+Two ordering constraints, both absolute.
+
+**The sidecar write completes before the journal write.** That is what makes the sidecar a
+superset rather than a race: a crash between them leaves a read on disk in a form that
+needs no SQLite to read, and the next writer start replays it. Reversed, the same crash
+would leave a read in a database nothing else has a copy of — which is the situation the
+sidecar exists to prevent ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)).
+
+**The journal write completes before the engine is told anything.** If the process dies
+between those two steps, the read survives and the engine recomputes on restart. If they
+were reordered, a crash could produce a timing event with no evidence behind it.
 
 ### Derivation is idempotent
 
@@ -176,7 +186,7 @@ is what makes crash recovery boring: on restart, re-derive from the journal and 
 | Network uplink lost | No effect. Nothing on the read path uses it. Outbound sync queues to the local outbox |
 | Power loss | SQLite WAL + `synchronous=FULL` on the journal write. Reads acknowledged before the cut are present after reboot |
 | Disk full | Warn at a configurable threshold, refuse non-essential writes first (diagnostic captures, exports), keep the journal writable as long as possible, surface loudly |
-| Database corruption | `splitforge doctor` runs integrity checks. Pre-race snapshot enables restore. **OPEN:** see [Q7](open-questions.md#q7-corruption-recovery-strategy) |
+| Database corruption | Every read is appended to a plain-text sidecar and fsynced **before** the database write, so the sidecar is always a superset ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)). `splitforge doctor` detects; `backup restore` brings back the configuration and `splitforge recover` replays the reads the snapshot predates |
 | Clock steps mid-race | Reads keep their reader timestamps. Device clock offset recorded per read so a step is visible in the audit trail rather than silently baked in |
 | Operator error (wrong roster) | Roster import is versioned; re-import produces a new derivation, not a destroyed journal |
 | RaceDay Connect unavailable | Nothing happens to timing. Outbox retries. Event completes normally |

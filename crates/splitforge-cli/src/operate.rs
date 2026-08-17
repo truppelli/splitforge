@@ -7,7 +7,7 @@ use std::time::Duration as StdDuration;
 use anyhow::{Context, Result};
 use splitforge_domain::{CheckpointKind, RaceConfig, RawReadJournal, StartMode};
 use splitforge_engine::{DerivationInput, derive};
-use splitforge_storage::{ConfigStore, SqliteJournal};
+use splitforge_storage::{ConfigStore, RecoveryReport, SqliteJournal};
 
 use crate::cli::{ExportFormat, Format};
 use crate::report::{DoctorReport, Finding, RawReadView};
@@ -61,6 +61,33 @@ pub(crate) async fn tail(
     }
 }
 
+/// What a reconciliation moved, as the operator sees it.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct RecoveryView {
+    /// Reads the sidecar holds and verified.
+    pub sidecar_records: u64,
+    /// Reads replayed out of the sidecar into the database.
+    pub replayed_into_database: u64,
+    /// Reads copied into the sidecar so it is a superset again.
+    pub backfilled_into_sidecar: u64,
+    /// Lines that failed their digest. Damage, and unrecoverable from this file.
+    pub corrupt_lines: u64,
+    /// Trailing bytes from an interrupted write. Expected after a power cut.
+    pub torn_tail_bytes: u64,
+}
+
+impl RecoveryView {
+    pub(crate) const fn of(report: &RecoveryReport) -> Self {
+        Self {
+            sidecar_records: report.found.records,
+            replayed_into_database: report.replayed_into_database,
+            backfilled_into_sidecar: report.backfilled_into_sidecar,
+            corrupt_lines: report.found.corrupt_lines,
+            torn_tail_bytes: report.found.torn_tail_bytes,
+        }
+    }
+}
+
 /// Checks that the database and its configuration are sound.
 ///
 /// Deliberately opinionated about what counts as an error rather than a warning: an error
@@ -84,6 +111,51 @@ pub(crate) fn doctor(
     checks_run += 1;
     for problem in store.foreign_key_check()? {
         findings.push(Finding::error("database.foreign_keys", problem));
+    }
+
+    // The sidecar is the independent answer to "is the evidence recoverable if this file
+    // is not?". Reported, never repaired: `doctor` is a diagnosis and repair is `recover`.
+    checks_run += 1;
+    let sidecar = journal.survey()?;
+    if sidecar.missing_from_database > 0 {
+        findings.push(Finding::error(
+            "journal.sidecar",
+            format!(
+                "{} read(s) are in the sidecar but not in the database. \
+                 Run `splitforge recover` to replay them.",
+                sidecar.missing_from_database
+            ),
+        ));
+    }
+    if sidecar.missing_from_sidecar > 0 {
+        findings.push(Finding::warning(
+            "journal.sidecar",
+            format!(
+                "{} read(s) are in the database but not in the sidecar, so they have no \
+                 second copy. Run `splitforge recover` to back them up.",
+                sidecar.missing_from_sidecar
+            ),
+        ));
+    }
+    if sidecar.corrupt_lines > 0 {
+        findings.push(Finding::error(
+            "journal.sidecar",
+            format!(
+                "{} sidecar line(s) failed their checksum. Those reads cannot be recovered \
+                 from this file; the database is now the only copy.",
+                sidecar.corrupt_lines
+            ),
+        ));
+    }
+    if sidecar.torn_tail_bytes > 0 {
+        findings.push(Finding::warning(
+            "journal.sidecar",
+            format!(
+                "the sidecar ends with {} byte(s) of an unfinished write, which is the \
+                 expected shape after a power cut. The reads before it are intact.",
+                sidecar.torn_tail_bytes
+            ),
+        ));
     }
 
     // The journal's sequence numbers are the independent answer to "did we lose a read?".
