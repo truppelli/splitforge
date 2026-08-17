@@ -825,6 +825,23 @@ mod tests {
     }
 
     #[test]
+    fn a_journal_that_cannot_write_its_sidecar_refuses_to_open() {
+        // Failing loud, per docs/threat-model.md § 5: a process that quietly ran on without
+        // its backstop would keep timing while advertising a guarantee it no longer has,
+        // and nobody would find out until the day the database broke.
+        let dir = tempdir().expect("tempdir");
+        let database = dir.path().join("event.db");
+        let unreachable = dir.path().join("no-such-directory").join("reads.jsonl");
+
+        let error = SqliteJournal::open_with_sidecar(&database, unreachable)
+            .expect_err("a journal without a sidecar must not open");
+        assert!(
+            matches!(error, StorageError::Sidecar(_)),
+            "the failure must name the sidecar, not arrive as a generic error: {error}"
+        );
+    }
+
+    #[test]
     fn an_in_memory_journal_has_no_sidecar_and_says_so() {
         let journal = SqliteJournal::open_in_memory().expect("open");
         assert!(journal.sidecar_path().is_none());

@@ -33,6 +33,10 @@ use uuid::Uuid;
 
 use crate::StorageError;
 use crate::connection::{self, from_micros, to_micros};
+use crate::space::DEFAULT_MIN_FREE_BYTES;
+
+/// Key under which the free-space floor is stored in `device_settings`.
+const MIN_FREE_BYTES_KEY: &str = "min_free_bytes";
 
 /// What an import changed.
 ///
@@ -811,6 +815,66 @@ impl ConfigStore {
         Ok(out)
     }
 
+    // ---- device settings --------------------------------------------------------
+
+    /// The free-space floor below which this device refuses to start a race, in bytes.
+    ///
+    /// Falls back to [`DEFAULT_MIN_FREE_BYTES`] when unset, and — importantly — also when
+    /// the stored value cannot be parsed. A device that has been configured with nonsense
+    /// should apply the conservative default rather than no floor at all: the failure mode
+    /// of "unreadable setting means unlimited" is a race that fills the card.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the settings table cannot be read.
+    pub fn min_free_bytes(&self) -> Result<u64, StorageError> {
+        Ok(self
+            .device_setting(MIN_FREE_BYTES_KEY)?
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_MIN_FREE_BYTES))
+    }
+
+    /// Sets the free-space floor, in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the write fails.
+    pub fn set_min_free_bytes(&mut self, bytes: u64) -> Result<(), StorageError> {
+        self.set_device_setting(MIN_FREE_BYTES_KEY, &bytes.to_string())
+    }
+
+    /// Reads one device setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the row cannot be read.
+    pub fn device_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM device_settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Writes one device setting, replacing any previous value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the write fails.
+    pub fn set_device_setting(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
+        let now = to_micros(OffsetDateTime::now_utc())?;
+        self.conn.execute(
+            "INSERT INTO device_settings (key, value, updated_at_us) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                            updated_at_us = excluded.updated_at_us",
+            params![key, value, now],
+        )?;
+        Ok(())
+    }
+
     // ---- audit ------------------------------------------------------------------
 
     /// Appends to the audit trail.
@@ -1025,6 +1089,45 @@ mod tests {
     use time::macros::datetime;
 
     const START: OffsetDateTime = datetime!(2026-04-11 08:00:00 UTC);
+
+    #[test]
+    fn an_unset_free_space_floor_is_the_conservative_default() {
+        let store = ConfigStore::open_in_memory().expect("open");
+        assert_eq!(
+            store.min_free_bytes().expect("read"),
+            DEFAULT_MIN_FREE_BYTES
+        );
+    }
+
+    #[test]
+    fn the_free_space_floor_round_trips_and_replaces_rather_than_accumulating() {
+        let mut store = ConfigStore::open_in_memory().expect("open");
+        store.set_min_free_bytes(512 * 1024 * 1024).expect("set");
+        assert_eq!(store.min_free_bytes().expect("read"), 512 * 1024 * 1024);
+
+        store
+            .set_min_free_bytes(64 * 1024 * 1024)
+            .expect("set again");
+        assert_eq!(
+            store.min_free_bytes().expect("read"),
+            64 * 1024 * 1024,
+            "a setting is a value, not a log"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_free_space_floor_falls_back_to_the_default_rather_than_to_none() {
+        // The dangerous reading of a corrupt setting is "no floor at all", which turns a
+        // typo into a race that fills the card. It must fail conservative.
+        let mut store = ConfigStore::open_in_memory().expect("open");
+        store
+            .set_device_setting(MIN_FREE_BYTES_KEY, "plenty")
+            .expect("set");
+        assert_eq!(
+            store.min_free_bytes().expect("read"),
+            DEFAULT_MIN_FREE_BYTES
+        );
+    }
 
     fn seeded() -> (ConfigStore, Race, Checkpoint) {
         let mut store = ConfigStore::open_in_memory().expect("open");

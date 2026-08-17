@@ -161,6 +161,10 @@ pub enum Command {
     #[command(subcommand)]
     Backup(BackupCommand),
 
+    /// Settings that belong to this device rather than to any race.
+    #[command(subcommand)]
+    Device(DeviceCommand),
+
     /// Replay the write-ahead sidecar into the database, and the database into it.
     ///
     /// Runs automatically whenever the writing process starts. Run it by hand after a
@@ -247,6 +251,13 @@ pub enum RaceCommand {
         /// Why, for the audit trail.
         #[arg(long, value_name = "TEXT")]
         note: Option<String>,
+
+        /// Start even though free disk space is below the configured floor.
+        ///
+        /// Requires `--note`: an override nobody has to justify is a check nobody has to
+        /// think about, and the reason belongs in the audit trail beside the decision.
+        #[arg(long, requires = "note")]
+        force: bool,
     },
     /// Record that the race is closed.
     Stop {
@@ -591,7 +602,24 @@ pub enum ExportCommand {
     },
 }
 
-/// Backup commands.
+/// Device-level settings: properties of the machine, not of the event.
+#[derive(Debug, Subcommand)]
+pub enum DeviceCommand {
+    /// Change a device-level setting.
+    Set {
+        /// Refuse to start a race with less than this much free space, in mebibytes.
+        ///
+        /// A property of the storage device, not of the event — which is why it lives here
+        /// rather than in `policy set`.
+        #[arg(long, value_name = "MB")]
+        min_free_mb: Option<u64>,
+    },
+
+    /// Show device settings and what the disk currently has left.
+    Show,
+}
+
+/// Backups and restores.
 #[derive(Debug, Subcommand)]
 pub enum BackupCommand {
     /// Write a consistent snapshot. Never overwrites.
@@ -787,6 +815,16 @@ mod tests {
                 "course cut",
             ],
             &["splitforge", "results", "declarations"],
+            &["splitforge", "device", "set", "--min-free-mb", "512"],
+            &["splitforge", "device", "show"],
+            &[
+                "splitforge",
+                "race",
+                "start",
+                "--force",
+                "--note",
+                "USB SSD attached",
+            ],
             &["splitforge", "backup", "create", "snap.db"],
             &["splitforge", "backup", "restore", "snap.db"],
             &["splitforge", "backup", "restore", "snap.db", "--replace"],
@@ -806,6 +844,49 @@ mod tests {
             let rendered = format!("{:?}", cli.command);
             assert!(!rendered.is_empty(), "{invocation:?}");
         }
+    }
+
+    #[test]
+    fn forcing_a_start_past_the_disk_check_requires_a_reason() {
+        // The override has to be justified in the audit trail, so the parser refuses the
+        // bare form. An escape hatch nobody has to explain is a check nobody has to think
+        // about.
+        Cli::try_parse_from(["splitforge", "race", "start", "--force"])
+            .expect_err("--force without --note must not parse");
+
+        let cli = Cli::try_parse_from([
+            "splitforge",
+            "race",
+            "start",
+            "--force",
+            "--note",
+            "USB SSD attached",
+        ])
+        .expect("parse");
+        let Command::Race(RaceCommand::Start { force, note, .. }) = cli.command else {
+            panic!("expected a race start");
+        };
+        assert!(force);
+        assert_eq!(note.as_deref(), Some("USB SSD attached"));
+    }
+
+    #[test]
+    fn a_start_is_unforced_unless_asked() {
+        let cli = Cli::try_parse_from(["splitforge", "race", "start"]).expect("parse");
+        let Command::Race(RaceCommand::Start { force, .. }) = cli.command else {
+            panic!("expected a race start");
+        };
+        assert!(!force, "the gate must be on by default or it is not a gate");
+    }
+
+    #[test]
+    fn the_free_space_floor_is_set_in_mebibytes() {
+        let cli = Cli::try_parse_from(["splitforge", "device", "set", "--min-free-mb", "512"])
+            .expect("parse");
+        let Command::Device(DeviceCommand::Set { min_free_mb }) = cli.command else {
+            panic!("expected a device set");
+        };
+        assert_eq!(min_free_mb, Some(512));
     }
 
     #[test]

@@ -40,6 +40,7 @@ mod journal;
 mod migrations;
 mod results;
 mod sidecar;
+mod space;
 
 use thiserror::Error;
 
@@ -51,6 +52,7 @@ pub use config::{AuditEntry, ConfigStore, ImportSummary, RaceSelection, parse_ch
 pub use journal::{RecoveryReport, SidecarStatus, SqliteJournal};
 pub use migrations::{MIGRATIONS, Migration, SCHEMA_VERSION};
 pub use results::{ResultStore, RevisionSummary};
+pub use space::{DEFAULT_MIN_FREE_BYTES, DiskSpace, disk_space};
 
 /// A storage-layer failure.
 #[derive(Debug, Error)]
