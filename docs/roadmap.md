@@ -16,6 +16,7 @@ flowchart LR
     M3 -.->|"gate:<br/>real hardware<br/>in hand"| M3
     style M0 fill:#2d6a4f,color:#fff
     style M1 fill:#2d6a4f,color:#fff
+    style M2 fill:#2d6a4f,color:#fff
 ```
 
 ---
@@ -88,7 +89,7 @@ and doing it early would mean doing it before the operator interface exists to c
 
 ## Milestone 2 — Local event console
 
-**Status: this pull request.**
+**Status: complete.**
 
 Minimum operator interface. CLI first; a web UI only after the core behavior is proven.
 
@@ -96,10 +97,12 @@ Minimum operator interface. CLI first; a web UI only after the core behavior is 
 splitforge init
 splitforge event create   --name "Spring Series"
 splitforge race create    --name 5K --start 2026-04-11T08:00:00Z
+splitforge checkpoint add --name start  --kind start
 splitforge checkpoint add --name finish --kind finish
 splitforge roster import  participants.csv
 splitforge chips import   assignments.csv
 splitforge reader add     --id mat
+splitforge reader map     --reader mat --antenna 1 --checkpoint start
 splitforge reader map     --reader mat --antenna 2 --checkpoint finish
 splitforge policy set     --checkpoint finish --selection-rule first-above-rssi:-62
 splitforge race start
@@ -114,6 +117,38 @@ splitforge audit
 
 **Exit criterion:** a simulated race can be configured and operated end to end without
 ever touching the database directly.
+
+**Observed.** The 5K above, configured from nothing but the commands listed — no fixture,
+no SQLite prompt — with the roster and chip assignments arriving as CSV, which is what an
+organizer actually has:
+
+```console
+$ splitforge roster import participants.csv
+{"race":"5K","inserted":12,"updated":0,"unchanged":0,"total":12}
+
+$ splitforge doctor
+{"schema_version":2,"checks_run":12,"errors":0,"warnings":0,"findings":[]}
+
+$ splitforge simulate --scenario five-k
+{"scenario":"five-k","race":"5K","reader":"mat","planned_crossings":24,
+ "reads_scripted":638,"reads_persisted":638,"journal_total":638,"first_seq":1,"last_seq":638}
+
+$ splitforge derive
+{"race":"5K","raw_reads":638,"accepted":24,"rejected":614,"timing_events":23,
+ "unassigned_crossings":1,"rejections_by_reason":{"duplicate_within_window":614}}
+
+$ splitforge export crossings --as csv --output crossings.csv   # 24 rows
+$ splitforge backup create snapshot.db
+{"bytes":380928,"raw_reads":638}
+```
+
+The thirteen audit rows behind that run reconstruct the entire configuration — every
+`create`, `import`, `map`, and `set`, with the operator who ran it and the values they
+supplied. The one unassigned crossing is a chip that was never on the roster: recorded as
+evidence, credited to nobody, and reported rather than dropped.
+
+`crates/splitforge-cli/tests/console.rs` holds the same claim as fourteen tests that reach
+for no library type an operator does not have.
 
 **Two corrections to this milestone as originally written**, both made deliberately rather
 than silently:
