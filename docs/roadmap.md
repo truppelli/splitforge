@@ -289,7 +289,8 @@ Operational safety, not features. This milestone is what separates a demo from a
 
 - systemd service with restart policy and startup ordering
 - Health endpoint and downloadable diagnostic bundle
-- Free-disk warning and defined write-failure behavior
+- [x] Free-disk warning and defined write-failure behavior
+      ([ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md))
 - **Clock discipline:** DS3231 RTC support, GPS/PPS integration, Pi as LAN NTP server,
   clock state as a blocking pre-race check
   ([clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms))
@@ -299,7 +300,7 @@ Operational safety, not features. This milestone is what separates a demo from a
 - Pi deployment guide: external power, wired Ethernet first, race-day Wi-Fi treated as a
   known risk
 
-**Two items landed early**, for the same reason Milestone 4 did: they need no hardware, and
+**Three items landed early**, for the same reason Milestone 4 did: they need no hardware, and
 leaving them until after Milestone 3 would have meant timing a real event with a recovery
 story that existed only as an open question. `backup restore` and `splitforge recover` are
 built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed.
@@ -347,9 +348,48 @@ describing a state it just changed. `crates/splitforge-cli/tests/recovery.rs` ho
 claim as nine tests that destroy the file three different ways — deleted, overwritten with
 garbage, and with no snapshot to restore from at all.
 
+**Observed**, the free-space gate. The floor here was set to something no machine can
+satisfy, which is how the below-the-floor path is reachable on demand:
+
+```console
+$ splitforge device show
+{"database":"event.db","min_free_mb":256,"free_mb":9407,"total_mb":487070,"above_floor":true}
+
+$ splitforge device set --min-free-mb 999999999
+{"min_free_mb":999999999}
+
+$ splitforge doctor
+{"errors":1,"findings":[{"severity":"error","check":"storage.free_space",
+ "detail":"9407 MB free, below the 999999999 MB floor.
+           `splitforge race start` will refuse until this is resolved."}]}
+
+$ splitforge race start
+error: 9407 MB free, below the 999999999 MB floor. The journal has to hold the whole
+       event, and a disk that fills mid-race stops recording. Free space, lower the floor
+       with `splitforge device set --min-free-mb`, or start anyway with `--force --note`.
+
+$ splitforge backup create snap.db
+error: 9407 MB free; a snapshot of this database needs 1 MB and must leave the 999999999 MB
+       floor behind it. The journal keeps writing — it is the backup that is refused.
+
+$ splitforge race start --force --note "USB SSD attached, floor is stale"
+{"action":"start","forced":true,"free_mb":9407,"note":"USB SSD attached, floor is stale",...}
+
+$ splitforge audit --limit 1
+[{"action":"race.start","subject":"5K","detail":{"forced":true,"free_mb":9407,
+  "reason":"USB SSD attached, floor is stale"}}]
+```
+
+The last two commands are the decision that [ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md)
+records: the gate blocks, the organizer can walk past it, and walking past it writes down
+who did and why. The backup is refused while the journal keeps accepting reads, which is the
+shedding order [architecture.md § 4](architecture.md#4-failure-behavior) asks for.
+
 What this does **not** retire is the reliability work that needs a Pi: whether an SD card
-honors `fsync` at all, what the second sync per reader report costs on real flash, and
-what happens to a write in flight when the power goes. Those stay exactly where they were.
+honors `fsync` at all, what the second sync per reader report costs on real flash, what
+happens to a write in flight when the power goes, and what a full day's journal actually
+weighs — the 256 MiB default is a judgement against the 5K fixture, not a measurement.
+Those stay exactly where they were.
 
 **Exit criterion:** a full-length event is timed on real hardware while an observer
 randomly pulls power, unplugs Ethernet, and restarts the service — and no acknowledged

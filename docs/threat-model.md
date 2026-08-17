@@ -83,7 +83,7 @@ Severity is impact on a live event. **M#** is the milestone that owns the mitiga
 | # | Risk | Severity | Mitigation | M# |
 |---|---|---|---|---|
 | O1 | **Power loss mid-write** | Critical | SQLite WAL, `synchronous=FULL` on journal appends. A read is acknowledged only after the append returns. Crash-during-write is a tested scenario, not an assumption | M1, M5 |
-| O2 | **Storage exhaustion** | Critical | Warn at configurable threshold; shed non-essential writes first (diagnostic captures, exports) and keep the journal writable longest. Pre-race free-space check is blocking | M5 |
+| O2 | **Storage exhaustion** | Critical | Configurable floor in `device_settings`; `doctor` warns approaching it and errors below it, `race start` refuses below it. Non-essential writes shed first (snapshots, exports) and the journal is never gated. The block is overridable with `--force --note`, recorded ([ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md)) | M4 |
 | O3 | **SD card wear/failure** | Critical | Recommend high-endurance media or USB SSD. Pre-race snapshot. Periodic backup to separate media. Restore rehearsed, not improvised | M5 |
 | O4 | **Database corruption** | Critical | Write-ahead text sidecar fsynced before every database write, so the evidence survives the file ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)). Integrity check in `splitforge doctor`; `backup restore` for the configuration, `splitforge recover` for the reads; append-only journal limits blast radius | M4 |
 | O5 | **Clock wrong or drifting** | High | Full analysis in [clock and time discipline](clock-and-time-discipline.md). RTC + GPS/PPS, continuous offset/skew measurement, clock state as a blocking pre-race check | M3, M5 |
@@ -123,11 +123,20 @@ Severity is impact on a live event. **M#** is the milestone that owns the mitiga
 5. **Availability is a security property here.** A timer that refuses to run because a
    security check failed has caused the harm it was protecting against.
 
+Principle 5 and the checklist in § 6 pull against each other, and implementing the first
+pre-race gate is what made that visible. A check that always blocks will eventually stop a
+race that would have been fine; a check that never blocks is a warning, and warnings scroll
+past at 07:55. The resolution — **refuse by default, override with `--force` and a required
+reason, record both** — is [ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md),
+and it applies to every item below, not only to the one that has been built.
+
 ## 6. Pre-race operational checklist
 
-Blocking items. Any failure stops the race start, not the timing.
+Blocking items. Any failure stops the race start, not the timing — with the deliberate,
+recorded override described above. Checked boxes are enforced by the software today; the
+rest are procedure until the milestone that implements them.
 
-- [ ] Free disk space above threshold
+- [x] Free disk space above threshold — enforced by `splitforge race start`, which refuses below the floor set with `splitforge device set --min-free-mb`
 - [ ] **Clock state acceptable** — GPS locked, or RTC + recent sync; never `unsynced`
 - [ ] Reader connected, reporting, antenna mapping verified
 - [ ] Reader timestamp type confirmed (`UTCTimestamp` vs `Uptime`), offset within threshold

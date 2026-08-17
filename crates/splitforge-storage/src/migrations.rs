@@ -16,7 +16,7 @@ pub struct Migration {
 }
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Every migration, in order.
 pub const MIGRATIONS: &[Migration] = &[
@@ -34,6 +34,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "results_and_revisions",
         sql: RESULTS_AND_REVISIONS,
+    },
+    Migration {
+        version: 4,
+        name: "device_settings",
+        sql: DEVICE_SETTINGS,
     },
 ];
 
@@ -370,4 +375,23 @@ BEFORE DELETE ON result_entries
 BEGIN
     SELECT RAISE(ABORT, 'result_entries is immutable: DELETE is not permitted');
 END;
+";
+
+const DEVICE_SETTINGS: &str = r"
+-- Settings that belong to the *device* rather than to any race: the Pi this binary runs
+-- on, not the event it happens to be timing. A free-space floor is a property of the SD
+-- card; it does not become a different number because the 10K starts.
+--
+-- Mutable, and deliberately so (ADR-0014). This is configuration, not evidence, so it
+-- carries no append-only triggers — the audit log records who changed it and to what,
+-- which is where that history belongs.
+--
+-- Key/value rather than a column per setting: the alternative is a migration every time a
+-- device-level knob appears, and the ones already visible on the roadmap (reader clock
+-- trust defaults, alarm thresholds) are exactly that shape.
+CREATE TABLE device_settings (
+    key            TEXT    PRIMARY KEY,
+    value          TEXT    NOT NULL,
+    updated_at_us  INTEGER NOT NULL
+) STRICT;
 ";

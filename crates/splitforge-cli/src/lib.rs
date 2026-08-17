@@ -52,9 +52,9 @@ use splitforge_engine::{DerivationInput, derive};
 use splitforge_storage::{ConfigStore, ResultStore, SqliteJournal};
 
 pub use cli::{
-    BackupCommand, CheckpointCommand, ChipsCommand, Cli, Command, EventCommand, ExportCommand,
-    ExportFormat, FixtureCommand, Format, PolicyCommand, RaceCommand, RaceRef, ReaderCommand,
-    ResultsCommand, RosterCommand, Speed,
+    BackupCommand, CheckpointCommand, ChipsCommand, Cli, Command, DeviceCommand, EventCommand,
+    ExportCommand, ExportFormat, FixtureCommand, Format, PolicyCommand, RaceCommand, RaceRef,
+    ReaderCommand, ResultsCommand, RosterCommand, Speed,
 };
 pub use configure::load_fixture;
 pub use report::{
@@ -129,15 +129,29 @@ pub async fn run(cli: Cli) -> Result<()> {
                     let views: Vec<RaceView> = store.races()?.iter().map(RaceView::of).collect();
                     emit(&views, format)
                 }
-                RaceCommand::Start { race, at, note } => record_session(
-                    &mut store,
-                    &actor,
+                RaceCommand::Start {
                     race,
                     at,
                     note,
-                    SessionAction::Start,
-                    format,
-                ),
+                    force,
+                } => {
+                    // The pre-race gate. Checked here rather than in `doctor` alone because
+                    // the checklist in docs/threat-model.md § 6 is only blocking if
+                    // something actually blocks — a warning in a different command is a
+                    // warning nobody ran.
+                    let space = operate::check_free_space(&database, &store, force)?;
+                    record_session(
+                        &mut store,
+                        &actor,
+                        race,
+                        at,
+                        note,
+                        SessionAction::Start,
+                        format,
+                        Some(space),
+                        force,
+                    )
+                }
                 RaceCommand::Stop { race, at, note } => record_session(
                     &mut store,
                     &actor,
@@ -146,6 +160,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     note,
                     SessionAction::Stop,
                     format,
+                    None,
+                    false,
                 ),
             }
         }
@@ -367,6 +383,40 @@ pub async fn run(cli: Cli) -> Result<()> {
             emit(&report, format)
         }
 
+        Command::Device(command) => {
+            let mut store = open_store(&database)?;
+            match command {
+                DeviceCommand::Set { min_free_mb } => {
+                    let Some(mb) = min_free_mb else {
+                        bail!("nothing to set; pass --min-free-mb");
+                    };
+                    let bytes = mb.saturating_mul(1024 * 1024);
+                    store.set_min_free_bytes(bytes)?;
+                    store.record_audit(
+                        &actor,
+                        "device.set",
+                        Some("min_free_mb"),
+                        Some(&format!(r#"{{"min_free_mb":{mb}}}"#)),
+                    )?;
+                    emit(&serde_json::json!({ "min_free_mb": mb }), format)
+                }
+                DeviceCommand::Show => {
+                    let floor = store.min_free_bytes()?;
+                    let space = splitforge_storage::disk_space(&database)?;
+                    emit(
+                        &serde_json::json!({
+                            "database": database.display().to_string(),
+                            "min_free_mb": floor / (1024 * 1024),
+                            "free_mb": space.available_mb(),
+                            "total_mb": space.total_mb(),
+                            "above_floor": space.is_above(floor),
+                        }),
+                        format,
+                    )
+                }
+            }
+        }
+
         Command::Recover { sidecar } => {
             let mut journal = match sidecar {
                 Some(path) => SqliteJournal::open_with_sidecar(&database, path),
@@ -446,6 +496,25 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         Command::Backup(BackupCommand::Create { destination }) => {
             let mut store = open_store(&database)?;
+            // A snapshot is roughly a second copy of the database, so the question is not
+            // "is there room" in general but "is there room for this, and still a floor
+            // afterwards". Refusing here keeps the journal writable, which is the ordering
+            // docs/architecture.md § 4 asks for: shed the non-essential write first.
+            let floor = store.min_free_bytes()?;
+            let space = splitforge_storage::disk_space(&database)?;
+            let needed = std::fs::metadata(&database).map(|m| m.len()).unwrap_or(0);
+            if space.available_bytes < needed.saturating_add(floor) {
+                bail!(
+                    "{} MB free; a snapshot of this database needs {} MB and must leave the \
+                     {} MB floor behind it. The journal keeps writing — it is the backup \
+                     that is refused.",
+                    space.available_mb(),
+                    // Round up, so a database under a megabyte reads as "needs 1 MB"
+                    // rather than "needs about 0 MB", which is both odd and untrue.
+                    needed.div_ceil(1024 * 1024),
+                    floor / (1024 * 1024)
+                );
+            }
             let report = splitforge_storage::create_backup(&store, &destination)?;
             store.record_audit(
                 &actor,
@@ -745,6 +814,7 @@ fn load_only_race_config(store: &ConfigStore) -> Result<RaceConfig> {
 }
 
 /// Records a start or a stop and reports it.
+#[allow(clippy::too_many_arguments)] // Two of these exist only to record the override.
 fn record_session(
     store: &mut ConfigStore,
     actor: &str,
@@ -753,10 +823,32 @@ fn record_session(
     note: Option<String>,
     action: SessionAction,
     format: Format,
+    space: Option<splitforge_storage::DiskSpace>,
+    forced: bool,
 ) -> Result<()> {
     let race = configure::resolve_race(store, race.race.as_deref())?;
     let at = configure::parse_instant(at.as_deref())?;
     let session = store.record_session(race.id, action, at, actor, note.as_deref())?;
+
+    // RFC 3339, not `Display`. The audit trail is machine-readable evidence, and
+    // `OffsetDateTime`'s `Display` renders `2026-04-11 8:00:00.0 +00:00:00`, which no
+    // parser this project uses will accept back.
+    let mut detail = serde_json::json!({
+        "at": at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+    });
+    if let Some(space) = space {
+        detail["free_mb"] = serde_json::json!(space.available_mb());
+    }
+    if forced {
+        // The whole point of the override is that it is legible afterwards. A start that
+        // went ahead below the floor must say so in the record, not only on the terminal
+        // of whoever typed it.
+        detail["forced"] = serde_json::json!(true);
+        detail["reason"] = serde_json::json!(note);
+    }
+
     store.record_audit(
         actor,
         match action {
@@ -764,16 +856,17 @@ fn record_session(
             SessionAction::Stop => "race.stop",
         },
         Some(&race.name),
-        // RFC 3339, not `Display`. The audit trail is machine-readable evidence, and
-        // `OffsetDateTime`'s `Display` renders `2026-04-11 8:00:00.0 +00:00:00`, which no
-        // parser this project uses will accept back.
-        Some(&format!(
-            r#"{{"at":"{}"}}"#,
-            at.format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default()
-        )),
+        Some(&serde_json::to_string(&detail).context("encoding session detail")?),
     )?;
-    emit(&SessionView::of(&session), format)
+
+    let mut view = serde_json::to_value(SessionView::of(&session)).context("encoding session")?;
+    if let Some(space) = space {
+        view["free_mb"] = serde_json::json!(space.available_mb());
+    }
+    if forced {
+        view["forced"] = serde_json::json!(true);
+    }
+    emit(&view, format)
 }
 
 /// Builds a policy view with checkpoint names resolved.

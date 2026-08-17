@@ -4,10 +4,10 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration as StdDuration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use splitforge_domain::{CheckpointKind, RaceConfig, RawReadJournal, StartMode};
 use splitforge_engine::{DerivationInput, derive};
-use splitforge_storage::{ConfigStore, RecoveryReport, SqliteJournal};
+use splitforge_storage::{ConfigStore, DiskSpace, RecoveryReport, SqliteJournal};
 
 use crate::cli::{ExportFormat, Format};
 use crate::report::{DoctorReport, Finding, RawReadView};
@@ -61,6 +61,40 @@ pub(crate) async fn tail(
     }
 }
 
+/// Refuses to proceed when free space is below the configured floor.
+///
+/// Returns the measurement either way, so the caller can record what the disk looked like
+/// at the moment of the decision — which is the number somebody will want afterwards.
+///
+/// # Errors
+///
+/// Returns an error when space is below the floor and `force` is not set, or when the
+/// filesystem cannot be measured at all.
+pub(crate) fn check_free_space(
+    database: &Path,
+    store: &ConfigStore,
+    force: bool,
+) -> Result<DiskSpace> {
+    let floor = store.min_free_bytes()?;
+    let space = splitforge_storage::disk_space(database)
+        .with_context(|| format!("measuring free space at {}", database.display()))?;
+
+    if space.is_above(floor) || force {
+        return Ok(space);
+    }
+
+    // Prose, with the numbers and the way out. The person reading this is outdoors and has
+    // somewhere else to be; "insufficient disk space" would make them go and find out what
+    // the threshold was.
+    bail!(
+        "{} MB free, below the {} MB floor. The journal has to hold the whole event, and a \
+         disk that fills mid-race stops recording. Free space, lower the floor with \
+         `splitforge device set --min-free-mb`, or start anyway with `--force --note \"...\"`.",
+        space.available_mb(),
+        floor / (1024 * 1024)
+    )
+}
+
 /// What a reconciliation moved, as the operator sees it.
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct RecoveryView {
@@ -111,6 +145,46 @@ pub(crate) fn doctor(
     checks_run += 1;
     for problem in store.foreign_key_check()? {
         findings.push(Finding::error("database.foreign_keys", problem));
+    }
+
+    // Free space is the check with the longest fuse. A journal grows all event and an SD
+    // card does not, and nothing announces the moment the next read cannot be written — so
+    // the useful place to say it is here, before the gun, while the answer is still
+    // "delete an old event file" rather than "the race stopped recording".
+    checks_run += 1;
+    match splitforge_storage::disk_space(database) {
+        Ok(space) => {
+            let floor = store.min_free_bytes()?;
+            let floor_mb = floor / (1024 * 1024);
+            if space.is_above(floor) {
+                // Warn within half again of the floor, so the first news of it is not a
+                // refusal to start on race morning. The multiplier is a judgement call;
+                // being told nothing until the edge is not.
+                if space.available_bytes < floor.saturating_mul(3) / 2 {
+                    findings.push(Finding::warning(
+                        "storage.free_space",
+                        format!(
+                            "{} MB free, approaching the {floor_mb} MB floor below which a \
+                             race will not start",
+                            space.available_mb()
+                        ),
+                    ));
+                }
+            } else {
+                findings.push(Finding::error(
+                    "storage.free_space",
+                    format!(
+                        "{} MB free, below the {floor_mb} MB floor. `splitforge race start` \
+                         will refuse until this is resolved.",
+                        space.available_mb()
+                    ),
+                ));
+            }
+        }
+        Err(error) => findings.push(Finding::warning(
+            "storage.free_space",
+            format!("could not measure free space: {error}"),
+        )),
     }
 
     // The sidecar is the independent answer to "is the evidence recoverable if this file
