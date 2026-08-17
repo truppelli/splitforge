@@ -37,8 +37,8 @@
 use splitforge_domain::{
     AntennaMap, Bib, Checkpoint, CheckpointId, CheckpointKind, CheckpointPolicy, ChipAssignment,
     ChipId, ChipRegistry, DomainError, Event, EventId, Participant, ParticipantId, Race,
-    RaceConfig, RaceId, Reader, ReaderId, SPLITFORGE_NAMESPACE, SelectionRule, TimestampTrust,
-    TimingPolicy,
+    RaceConfig, RaceId, Reader, ReaderId, SPLITFORGE_NAMESPACE, SelectionRule, StartMode,
+    TimestampTrust, TimingPolicy,
 };
 use time::macros::datetime;
 use time::{Duration, OffsetDateTime};
@@ -341,6 +341,7 @@ pub fn five_k() -> FixtureEvent {
             readers,
             antennas,
             policy,
+            start_mode: StartMode::Gun,
             // Nothing recorded: the fixture races start at their scheduled time, which is
             // what `RaceConfig::gun_time` falls back to.
             sessions: Vec::new(),
@@ -459,6 +460,7 @@ pub fn multi_lap() -> FixtureEvent {
             readers,
             antennas,
             policy,
+            start_mode: StartMode::Gun,
             sessions: Vec::new(),
         },
         crossings,

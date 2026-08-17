@@ -77,6 +77,7 @@ Not built yet; listed so the gaps are visible rather than forgotten.
 | **Fuzzing the LLRP decoder** | M3 | Highest-risk code in the project: binary parsing of untrusted network input |
 | ~~Durability tests in CI~~ | ~~M1~~ | **Done.** `crates/splitforge-cli/tests/restart.rs` kills the process mid-write, reopens, and asserts the journal is contiguous and re-derives identically |
 | ~~Operator interface tested through the binary~~ | ~~M2~~ | **Done.** `crates/splitforge-cli/tests/console.rs` configures a race entirely through subcommands and CSV imports, then times, derives, exports, and backs it up — reaching for no library type the operator does not have |
+| ~~Scoring tested against hand-computed answers~~ | ~~M4~~ | **Done.** `crates/splitforge-results` is a pure function, so its tests state the expected placement directly rather than comparing against the implementation's own output. `crates/splitforge-cli/tests/results.rs` then publishes, disqualifies, republishes, and asserts the first revision is byte-identical afterwards |
 | **Capture-driven reader tests** | M3 | Recorded protocol captures so reader behavior is testable without hardware |
 | **Hardware-in-the-loop validation** | M3 | A self-hosted Pi runner with a real reader attached. The only thing that validates the claims above |
 | **Release artifacts** | M5 | Signed `aarch64` binaries and a deployment bundle |

@@ -15,7 +15,7 @@ is in the timing model.
 | [Q9](#q9-first-reader-model) | Which physical reader model comes first? | **M3 — hard gate** | — |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | M5 | — |
-| [Q12](#q12-leap-second-handling) | Leap-second policy | M4 | — |
+| [Q12](#q12-leap-second-handling) | Leap-second policy | M5 | — |
 
 ---
 
@@ -125,6 +125,34 @@ vanishingly unlikely.
 
 Low probability, non-zero impact, cheap to at least *record*. Deciding to ignore it is
 fine; doing so without noticing is not.
+
+**Re-scoped after Milestone 4**, which this was listed as blocking. It does not, and the
+reason is worth writing down rather than asserting.
+
+Every time M4 publishes is a *difference between two stored instants*, both of them
+microseconds since the Unix epoch, both taken from the same clock domain. Unix time has no
+leap seconds by construction, so the arithmetic is unaffected by the choice made here. What
+the choice affects is whether those two instants were *correct*, which is a clock-discipline
+question and belongs with the rest of them in M5.
+
+It is not negligible, though, and the numbers are worth having:
+
+| Elapsed time measured across a smear window | Error contributed |
+|---|---|
+| 20 min (5K) | ~14 ms |
+| 1 h | ~42 ms |
+| 2 h | ~83 ms |
+| 4 h (marathon) | ~167 ms |
+| 12 h (ultra) | ~500 ms |
+
+A 24-hour smear changes the clock's rate by ~11.6 ppm, which exhausts the ±0.1 s budget at
+**2.4 hours of elapsed time**. Short races are comfortably inside it; marathons and ultras
+are not. So "rely on smearing" is a defensible answer for a 5K and an undefensible one for a
+100-miler, and the policy has to say which races it is claiming accuracy for.
+
+Nothing was deferred to dodge this. M4 computes the difference it is given; making the
+inputs trustworthy is [Q10](#q10-gps-pps-time-reference)'s and
+[Q11](#q11-clock-error-budget-enforcement)'s territory, and this belongs beside them.
 
 ---
 

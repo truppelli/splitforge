@@ -630,7 +630,9 @@ dependencies = [
  "serde_json",
  "splitforge-domain",
  "splitforge-engine",
+ "splitforge-export",
  "splitforge-reader",
+ "splitforge-results",
  "splitforge-simulator",
  "splitforge-storage",
  "splitforge-testkit",
@@ -665,6 +667,14 @@ dependencies = [
 [[package]]
 name = "splitforge-export"
 version = "0.0.0"
+dependencies = [
+ "csv",
+ "serde",
+ "serde_json",
+ "splitforge-domain",
+ "thiserror",
+ "time",
+]
 
 [[package]]
 name = "splitforge-llrp"
@@ -683,6 +693,12 @@ dependencies = [
 [[package]]
 name = "splitforge-results"
 version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "splitforge-domain",
+ "thiserror",
+ "time",
+]
 
 [[package]]
 name = "splitforge-simulator"

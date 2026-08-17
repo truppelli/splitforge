@@ -38,6 +38,7 @@ mod config;
 mod connection;
 mod journal;
 mod migrations;
+mod results;
 
 use thiserror::Error;
 
@@ -45,6 +46,7 @@ pub use backup::{BackupReport, create as create_backup};
 pub use config::{AuditEntry, ConfigStore, ImportSummary, RaceSelection, parse_checkpoint_kind};
 pub use journal::SqliteJournal;
 pub use migrations::{MIGRATIONS, Migration, SCHEMA_VERSION};
+pub use results::{ResultStore, RevisionSummary};
 
 /// A storage-layer failure.
 #[derive(Debug, Error)]

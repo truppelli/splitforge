@@ -1,7 +1,10 @@
 # SplitForge Timing Model
 
-> Status: proposed. Nothing here is implemented yet. Decisions marked **OPEN** are
-> tracked in [open-questions.md](open-questions.md).
+> Status: largely implemented as of Milestone 4. §§ 1–7 describe behavior that exists and is
+> tested; the parts that do not yet exist are named where they appear — manual entries
+> (§ 6), `clock_samples` and `time_corrections` (§ 3, Milestone 3), and the wave and rolling
+> start policies (§ 7, excluded from Milestone 4). Decisions marked **OPEN** are tracked in
+> [open-questions.md](open-questions.md).
 
 This document defines what SplitForge stores, what it derives, and what it refuses to
 change. It is the contract that makes results defensible when a runner disputes them.
@@ -252,6 +255,15 @@ Configured per race, snapshotted per revision: `gun`, `chip`, `wave`, or `rollin
 time requires a start-line detection; a participant with no start read under a `chip`
 policy is a flagged condition with a defined fallback, not a null.
 
+**As implemented in Milestone 4:** `gun` and `chip` only. `wave` and `rolling` are not
+accepted — a mode that parsed and then scored like `gun` would be a wrong answer wearing a
+right one's name — and they arrive with the milestone that supports waves. The defined
+fallback for a chip-timed participant with no start read is the gun, and the entry carries a
+`no_start_read_under_chip_time` flag saying so. Set with
+`splitforge policy set --start-mode`, and see
+[ADR-0017](adr/0017-placement-semantics.md) for what that flag and the other three mean for
+placement.
+
 ## 8. Auditability
 
 `audit_log` records every operator action that could change a published outcome: policy
@@ -281,10 +293,24 @@ result_revisions       result_entries
 audit_log              outbox_messages        schema_migrations
 ```
 
-As of Milestone 2 the following exist: `events`, `races`, `checkpoints`, `participants`,
+As of Milestone 4 the following exist: `events`, `races`, `checkpoints`, `participants`,
 `chip_assignments`, `readers`, `reader_antennas`, `timing_policies`, `race_sessions`,
-`raw_reads`, `audit_log`, `schema_migrations`. The rest arrive with the milestone that
-needs them.
+`raw_reads`, `status_declarations`, `result_revisions`, `result_entries`, `audit_log`,
+`schema_migrations`. The rest arrive with the milestone that needs them — `clock_samples`
+and `time_corrections` with Milestone 3, `manual_entries` and `outbox_messages` later.
+
+`status_declarations` is not in the original list above either. It records an operator
+deciding how someone's race ended — a disqualification most importantly, since no
+arrangement of chip reads implies one. Append-only, newest-in-force, and reversed by
+appending rather than deleting. See
+[ADR-0016](adr/0016-status-declarations-are-evidence.md).
+
+`accepted_reads`, `timing_events`, and `rejected_reads` are **not** tables. They are
+recomputed from `raw_reads` on demand, because derivation is a pure and deterministic
+function of the journal plus configuration, and a stored copy would be one more thing that
+can disagree with the evidence. `result_entries` is the exception that proves the rule: it
+is a derivation too, but it is frozen at publication because publication is an event in the
+world.
 
 `race_sessions` is not in the original list above. It records when an operator declared the
 gun — append-only, because they typed it — and is the input gun-time scoring measures from.
