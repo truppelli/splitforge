@@ -220,15 +220,26 @@ in SplitForge, not an outage.
 ```text
 Raspberry Pi 3 · 64-bit Raspberry Pi OS
 └── systemd
-    └── splitforge-edge.service   Restart=always, After=network-online.target
-        ├── /var/lib/splitforge/  event databases (append-only journal)
-        ├── /etc/splitforge/      config, reader definitions
-        └── /var/log/             tracing output via journald
+    └── splitforge-edge.service   Restart=always, After=network.target
+        ├── /var/lib/splitforge/  event database + write-ahead sidecar (StateDirectory=)
+        ├── /run/splitforge/      the API socket, removed on stop (RuntimeDirectory=)
+        └── journald              tracing output
 ```
+
+The unit is [`deploy/splitforge-edge.service`](../deploy/splitforge-edge.service);
+installation and what was observed running it are in [deployment.md](deployment.md).
 
 Single service, single database, single machine. Multi-reader and multi-checkpoint
 topologies are deliberately out of scope until one reader works reliably for a full event
 — see the [roadmap](roadmap.md).
+
+**Two corrections to this section as originally written.** `After=network-online.target`
+became `After=network.target`: the original would have delayed startup by 90 seconds on a
+Pi with an unplugged cable, which is the network a checkpoint actually has
+([ADR-0022](adr/0022-the-service-never-waits-for-the-network.md)). And `/etc/splitforge/` is
+not created, because nothing reads it — configuration lives in the database
+([ADR-0014](adr/0014-mutable-configuration-immutable-evidence.md)), and provisioning a
+directory nothing loads invites somebody to put a file in it.
 
 ## 7. Technology choices
 

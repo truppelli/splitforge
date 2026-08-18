@@ -287,7 +287,10 @@ scoring path has never seen a physical reader — that is Milestone 3, and it is
 
 Operational safety, not features. This milestone is what separates a demo from a timer.
 
-- systemd service with restart policy and startup ordering
+- [x] systemd service with restart policy and startup ordering — the unit is
+      [`deploy/splitforge-edge.service`](../deploy/splitforge-edge.service); it waits for no
+      network and never stops restarting
+      ([ADR-0022](adr/0022-the-service-never-waits-for-the-network.md))
 - [x] Health endpoint — `splitforge-edge` serves it on a Unix socket that binds no port
       ([ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)), closing
       [Q5](open-questions.md#q5-local-api-authentication-model)
@@ -302,10 +305,11 @@ Operational safety, not features. This milestone is what separates a demo from a
 - [x] Manual backup and **restore drills** — restore is rehearsed, not discovered
 - [x] Corruption recovery ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
 - Graceful shutdown on power loss where the hardware permits
-- Pi deployment guide: external power, wired Ethernet first, race-day Wi-Fi treated as a
-  known risk
+- Pi **field** guide: external power, wired Ethernet first, race-day Wi-Fi treated as a
+  known risk. Installing the service is written up in [deployment.md](deployment.md); this
+  is the half that needs a Pi in a field to write honestly
 
-**Five items landed early**, for the same reason Milestone 4 did: they need no hardware, and
+**Six items landed early**, for the same reason Milestone 4 did: they need no hardware, and
 leaving them until after Milestone 3 would have meant timing a real event with a recovery
 story that existed only as an open question. `backup restore` and `splitforge recover` are
 built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed, and so
@@ -519,13 +523,85 @@ reads the crate's own source and fails on `TcpListener`, `SocketAddr`, `0.0.0.0`
 and still be the thing the ADR forbids, so the constraint is checked the way ADR-0012 checks
 the dependency rules: by a test, not by whoever reviews the pull request.
 
-**Still open in this milestone:** the systemd unit itself, graceful shutdown on power loss,
-the Pi deployment guide, and every part of clock discipline — the RTC, GPS/PPS, the Pi as a
-LAN NTP server, and clock state as a pre-race gate. That last one is not hardware-free the
-way it looks: nothing in the codebase determines `DeviceClockState` today, determining it
-needs syscalls this workspace's `unsafe_code = "deny"` rules out reaching for directly, and
-*which* states should block a start is [Q11](open-questions.md#q11-clock-error-budget-enforcement),
-which has no answer yet. Building it now would mean silently choosing one.
+**Observed**, the systemd unit ([ADR-0022](adr/0022-the-service-never-waits-for-the-network.md)).
+Installed the way [deployment.md](deployment.md) says to install it, under a real systemd,
+and then attacked:
+
+```console
+$ systemd-analyze verify /etc/systemd/system/splitforge-edge.service; echo $?
+0
+
+$ systemctl enable --now splitforge-edge && systemctl is-active splitforge-edge
+active
+
+$ ls -l /run/splitforge /var/lib/splitforge
+srw-rw---- 1 splitforge splitforge      0 api.sock
+-rw-r----- 1 splitforge splitforge   4096 event.db
+-rw-r----- 1 splitforge splitforge  32768 event.db-shm
+-rw-r----- 1 splitforge splitforge 230752 event.db-wal
+-rw-rw---- 1 splitforge splitforge      0 event.db.reads.jsonl
+
+$ kill -9 $(systemctl show -p MainPID --value splitforge-edge)
+$ systemctl is-active splitforge-edge
+active                                           # pid 392 -> 428
+
+$ systemctl stop splitforge-edge
+$ systemctl show -p Result -p ExecMainStatus splitforge-edge
+Result=success
+ExecMainStatus=0
+$ ls /run/splitforge
+ls: cannot access '/run/splitforge': No such file or directory
+
+$ systemd-analyze security splitforge-edge.service | tail -1
+→ Overall exposure level for splitforge-edge.service: 1.0 OK :-)
+```
+
+`SIGKILL` is the only signal that actually tests `Restart=always`, and the missing
+`/run/splitforge` afterwards is the graceful path working: the service removed its socket on
+SIGTERM and systemd removed the directory with the service. Neither of those is the
+interesting part.
+
+**The interesting part is the file modes, because the first run of this unit got them
+wrong.** `event.db` and `event.db.reads.jsonl` came out `-rw-r--r--` — world-readable — on a
+device the threat model already describes as physically reachable by strangers. The database
+holds participant names and the sidecar holds every raw read in plain text
+([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)), so that is the same exposure the
+repository's own `.gitignore` spends a paragraph warning about, reproduced on the machine
+where the data actually lives. `UMask=0007` fixes it, and the modes above are what the unit
+produces now rather than what it intends.
+
+Nothing about reading the unit file would have found that. It took installing it and running
+`ls`, which is the same reason the diagnostic bundle's write-latency bug and the free-space
+gate's path leak were both found by running real commands rather than by passing tests.
+
+The measurement also corrected a claim rather than confirming one: a umask can only remove
+permission bits, and SQLite asks the kernel for `0644`, so the database ends up `0640` — the
+group can read the event but not write it. The comment in the unit now says that, and
+[deployment.md](deployment.md) documents the two access tiers that follow.
+
+Three things in that unit are load-bearing rather than hygiene, and each is enforced by
+`apps/splitforge-edge/tests/unit_file.rs`, which compares the unit against the binary's own
+`--help` output and against `splitforge_api::DEFAULT_SOCKET_PATH` rather than against
+constants restated in the test:
+
+- **No `Wants=` on any network target.** A checkpoint has no DHCP and often no switch;
+  `network-online.target` would have delayed every boot by 90 seconds waiting for a network
+  that is not coming. Architecture § 6 had specified exactly that, and it is corrected there.
+- **`StartLimitIntervalSec=0`.** `Restart=always` is not what it sounds like — systemd stops
+  a unit permanently after five starts in ten seconds. A timer that has given up records
+  nothing for the rest of the event.
+- **`RestrictAddressFamilies=AF_UNIX`.** [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)
+  enforced by the kernel rather than by review, including against a dependency, which no
+  source-reading test can see. Milestone 3 needs `AF_INET` for the reader and will have to
+  add it deliberately, failing this test until it does.
+
+**Still open in this milestone:** graceful shutdown on power loss, the Pi field guide, and
+every part of clock discipline — the RTC, GPS/PPS, the Pi as a LAN NTP server, and clock
+state as a pre-race gate. That last one is not hardware-free the way it looks: nothing in
+the codebase determines `DeviceClockState` today, determining it needs syscalls this
+workspace's `unsafe_code = "deny"` rules out reaching for directly, and *which* states
+should block a start is [Q11](open-questions.md#q11-clock-error-budget-enforcement), which
+has no answer yet. Building it now would mean silently choosing one.
 
 **Exit criterion:** a full-length event is timed on real hardware while an observer
 randomly pulls power, unplugs Ethernet, and restarts the service — and no acknowledged
