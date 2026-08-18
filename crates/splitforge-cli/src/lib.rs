@@ -37,6 +37,7 @@
 //! Output is JSON on stdout, unconditionally, except for CSV exports. Being scriptable and
 //! diffable is what lets "re-derive after a restart and compare" be an assertion.
 
+mod bundle;
 mod cli;
 mod configure;
 mod operate;
@@ -51,6 +52,7 @@ use splitforge_domain::{RaceConfig, RawReadJournal, SessionAction};
 use splitforge_engine::{DerivationInput, derive};
 use splitforge_storage::{ConfigStore, ResultStore, SqliteJournal};
 
+pub use bundle::{BUNDLE_FORMAT, BUNDLE_VERSION, Bundle};
 pub use cli::{
     BackupCommand, CheckpointCommand, ChipsCommand, Cli, Command, DeviceCommand, EventCommand,
     ExportCommand, ExportFormat, FixtureCommand, Format, PolicyCommand, RaceCommand, RaceRef,
@@ -560,7 +562,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
         }
 
-        Command::Doctor { race } => {
+        Command::Doctor { race, bundle } => {
             let store = open_store(&database)?;
             let journal = open_journal(&database)?;
             let configs = match race.race.as_deref() {
@@ -573,6 +575,21 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             let report = operate::doctor(&database, &store, &journal, &configs)?;
             let errors = report.errors;
+
+            // Written before the findings are printed and long before the non-zero exit
+            // below. A bundle is wanted precisely when `doctor` is failing, so tying its
+            // creation to a clean run would withhold it in every case it exists for.
+            if let Some(path) = bundle.as_deref() {
+                let results = open_results(&database)?;
+                let contents =
+                    bundle::build(&database, &store, &results, &journal, &configs, &report)?;
+                let json = serde_json::to_string_pretty(&contents)
+                    .context("serializing the diagnostic bundle")?;
+                std::fs::write(path, json)
+                    .with_context(|| format!("writing bundle to {}", path.display()))?;
+                eprintln!("wrote diagnostic bundle to {}", path.display());
+            }
+
             emit(&report, format)?;
             // A non-zero exit so `splitforge doctor && splitforge race start` is a usable
             // pre-race gate in a shell script.

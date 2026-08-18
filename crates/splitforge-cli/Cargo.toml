@@ -24,6 +24,9 @@ clap.workspace = true
 csv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Salted hashing of chip identifiers and operator names in the diagnostic bundle, so a
+# bundle can be attached to a public issue without a roster leaving the device.
+sha2.workspace = true
 splitforge-domain.workspace = true
 splitforge-engine.workspace = true
 splitforge-export.workspace = true
@@ -38,6 +41,8 @@ splitforge-storage.workspace = true
 splitforge-testkit.workspace = true
 time.workspace = true
 tokio.workspace = true
+# The per-bundle salt. `Uuid::new_v4` is randomness the workspace already depends on.
+uuid.workspace = true
 
 [lints]
 workspace = true

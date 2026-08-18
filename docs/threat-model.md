@@ -109,6 +109,7 @@ Severity is impact on a live event. **M#** is the milestone that owns the mitiga
 | S8 | **Physical device access** | High | Out of scope for software. Operational guidance: secure the device, disk encryption is a documented option with an availability tradeoff (a Pi that cannot unlock unattended cannot time a race) | M5 |
 | S9 | **Supply chain — dependency compromise** | Medium | `cargo audit` and `cargo deny` in CI; committed `Cargo.lock`; dependency count kept deliberately small | M0 |
 | S10 | **Denial of service against the local API** | Medium | API failure must never stop journaling. The read path does not traverse the API | M5 |
+| S11 | **Participant data leaving the device in a diagnostic** | Medium | A bundle is the one artifact built to be sent somewhere, so it carries no names, bibs, or chip identifiers at all. Chips and operators appear as hashes salted per bundle and then discarded; operator free text is withheld rather than filtered; finding messages travel only from a fail-closed allowlist. Asserted against the bytes of a real bundle from a fully operated event, not against the serializer ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md)) | M5 |
 
 ## 5. Design decisions that follow from this model
 
@@ -122,6 +123,13 @@ Severity is impact on a live event. **M#** is the milestone that owns the mitiga
    a dropped packet and a clean-looking log.
 5. **Availability is a security property here.** A timer that refuses to run because a
    security check failed has caused the harm it was protecting against.
+6. **The one artifact designed to leave the device carries nothing about a person.** The
+   journal, the roster, and the exports stay where they were written, and their
+   confidentiality is a question of who can reach the device (S8). A diagnostic bundle is
+   the exception, because it exists to be emailed and pasted into issue trackers — so it is
+   built to be safe *unread*. An artifact that is only safe when the sender checks it first
+   is an artifact that is eventually unsafe
+   ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md)).
 
 Principle 5 and the checklist in § 6 pull against each other, and implementing the first
 pre-race gate is what made that visible. A check that always blocks will eventually stop a

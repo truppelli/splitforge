@@ -27,6 +27,7 @@ this?" two years from now, the ADR is the answer.
 | [0017](0017-placement-semantics.md) | What takes a place, and what a place is worth | Accepted |
 | [0018](0018-write-ahead-sidecar-journal.md) | Evidence is written to a text sidecar before it reaches the database | Accepted |
 | [0019](0019-pre-race-gates-block-but-can-be-overridden.md) | Pre-race gates block, and can be overridden on the record | Accepted |
+| [0020](0020-diagnostic-bundles-carry-no-participant-data.md) | A diagnostic bundle carries no participant data, and is safe unread | Accepted |
 
 ## Process
 

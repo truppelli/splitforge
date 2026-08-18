@@ -25,6 +25,12 @@ Please include:
 - What an attacker gains — race data corruption, network access, denial of timing service
 - Whether it requires LAN access, physical access, or neither
 
+If the report is about a device that has run an event, `splitforge doctor --bundle out.json`
+produces the state of that device with no participant names, bib numbers, or chip
+identifiers in it. **Send the bundle, not the database.** An event database holds a roster,
+and a roster sent to a stranger to help debug a timing bug is a privacy incident caused by
+trying to be helpful.
+
 You should get an acknowledgment within 7 days. There is no bug bounty; SplitForge is an
 unfunded open-source project.
 
