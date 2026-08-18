@@ -10,7 +10,6 @@ is in the timing model.
 |---|---|---|---|
 | [Q3](#q3-reader-clock-trust-defaults) | Reader clock trust defaults and alarm thresholds | M3 | — |
 | [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
-| [Q5](#q5-local-api-authentication-model) | Local API authentication model | First networked interface | — |
 | [Q9](#q9-first-reader-model) | Which physical reader model comes first? | **M3 — hard gate** | — |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | M5 | — |
@@ -40,24 +39,6 @@ These need real measurements from real hardware, which makes this partly gated o
 The Code of Conduct has a `TODO` where the enforcement contact belongs. A project-specific
 address (not a personal one) is preferable for a public repository. Must be filled in
 before the repo is publicized.
-
-### Q5: Local API authentication model
-
-**Raised in:** [threat-model.md S2](threat-model.md#security-risks)
-
-The API runs on an untrusted event LAN. Options: a bearer token in local config; mTLS
-(strong, painful to operate from a phone); Unix socket only, with all remote access over
-SSH (simplest and most secure, but rules out a browser console later).
-
-Whatever is chosen must not make the timer unusable at 6 a.m. in the cold — an
-authentication scheme that gets bypassed in practice is worse than a simple one that gets
-used.
-
-**Re-scoped after Milestone 2.** This was listed as blocking M2, which turned out to be
-wrong: M2 is a CLI running as a local process over SSH, and it opens no socket. Nothing was
-deferred to dodge the question — there was simply nothing to authenticate. It blocks the
-first interface that listens on the network, which is `splitforge-api` and any browser
-console built on it.
 
 ### Q9: First reader model
 
@@ -154,6 +135,31 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q8](#q8-enforcing-append-only-in-sqlite) | Enforcing append-only at the database level | [ADR-0011](adr/0011-append-only-enforced-by-triggers.md) |
 | [Q13](#q13-msrv-policy) | How is the MSRV chosen, and when does it move? | [ADR-0013](adr/0013-msrv-policy.md) |
 | [Q7](#q7-corruption-recovery-strategy) | Database corruption recovery strategy | [ADR-0018](adr/0018-write-ahead-sidecar-journal.md) |
+| [Q5](#q5-local-api-authentication-model) | Local API authentication model | [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md) |
+
+### Q5: Local API authentication model
+
+**Resolved — [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md): a Unix socket, and no authentication of its own.**
+
+**Raised in:** [threat-model.md S2](threat-model.md#security-risks)
+
+The API runs on an untrusted event LAN. Options were: a bearer token in local config; mTLS
+(strong, painful to operate from a phone); Unix socket only, with all remote access over
+SSH (simplest and most secure, but rules out a browser console later).
+
+Whatever was chosen could not make the timer unusable at 6 a.m. in the cold — an
+authentication scheme that gets bypassed in practice is worse than a simple one that gets
+used.
+
+**Re-scoped after Milestone 2.** This was listed as blocking M2, which turned out to be
+wrong: M2 is a CLI running as a local process over SSH, and it opens no socket. Nothing was
+deferred to dodge the question — there was simply nothing to authenticate.
+
+**The answer turned out to be that the question had a wrong premise.** All three options
+assumed the API would be reachable and asked how to guard it. A Unix socket makes it
+unreachable, so [S2](threat-model.md#security-risks) stops being a risk to mitigate and
+becomes one that does not apply — no token to leak, no certificate to expire on race
+morning. The cost is a browser console, which now needs an ADR superseding this one.
 
 ### Q1: SQLite crate, `rusqlite` vs `sqlx`
 

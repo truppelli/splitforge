@@ -1,6 +1,6 @@
 [package]
 name = "splitforge-api"
-description = "Local REST API and status stream for LAN clients."
+description = "Local API served on a Unix socket. Never binds a port (ADR-0021)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,15 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread"] }

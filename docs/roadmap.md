@@ -288,8 +288,9 @@ scoring path has never seen a physical reader — that is Milestone 3, and it is
 Operational safety, not features. This milestone is what separates a demo from a timer.
 
 - systemd service with restart policy and startup ordering
-- Health endpoint — gated on [Q5](open-questions.md#q5-local-api-authentication-model), which
-  owns every socket this project opens
+- [x] Health endpoint — `splitforge-edge` serves it on a Unix socket that binds no port
+      ([ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)), closing
+      [Q5](open-questions.md#q5-local-api-authentication-model)
 - [x] Downloadable diagnostic bundle — `splitforge doctor --bundle out.json`, safe to attach
       to a public issue without being read first
       ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md))
@@ -304,10 +305,12 @@ Operational safety, not features. This milestone is what separates a demo from a
 - Pi deployment guide: external power, wired Ethernet first, race-day Wi-Fi treated as a
   known risk
 
-**Four items landed early**, for the same reason Milestone 4 did: they need no hardware, and
+**Five items landed early**, for the same reason Milestone 4 did: they need no hardware, and
 leaving them until after Milestone 3 would have meant timing a real event with a recovery
 story that existed only as an open question. `backup restore` and `splitforge recover` are
-built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed.
+built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed, and so
+is [Q5](open-questions.md#q5-local-api-authentication-model), which had blocked the health
+endpoint since Milestone 0.
 
 **Observed.** The same 5K, with a snapshot taken before the gun. Between the second command
 and the third, `event.db`, `event.db-wal`, and `event.db-shm` were deleted outright — the
@@ -449,6 +452,80 @@ honors `fsync` at all, what the second sync per reader report costs on real flas
 happens to a write in flight when the power goes, and what a full day's journal actually
 weighs — the 256 MiB default is a judgement against the 5K fixture, not a measurement.
 Those stay exactly where they were.
+
+**Observed**, the health endpoint ([ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)).
+The same 5K, run and left in the journal, with `splitforge-edge` started against it:
+
+```console
+$ splitforge-edge --database event.db --socket api.sock &
+
+$ ls -l api.sock
+srw-rw---- 1 root root 0 Aug 18 15:51 api.sock
+
+$ curl -s --unix-socket api.sock http://localhost/health
+{"status":"ok","degraded_by":[],"version":"0.0.0","uptime_seconds":0,"database":"event.db",
+ "schema_version":4,"raw_reads":638,"free_mb":936503,"min_free_mb":256,"above_floor":true}
+HTTP 200
+
+$ awk 'NR>1 && $4=="0A"' /proc/$EDGE/net/tcp /proc/$EDGE/net/tcp6 | grep -c .
+0
+
+$ splitforge device set --min-free-mb 999999999
+{"min_free_mb":999999999}
+
+$ curl -s --unix-socket api.sock http://localhost/health
+{"status":"degraded","degraded_by":["936503 MB free, below the 999999999 MB floor;
+ `splitforge race start` will refuse"],"version":"0.0.0","uptime_seconds":0,
+ "database":"event.db","schema_version":4,"raw_reads":638,"free_mb":936503,
+ "min_free_mb":999999999,"above_floor":false}
+HTTP 503
+
+$ curl --fail --unix-socket api.sock http://localhost/health >/dev/null; echo $?
+22
+
+$ kill -TERM $EDGE
+exit 0
+socket removed
+```
+
+The `0` is the milestone. That is the count of listening TCP sockets in the namespace *while
+the endpoint is answering requests* — not a listener bound to loopback, and not a listener
+behind a disabled flag. There is no listener. Everything above went over a file.
+
+The two `curl` exit codes are the rest of it: `0` and `22` are the whole monitoring contract,
+so a systemd watchdog or a shell script never has to parse the body to know the device is in
+trouble. `raw_reads` is read from the journal on every request rather than counted in
+memory — the reads above were written by a different process entirely, and a service that
+answered from its own tally would have said `0`.
+
+The socket is mode `0660`, which the code sets after binding and a test asserts. It shows
+`root root` here because this ran in the CI container; the deployment runs it as
+`splitforge:splitforge`, and the group is the whole access-control story — anyone who can
+open that file is a fully trusted operator, which is exactly the trust SSH access already
+implies.
+
+What health deliberately does **not** report is whether a reader is connected. There is no
+field for it, because there is no reader until Milestone 3 and a field that always said
+`false` would be read as an outage. That is also the reason this endpoint exists at all
+rather than being folded into `splitforge status`: reader connection state will live in the
+running process and in no file, so no one-shot command will ever be able to see it.
+
+Two test files hold the claims. `apps/splitforge-edge/tests/service.rs` spawns the actual
+binary, talks to it over the actual socket, and sends it an actual SIGTERM — including a
+start against a database that was deleted out from under a full sidecar, which comes up
+having replayed all 638 reads. `crates/splitforge-api/tests/socket.rs` adds one test that
+reads the crate's own source and fails on `TcpListener`, `SocketAddr`, `0.0.0.0`, or
+`127.0.0.1`. A port opened behind a feature flag would pass every runtime test in that file
+and still be the thing the ADR forbids, so the constraint is checked the way ADR-0012 checks
+the dependency rules: by a test, not by whoever reviews the pull request.
+
+**Still open in this milestone:** the systemd unit itself, graceful shutdown on power loss,
+the Pi deployment guide, and every part of clock discipline — the RTC, GPS/PPS, the Pi as a
+LAN NTP server, and clock state as a pre-race gate. That last one is not hardware-free the
+way it looks: nothing in the codebase determines `DeviceClockState` today, determining it
+needs syscalls this workspace's `unsafe_code = "deny"` rules out reaching for directly, and
+*which* states should block a start is [Q11](open-questions.md#q11-clock-error-budget-enforcement),
+which has no answer yet. Building it now would mean silently choosing one.
 
 **Exit criterion:** a full-length event is timed on real hardware while an observer
 randomly pulls power, unplugs Ethernet, and restarts the service — and no acknowledged
