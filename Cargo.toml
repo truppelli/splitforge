@@ -19,6 +19,8 @@ publish = false
 # across a workspace build anyway, so per-crate feature lists would describe a build that
 # never actually happens — better to state the truth in one place.
 [workspace.dependencies]
+splitforge-api = { version = "0.0.0", path = "crates/splitforge-api" }
+splitforge-cli = { version = "0.0.0", path = "crates/splitforge-cli" }
 splitforge-domain = { version = "0.0.0", path = "crates/splitforge-domain" }
 splitforge-engine = { version = "0.0.0", path = "crates/splitforge-engine" }
 splitforge-export = { version = "0.0.0", path = "crates/splitforge-export" }
@@ -29,6 +31,14 @@ splitforge-storage = { version = "0.0.0", path = "crates/splitforge-storage" }
 splitforge-testkit = { version = "0.0.0", path = "crates/splitforge-testkit" }
 
 anyhow = "1.0.100"
+# The local API, which listens on a Unix socket and never binds a port (ADR-0021).
+# Default features are off: this serves JSON over HTTP/1 on a filesystem socket and needs
+# none of the form, query, or multipart machinery.
+axum = { version = "0.8.9", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
 clap = { version = "4.5.51", features = ["derive"] }
 # Roster and chip-assignment import only. Deliberately not on the read path: nothing
 # between a reader report and a durable write parses CSV.
@@ -45,7 +55,16 @@ time = { version = "0.3.47", features = [
     "parsing",
     "serde-well-known",
 ] }
-tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1.53.1", features = [
+    "macros",
+    # `net` for the Unix socket the API listens on, `signal` so the service can shut down
+    # on SIGTERM rather than being killed with the socket still on disk (ADR-0021).
+    "net",
+    "rt",
+    "signal",
+    "sync",
+    "time",
+] }
 toml = "1.1.4"
 uuid = { version = "1.24.1", features = ["serde", "v4", "v5"] }
 

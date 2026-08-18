@@ -1,6 +1,6 @@
 [package]
 name = "splitforge-edge"
-description = "Raspberry Pi production service: the composition root that wires every adapter."
+description = "Raspberry Pi service: opens the event database and serves the local API."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,21 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+splitforge-api.workspace = true
+splitforge-domain.workspace = true
+splitforge-storage.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# The tests spawn the real service binary, but build its fixture database through library
+# calls. Reaching for the `splitforge` executable by path instead made `cargo test -p
+# splitforge-edge` depend on a sibling crate's artifact being on disk.
+splitforge-cli.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread"] }

@@ -267,7 +267,7 @@ crates/
   splitforge-engine      Read acceptance, dedup, participant assignment, checkpoints
   splitforge-results     Result revisions, ranking, DNF/DNS/DQ handling
   splitforge-export      CSV and JSON export contracts
-  splitforge-api         Local REST API and status stream
+  splitforge-api         Local API on a Unix socket. Binds no port (ADR-0021)
   splitforge-sync        Opt-in outbound integrations
   splitforge-cli         Config, diagnostics, exports, backup/restore, admin
   splitforge-testkit     Fixtures and test doubles
@@ -276,8 +276,8 @@ apps/
   splitforge-simulator   Synthetic readers and race scenarios
 ```
 
-`domain`, `reader`, `storage`, `engine`, `results`, `export`, `simulator`, `testkit`, and
-`cli` have content. `llrp`, `api`, `sync`, and `edge` are still empty — see the
+`domain`, `reader`, `storage`, `engine`, `results`, `export`, `simulator`, `testkit`,
+`cli`, `api`, and `edge` have content. `llrp` and `sync` are still empty — see the
 [roadmap](docs/roadmap.md) for when each lands.
 
 The dependency rules between them come from

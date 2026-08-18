@@ -36,7 +36,8 @@ flowchart TB
     end
 
     subgraph device["Raspberry Pi — trusted, physically exposed"]
-        api["Local API"]
+        sshd["sshd"]
+        api["Local API<br/><i>Unix socket · binds no port</i>"]
         svc["splitforge-edge"]
         db[("Event database")]
     end
@@ -46,7 +47,9 @@ flowchart TB
     end
 
     reader -->|"B1: reader input"| svc
-    others -.->|"B2: LAN access"| api
+    others -.->|"B2: SSH only"| sshd
+    others -. "no route to the API" .-x api
+    sshd --> api
     api --> svc
     svc --> db
     svc -->|"B3: outbound sync"| rdc
@@ -54,10 +57,14 @@ flowchart TB
     style untrusted stroke-dasharray: 5 5
 ```
 
+The crossed arrow is [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md), and it is
+the most important edge in this diagram: the API is not guarded against the event LAN, it is
+**unreachable** from it. B2 is crossed by SSH or not at all.
+
 | Boundary | Assumption |
 |---|---|
 | **B1 — reader input** | Fully untrusted. LLRP has no authentication; anything on the LAN can impersonate a reader or send malformed frames |
-| **B2 — LAN access** | Untrusted. Event networks are shared, ad hoc, and often built by whoever brought a switch |
+| **B2 — LAN access** | Untrusted. Event networks are shared, ad hoc, and often built by whoever brought a switch. Nothing SplitForge runs listens on it ([ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)), so this boundary is crossed only by SSH, whose keys the operator manages |
 | **B3 — outbound sync** | Failure-tolerant by design. Compromise leaks data but cannot stop timing |
 | **Physical** | The device is reachable by strangers. Mitigated operationally, not in software |
 
@@ -100,15 +107,15 @@ Severity is impact on a live event. **M#** is the milestone that owns the mitiga
 | # | Risk | Severity | Mitigation | M# |
 |---|---|---|---|---|
 | S1 | **Malformed reader data** — crash, hang, or memory exhaustion | High | Parsing returns errors, never panics. Bounded frame sizes and allocation limits. Fuzz the LLRP decoder. Rust removes the memory-safety class; it does not remove `unwrap()` | M3 |
-| S2 | **Unauthorized LAN access to the local API** | High | Bind to a specific interface, not `0.0.0.0`, by default. Authentication required for any mutating endpoint. **OPEN:** [Q5](open-questions.md#q5-local-api-authentication-model) | M2, M5 |
+| S2 | **Unauthorized LAN access to the local API** | High | **Does not apply as of [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md).** The API listens on a Unix socket and binds no port, so nothing on the LAN can reach it. Access control is the socket's file permissions; remote access is SSH. A test reads the crate's own source and fails on a TCP listener, so the constraint outlives the reviewer who knows about it | M5 |
 | S3 | **Reader impersonation** — a rogue device on the LAN injecting reads | Medium | Reader identity pinned by configuration, not discovery. Reads from unconfigured sources are journaled and quarantined, not accepted | M3 |
-| S4 | **Fabricated timing events via the API** | High | Mutating endpoints authenticated; every manual entry attributed and audit-logged. Fabrication should be *detectable*, since preventing it entirely is not achievable | M4, M5 |
+| S4 | **Fabricated timing events via the API** | High | Narrowed by [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md): the API is read-only, so there is no mutating endpoint to authenticate. Evidence is written by the service and corrected through the CLI over SSH, where every manual entry is attributed and audit-logged. Fabrication should be *detectable*, since preventing it entirely is not achievable. If the API ever gains a write path, that ADR has to be superseded first, and authentication is the question it must answer | M4, M5 |
 | S5 | **Chip cloning / EPC spoofing** | Medium | **Not solvable in software** — see [SECURITY.md](../SECURITY.md). Mitigated by audit trails that make tampering detectable after the fact, and by duplicate-EPC anomaly flagging | M4 |
 | S6 | **Integration credential exposure** | Medium | Credentials in local config with restrictive file permissions; never logged; never required for startup; absence disables sync, not timing | M6 |
 | S7 | **Tampering with results between generation and publication** | Medium | Revisions immutable; exports carry the revision identity. **OPEN:** signing exports — [Q11](open-questions.md#q11-clock-error-budget-enforcement) relates | M6 |
 | S8 | **Physical device access** | High | Out of scope for software. Operational guidance: secure the device, disk encryption is a documented option with an availability tradeoff (a Pi that cannot unlock unattended cannot time a race) | M5 |
 | S9 | **Supply chain — dependency compromise** | Medium | `cargo audit` and `cargo deny` in CI; committed `Cargo.lock`; dependency count kept deliberately small | M0 |
-| S10 | **Denial of service against the local API** | Medium | API failure must never stop journaling. The read path does not traverse the API | M5 |
+| S10 | **Denial of service against the local API** | Medium | API failure must never stop journaling; the read path does not traverse the API. Narrowed by [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md): an attacker has to already be on the device to send the API anything at all | M5 |
 | S11 | **Participant data leaving the device in a diagnostic** | Medium | A bundle is the one artifact built to be sent somewhere, so it carries no names, bibs, or chip identifiers at all. Chips and operators appear as hashes salted per bundle and then discarded; operator free text is withheld rather than filtered; finding messages travel only from a fail-closed allowlist. Asserted against the bytes of a real bundle from a fully operated event, not against the serializer ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md)) | M5 |
 
 ## 5. Design decisions that follow from this model

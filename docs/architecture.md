@@ -1,7 +1,7 @@
 # SplitForge Architecture
 
 > Status: partly implemented. `domain`, `reader`, `storage`, `engine`, `results`, `export`,
-> `simulator`, `testkit`, and `cli` exist; `llrp`, `api`, `sync`, and `edge` are still
+> `simulator`, `testkit`, `cli`, `api`, and `edge` exist; `llrp` and `sync` are still
 > empty — see the [roadmap](roadmap.md). Decisions marked **OPEN** are tracked in
 > [open-questions.md](open-questions.md).
 
@@ -240,11 +240,18 @@ topologies are deliberately out of scope until one reader works reliably for a f
 | Serialization | Serde | — |
 | CLI | Clap | — |
 | CSV | `csv` | Roster and chip-assignment import, and results export. Deliberately not on the read path — nothing between a reader report and a durable write parses CSV |
-| HTTP | Axum | Aligns with Tokio; local API only |
+| HTTP | Axum | Aligns with Tokio; local API only, on a Unix socket that binds no port. [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md) |
 | Tracing | `tracing` + `tracing-subscriber` | Structured, journald-friendly |
 | Time | `time`, UTC everywhere | Smaller surface, no local-time footgun. [ADR-0010](adr/0010-time-crate-for-timestamps.md) |
 | Errors | `thiserror` in libs, `anyhow` at app boundaries | — |
 
 No GUI framework. A local API plus a CLI is easier to test, deploy, recover, and drive
-over SSH from a phone in a parking lot at 6 a.m. A browser console (`splitforge-web`) can
-come later, consuming the same API.
+over SSH from a phone in a parking lot at 6 a.m.
+
+A browser console (`splitforge-web`) is **no longer a free addition.**
+[ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md) puts the API on a Unix socket,
+and a browser cannot open one — so a console needs an ADR superseding that decision, and
+that ADR has to answer the authentication question ADR-0021 side-steps. Deliberate: the
+health endpoint had been blocked for two milestones on a question that did not need
+answering to build it, and speculatively keeping the door open for an interface with no
+requirements yet is what kept it blocked.
