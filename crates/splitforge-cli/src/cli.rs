@@ -182,6 +182,13 @@ pub enum Command {
         /// Which race to check. Omit to check every configured race.
         #[command(flatten)]
         race: RaceRef,
+
+        /// Also write a diagnostic bundle here, as JSON.
+        ///
+        /// The bundle carries no participant names, bib numbers, or chip identifiers, so it
+        /// can be attached to a public issue without being read first.
+        #[arg(long, value_name = "PATH")]
+        bundle: Option<PathBuf>,
     },
 
     /// Show the audit trail, newest first.

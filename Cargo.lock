@@ -638,6 +638,7 @@ dependencies = [
  "csv",
  "serde",
  "serde_json",
+ "sha2",
  "splitforge-domain",
  "splitforge-engine",
  "splitforge-export",
@@ -649,6 +650,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

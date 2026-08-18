@@ -288,7 +288,11 @@ scoring path has never seen a physical reader — that is Milestone 3, and it is
 Operational safety, not features. This milestone is what separates a demo from a timer.
 
 - systemd service with restart policy and startup ordering
-- Health endpoint and downloadable diagnostic bundle
+- Health endpoint — gated on [Q5](open-questions.md#q5-local-api-authentication-model), which
+  owns every socket this project opens
+- [x] Downloadable diagnostic bundle — `splitforge doctor --bundle out.json`, safe to attach
+      to a public issue without being read first
+      ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md))
 - [x] Free-disk warning and defined write-failure behavior
       ([ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md))
 - **Clock discipline:** DS3231 RTC support, GPS/PPS integration, Pi as LAN NTP server,
@@ -300,7 +304,7 @@ Operational safety, not features. This milestone is what separates a demo from a
 - Pi deployment guide: external power, wired Ethernet first, race-day Wi-Fi treated as a
   known risk
 
-**Three items landed early**, for the same reason Milestone 4 did: they need no hardware, and
+**Four items landed early**, for the same reason Milestone 4 did: they need no hardware, and
 leaving them until after Milestone 3 would have meant timing a real event with a recovery
 story that existed only as an open question. `backup restore` and `splitforge recover` are
 built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed.
@@ -384,6 +388,61 @@ The last two commands are the decision that [ADR-0019](adr/0019-pre-race-gates-b
 records: the gate blocks, the organizer can walk past it, and walking past it writes down
 who did and why. The backup is refused while the journal keeps accepting reads, which is the
 shedding order [architecture.md § 4](architecture.md#4-failure-behavior) asks for.
+
+**Observed**, the diagnostic bundle ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md)).
+A bundle is the one artifact SplitForge builds to be sent somewhere — emailed, pasted into an issue, dropped in a chat channel — and nobody is
+going to open it first and check what is inside. So it carries nothing about anybody. Here
+the roster deliberately omits chips for two entrants, which is what makes `config.chips`
+fire, and `config.chips` reports entrants **by bib**:
+
+```console
+$ splitforge doctor
+{"errors":0,"warnings":1,"findings":[{"severity":"warning","check":"config.chips",
+ "detail":"race \"5K\": 2 entrant(s) have no chip and cannot be timed (104, 109)"}]}
+
+$ splitforge doctor --bundle bundle.json
+wrote diagnostic bundle to bundle.json
+
+$ jq '.doctor.findings, .races[0]' bundle.json
+[{"severity":"warning","check":"config.chips","detail":null,
+  "detail_withheld":"this check's message can name participants;
+                     run `splitforge doctor` on the device to read it"}]
+{"race":"5K","participants":12,"assignments":10,"participants_without_a_chip":2, ...}
+```
+
+The maintainer learns that two entrants cannot be timed and which check said so. Which two
+stays on the device.
+
+Bundling the complete 5K instead — run, published, and corrected — gives the other half:
+638 reads split `mat/1` 325 and `mat/2` 313, contiguous from sequence 1; a sidecar holding
+all 638 with nothing missing in either direction; both revisions with the differing digests
+that prove the correction landed; and the audit trail as `fixture.load`, `race.start`,
+`results.publish`, `results.declare`, `results.publish`. The one chip read by a mat and
+assigned to nobody appears, in that particular file, as `"h:2deab172"` — and as something
+else entirely in the next one, because the hash is salted per bundle. It correlates
+*inside* this file and is worth nothing outside it, because the salt was thrown away when
+the file was written.
+
+`crates/splitforge-cli/tests/bundle.rs` holds the claim as eight tests. The one that matters
+runs a full event — roster, race, publication, a disqualification by bib with an operator's
+reason naming the runner — then searches the **bytes** of the resulting bundle for every
+name, bib, chip, operator, and typed sentence the event contained, and for the temporary
+directory it ran in. Searching the parsed JSON instead would only check the fields somebody
+thought to look at, and the leak that matters is the one in the field nobody thought of.
+
+Two things surfaced while building it, both worth writing down. The first: an allowlisted
+check is not automatically safe. `storage.free_space` reports a measurement failure by
+quoting the path it could not read, and a path on anything but a Pi runs through a home
+directory and names the operator — so the bundle substitutes the database's directories out
+of every message it copies. That is the one filter this design permits, because it replaces
+a handful of exactly known strings rather than guessing at prose.
+
+The second removed a field. `recorded_at - received_at` looks exactly like the number
+that says whether storage kept up — and it is, for reads a device actually took off a
+socket. The simulator stamps `received_at` from the fixture's race day so a restart test can
+compare two derivations byte for byte, so the first bundle from a real run reported a write
+latency of 128 days. Write latency needs a Pi, and it stays with the rest of the work that
+does.
 
 What this does **not** retire is the reliability work that needs a Pi: whether an SD card
 honors `fsync` at all, what the second sync per reader report costs on real flash, what
