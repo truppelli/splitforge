@@ -1,0 +1,125 @@
+# The SplitForge edge service, as systemd runs it on a Raspberry Pi (ADR-0002).
+#
+# Installation: docs/deployment.md
+#
+# Every non-obvious directive below carries the reason it is there. A unit file is read
+# once, at 6 a.m., by somebody who did not write it and cannot look anything up.
+
+[Unit]
+Description=SplitForge race timing service
+Documentation=https://github.com/truppelli/splitforge/blob/main/docs/deployment.md
+
+# Ordering only. There is deliberately no Wants= or Requires= for any network target: an
+# After= on a unit that is not in the boot transaction imposes no delay at all, so this
+# orders the service after the network *if the network is coming up*, and starts it
+# immediately if it is not.
+#
+# ADR-0022 has the argument. A checkpoint has no DHCP server, no Internet, and often no
+# switch; a timer that waits 90 seconds for network-online.target, or refuses to start
+# because it never arrives, has caused the harm it was protecting against (ADR-0008).
+After=network.target time-sync.target
+
+# Never give up restarting. systemd's default stops a unit permanently after 5 starts in
+# 10 seconds, which for a race timer is the worst available behavior: whatever made it
+# crash is usually transient, and a timer that has given up records nothing for the rest
+# of the event. The cost is a crash loop that fills the journal — which is visible, and
+# recoverable, in a way that a stopped timer is not.
+StartLimitIntervalSec=0
+
+[Service]
+# `exec` rather than `simple`: startup is considered complete when execve() succeeds, so a
+# binary that is missing or not executable fails `systemctl start` instead of appearing to
+# have started and then vanishing.
+Type=exec
+ExecStart=/usr/local/bin/splitforge-edge
+
+User=splitforge
+Group=splitforge
+
+# /run/splitforge, created on start and removed on stop. The socket lives here (ADR-0021),
+# and putting it on a tmpfs systemd owns means a killed process never leaves one behind for
+# the next start to reason about. splitforge-api unlinks a stale socket anyway — refusing to
+# start over a leftover file would be the same self-inflicted outage — but this means it
+# almost never has to.
+RuntimeDirectory=splitforge
+RuntimeDirectoryMode=0750
+
+# /var/lib/splitforge — the event database, and the write-ahead sidecar that is the only
+# copy of a read between the reader and the commit (ADR-0018).
+StateDirectory=splitforge
+StateDirectoryMode=0750
+
+Restart=always
+RestartSec=1
+
+# The service removes its socket on SIGTERM and exits in milliseconds. systemd's default
+# 90 seconds of patience would only slow down `systemctl restart` on a device somebody is
+# standing next to. SIGTERM is already systemd's default stop signal, and the graceful path
+# depends on it staying that way.
+TimeoutStopSec=30
+
+# 1 GB of RAM (ADR-0002), and a kernel that has to kill something. Prefer that it not be
+# the only process recording the race.
+OOMScoreAdjust=-500
+
+# A field device nobody can attach a debugger to. A backtrace in journald is the whole
+# diagnosis, and it costs nothing until something panics.
+Environment=RUST_BACKTRACE=1
+
+# Without this the service creates its files world-readable, and everything it creates is
+# sensitive: the database holds participant names, and the write-ahead sidecar holds every
+# raw read in plain text (ADR-0018). StateDirectoryMode=0750 stops a stranger *listing* the
+# directory; this stops them reading a file whose path they guessed.
+#
+# What it produces, measured rather than assumed: the sidecar 0660, and the database, WAL,
+# and shared-memory files 0640 — SQLite asks the kernel for 0644 and a umask can only take
+# bits away, never add group-write. So the group can read the event but not write it, and
+# operating the CLI against a database the *service* created means running as this account.
+# docs/deployment.md says so, and says why the ordinary flow avoids it.
+UMask=0007
+
+# --- Hardening -------------------------------------------------------------------------
+#
+# The device is physically reachable by strangers (threat model S8) and shares a network
+# with equipment nobody vetted. None of this prevents the attacks that matter most, but it
+# bounds what a defect in this process can reach.
+
+# ADR-0021, enforced by the kernel instead of by review. The API listens on a Unix socket
+# and binds no port; with this line a TCP listener added by mistake cannot open one at all.
+# Milestone 3 connects to a reader over TCP and will have to widen this deliberately —
+# which is exactly the review a quietly added listener would otherwise skip.
+RestrictAddressFamilies=AF_UNIX
+
+# The service runs unprivileged and needs no capability at all — it opens files in two
+# directories systemd already created for it, and one socket. An empty bounding set means a
+# defect here cannot acquire one.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectHostname=yes
+PrivateTmp=yes
+PrivateMounts=yes
+# The service reads the clock and never sets it. Clock discipline is the system's NTP or
+# GPS daemon's job, and it is a different unit with different privileges.
+ProtectClock=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target
