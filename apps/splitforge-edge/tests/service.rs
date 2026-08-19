@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use splitforge_cli::Speed;
+use splitforge_domain::ClockStep;
 use splitforge_storage::{ConfigStore, SqliteJournal};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
@@ -176,7 +177,7 @@ async fn the_service_reports_the_database_it_was_pointed_at() {
     assert!(status.contains("200 OK"), "got: {status}");
     assert_eq!(health["status"], "ok");
     assert_eq!(health["database"], "event.db", "the name, never the path");
-    assert_eq!(health["schema_version"], 4);
+    assert_eq!(health["schema_version"], splitforge_storage::SCHEMA_VERSION);
     assert_eq!(
         health["raw_reads"], 0,
         "the fixture configures, it does not run"
@@ -234,6 +235,50 @@ async fn a_floor_it_cannot_meet_makes_the_service_report_degraded() {
             .expect("a reason")
             .contains("below the"),
         "the reason has to name the problem: {health}"
+    );
+
+    service.terminate().await;
+}
+
+#[tokio::test]
+async fn a_clock_that_jumped_makes_the_service_report_degraded() {
+    // The service writes these itself, from its own monitor loop. What this covers is the
+    // other direction: that a step already in the database reaches health, which is what a
+    // monitor polling the socket after a restart actually sees. The loop's own arithmetic
+    // is `splitforge-domain`'s tests, and the loop end to end is verified against a
+    // deliberately stepped clock in docs/clock-and-time-discipline.md.
+    let service = Service::start().await;
+
+    let (status, before) = service.get("/health").await;
+    assert!(status.contains("200 OK"), "got: {status}");
+    assert_eq!(before["clock_steps"], 0);
+
+    let mut journal = SqliteJournal::open(service.database()).expect("open journal");
+    let at = time::OffsetDateTime::now_utc();
+    journal
+        .record_clock_step(&ClockStep {
+            observed_before: at,
+            observed_after: at + time::Duration::seconds(-30),
+            monotonic_ms: 10_000,
+            step_ms: -40_000,
+        })
+        .expect("record a step");
+    drop(journal);
+
+    let (status, health) = service.get("/health").await;
+
+    assert!(
+        status.contains("503"),
+        "a clock that moved is something a monitor must be able to see: {status}"
+    );
+    assert_eq!(health["status"], "degraded");
+    assert_eq!(health["clock_steps"], 1);
+
+    let reason = health["degraded_by"][0].as_str().expect("a reason");
+    assert!(reason.contains("jumped 1 time(s)"), "got: {reason}");
+    assert!(
+        reason.contains("-40000 ms"),
+        "the sign is the dangerous part: {reason}"
     );
 
     service.terminate().await;

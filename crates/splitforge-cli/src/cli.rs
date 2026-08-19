@@ -165,6 +165,10 @@ pub enum Command {
     #[command(subcommand)]
     Device(DeviceCommand),
 
+    /// What the device's clock has done.
+    #[command(subcommand)]
+    Clock(ClockCommand),
+
     /// Replay the write-ahead sidecar into the database, and the database into it.
     ///
     /// Runs automatically whenever the writing process starts. Run it by hand after a
@@ -624,6 +628,20 @@ pub enum DeviceCommand {
 
     /// Show device settings and what the disk currently has left.
     Show,
+}
+
+/// The device clock's history.
+#[derive(Debug, Subcommand)]
+pub enum ClockCommand {
+    /// List wall-clock discontinuities the service recorded, newest first.
+    ///
+    /// Only the running service can observe these: a step is a discontinuity between two
+    /// moments, and a one-shot command was not there for the first one.
+    Steps {
+        /// How many to show.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
 }
 
 /// Backups and restores.

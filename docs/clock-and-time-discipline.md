@@ -248,6 +248,94 @@ The pre-race checklist should make clock state a **blocking item**, alongside di
 and reader connectivity. A clock problem found at 6:00 a.m. costs five minutes; the same
 problem found at 9:30 a.m. costs the event.
 
+### Built: backward and forward wall-clock steps
+
+Of the list above, exactly one item needs no hardware and no unanswered question, and it is
+built:
+
+> **Backward wall-clock steps** detected by comparing wall and monotonic progress — logged as
+> events, since a step mid-race changes how reads must be interpreted.
+
+`splitforge-edge` samples `CLOCK_REALTIME` and `CLOCK_MONOTONIC` together every ten seconds.
+Between two samples they should advance by the same amount. When they disagree by more than
+250 ms, something moved the wall clock — NTP finding a network, an RTC module, an operator
+with `date` — and the difference is appended to the append-only `clock_steps` table
+([ADR-0005](adr/0005-raw-read-append-only-journal.md),
+[ADR-0011](adr/0011-append-only-enforced-by-triggers.md)).
+
+**Why it lives in the service and not in `doctor`.** A step is a discontinuity between two
+moments. A one-shot command sees the clock as it is now and has nothing to compare it
+against; only a process that was running across the jump can see one. This is the second
+thing — after liveness — that the long-running service can report and the CLI structurally
+cannot.
+
+**Why 250 ms.** Not a precision target; a floor for confidence. NTP slews a disciplined
+clock at up to 500 ppm, which over a ten-second window is a few milliseconds; the two clocks
+are read one after another and a loaded Pi can deschedule the thread in between; and the
+sampling timer does not fire at exactly the interval it asked for. 250 ms clears all three.
+It is deliberately larger than the ±0.1 s budget in § 2, which means a sub-budget step goes
+unreported — the alternative is an alarm that fires on healthy devices, and an alarm that
+fires on healthy devices is one operators learn to ignore.
+
+**Observed.** The service run under `libfaketime`, with `CLOCK_MONOTONIC` deliberately left
+alone so the two clocks diverge the way they would on a real correction:
+
+```console
+$ curl -s --unix-socket api.sock http://localhost/health
+{"status":"ok","degraded_by":[],...,"clock_steps":0}                      HTTP 200
+
+$ echo "+3600" > faketime.rc            # one hour forward, monotonic untouched
+
+$ curl -s --unix-socket api.sock http://localhost/health
+{"status":"degraded","degraded_by":["the device clock has jumped 1 time(s), the largest
+ by 3599998 ms; run `splitforge doctor` before publishing"],...,"clock_steps":1}
+                                                                          HTTP 503
+
+$ echo "+3000" > faketime.rc            # and ten minutes back
+
+$ splitforge clock steps
+{"steps":2,"largest_ms":3599998,"entries":[
+  {"seq":2,"from":"2026-08-19T02:50:52.677871Z","to":"2026-08-19T02:41:02.678419Z",
+   "monotonic_ms":10000,"step_ms":-599999,"direction":"backwards"},
+  {"seq":1,"from":"2026-08-19T01:50:32.678922Z","to":"2026-08-19T02:50:42.677686Z",
+   "monotonic_ms":10000,"step_ms":3599998,"direction":"forwards"}]}
+
+$ splitforge doctor
+{"errors":0,"warnings":1,"findings":[{"severity":"warning","check":"clock.steps",
+ "detail":"the device clock has jumped 2 time(s) since this database was created, the
+           largest forwards by 3599998 ms. Times recorded on either side of a jump came
+           from different clocks. `splitforge clock steps` lists them."}]}
+```
+
+journald gets both, as they happen:
+
+```text
+splitforge-edge: the wall clock moved 3599998 ms relative to elapsed time
+                 (2026-08-19 1:50:32.678922018 UTC -> 2026-08-19 2:50:42.677686557 UTC)
+splitforge-edge: the wall clock moved -599999 ms relative to elapsed time
+                 (2026-08-19 2:50:52.677871511 UTC -> 2026-08-19 2:41:02.678419504 UTC)
+```
+
+`largest_ms` is chosen by **magnitude and keeps its sign**, which is why the backward step is
+reported as `-599999` rather than folded into an absolute value. Backward is the dangerous
+direction: it can give a later read an earlier timestamp than one recorded before it, and no
+amount of sequence numbering repairs that after the fact.
+
+**It warns; it does not block.** A step degrades health — so `curl --fail` and a systemd
+watchdog see it without parsing a body — and raises a `doctor` warning, and that is all.
+Nothing refuses to start a race and nothing refuses to publish.
+
+That is **not** an answer to [Q11](open-questions.md#q11-clock-error-budget-enforcement),
+which asks whether accumulated error beyond the budget should block a `final` revision.
+Q11 is about *drift measured against a reference*, needs the hardware in items 3 and 4
+above, and remains open. A step is a different and cruder signal: the clock demonstrably
+moved, by a knowable amount, with no reference required.
+
+**Still not built**, and still needing hardware: the DS3231, GPS/PPS, the Pi as a LAN NTP
+server, per-reader offset and skew into `clock_samples`, time since last good sync, and
+`device_clock_state` itself — nothing in the codebase determines it today, and item 8's
+blocking pre-race check cannot be built until something does.
+
 ## 11. Summary of recommendations
 
 1. Target **±0.1 s** across a full event day.

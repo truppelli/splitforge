@@ -100,6 +100,11 @@ pub struct Health {
     pub min_free_mb: u64,
     /// Whether a race would be allowed to start right now.
     pub above_floor: Option<bool>,
+    /// Wall-clock discontinuities this device has recorded, from `SELECT COUNT(*)`.
+    ///
+    /// Cumulative for the life of the database, not for the life of this process: a step
+    /// observed before the last restart still moved every timestamp written around it.
+    pub clock_steps: u64,
     // Deliberately no reader connection state. No reader protocol exists until Milestone 3,
     // and a `"reader": "connected"` field that is always true because nothing ever connects
     // would be the most dangerous kind of health check: one that reports the absence of
@@ -128,6 +133,7 @@ impl Health {
             free_mb: None,
             min_free_mb,
             above_floor: None,
+            clock_steps: 0,
         }
     }
 

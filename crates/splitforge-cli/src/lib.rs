@@ -54,15 +54,16 @@ use splitforge_storage::{ConfigStore, ResultStore, SqliteJournal};
 
 pub use bundle::{BUNDLE_FORMAT, BUNDLE_VERSION, Bundle};
 pub use cli::{
-    BackupCommand, CheckpointCommand, ChipsCommand, Cli, Command, DeviceCommand, EventCommand,
-    ExportCommand, ExportFormat, FixtureCommand, Format, PolicyCommand, RaceCommand, RaceRef,
-    ReaderCommand, ResultsCommand, RosterCommand, Speed,
+    BackupCommand, CheckpointCommand, ChipsCommand, Cli, ClockCommand, Command, DeviceCommand,
+    EventCommand, ExportCommand, ExportFormat, FixtureCommand, Format, PolicyCommand, RaceCommand,
+    RaceRef, ReaderCommand, ResultsCommand, RosterCommand, Speed,
 };
 pub use configure::load_fixture;
 pub use report::{
-    AcceptedReadView, AssignmentView, AuditView, CheckpointView, DerivationReport, DoctorReport,
-    EventView, Finding, ImportReport, InitReport, ParticipantView, PolicyView, RaceView,
-    RawReadView, ReaderStatusView, SessionView, SimulationReport, StatusReport, reader_status,
+    AcceptedReadView, AssignmentView, AuditView, CheckpointView, ClockStepView, ClockStepsView,
+    DerivationReport, DoctorReport, EventView, Finding, ImportReport, InitReport, ParticipantView,
+    PolicyView, RaceView, RawReadView, ReaderStatusView, SessionView, SimulationReport,
+    StatusReport, reader_status,
 };
 pub use simulate::into_journal;
 
@@ -415,6 +416,17 @@ pub async fn run(cli: Cli) -> Result<()> {
                         }),
                         format,
                     )
+                }
+            }
+        }
+
+        Command::Clock(command) => {
+            let journal = SqliteJournal::open(&database)
+                .with_context(|| format!("opening journal at {}", database.display()))?;
+            match command {
+                ClockCommand::Steps { limit } => {
+                    let steps = journal.recent_clock_steps(limit)?;
+                    emit(&report::ClockStepsView::of(&steps), format)
                 }
             }
         }
