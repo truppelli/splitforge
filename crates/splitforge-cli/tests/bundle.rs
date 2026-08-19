@@ -105,7 +105,11 @@ async fn a_bundle_still_says_enough_to_debug_the_device() {
     assert!(json["generated_at"].as_str().is_some());
     assert!(json["tool_version"].as_str().is_some());
 
-    assert_eq!(json["device"]["schema_version"], 4);
+    assert_eq!(
+        json["device"]["schema_version"],
+        splitforge_storage::SCHEMA_VERSION,
+        "the bundle reports the schema the build actually migrated to"
+    );
     assert_eq!(json["device"]["min_free_mb"], 256);
     assert_eq!(json["device"]["above_floor"], true);
 

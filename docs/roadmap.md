@@ -299,9 +299,11 @@ Operational safety, not features. This milestone is what separates a demo from a
       ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md))
 - [x] Free-disk warning and defined write-failure behavior
       ([ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md))
-- **Clock discipline:** DS3231 RTC support, GPS/PPS integration, Pi as LAN NTP server,
+- **Clock discipline** — *partly built.* Wall-clock step detection is done: the service
+  compares the wall clock against the monotonic clock and records every jump as append-only
+  evidence ([clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms)).
+  Still hardware-gated: DS3231 RTC support, GPS/PPS integration, Pi as LAN NTP server, and
   clock state as a blocking pre-race check
-  ([clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms))
 - [x] Manual backup and **restore drills** — restore is rehearsed, not discovered
 - [x] Corruption recovery ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
 - Graceful shutdown on power loss where the hardware permits
@@ -309,7 +311,7 @@ Operational safety, not features. This milestone is what separates a demo from a
   known risk. Installing the service is written up in [deployment.md](deployment.md); this
   is the half that needs a Pi in a field to write honestly
 
-**Six items landed early**, for the same reason Milestone 4 did: they need no hardware, and
+**Seven items landed early**, for the same reason Milestone 4 did: they need no hardware, and
 leaving them until after Milestone 3 would have meant timing a real event with a recovery
 story that existed only as an open question. `backup restore` and `splitforge recover` are
 built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed, and so
@@ -595,13 +597,82 @@ constants restated in the test:
   source-reading test can see. Milestone 3 needs `AF_INET` for the reader and will have to
   add it deliberately, failing this test until it does.
 
+**Observed**, wall-clock step detection — the one part of clock discipline that needs no
+hardware and no unanswered question. The service was run under `libfaketime` with
+`CLOCK_MONOTONIC` deliberately left alone, so the two clocks diverge exactly the way they do
+when something corrects a Pi that has no battery-backed clock:
+
+```console
+$ curl -s --unix-socket api.sock http://localhost/health
+{"status":"ok","degraded_by":[],...,"clock_steps":0}                       HTTP 200
+
+$ echo "+3600" > faketime.rc                    # one hour forward
+
+$ curl -s --unix-socket api.sock http://localhost/health
+{"status":"degraded","degraded_by":["the device clock has jumped 1 time(s), the largest
+ by 3599998 ms; run `splitforge doctor` before publishing"],...,"clock_steps":1}
+                                                                           HTTP 503
+
+$ echo "+3000" > faketime.rc                    # and ten minutes back
+
+$ splitforge clock steps
+{"steps":2,"largest_ms":3599998,"entries":[
+  {"seq":2,"from":"2026-08-19T02:50:52Z","to":"2026-08-19T02:41:02Z",
+   "monotonic_ms":10000,"step_ms":-599999,"direction":"backwards"},
+  {"seq":1,"from":"2026-08-19T01:50:32Z","to":"2026-08-19T02:50:42Z",
+   "monotonic_ms":10000,"step_ms":3599998,"direction":"forwards"}]}
+
+$ splitforge doctor
+{"errors":0,"warnings":1,"findings":[{"severity":"warning","check":"clock.steps",
+ "detail":"the device clock has jumped 2 time(s) since this database was created, the
+           largest forwards by 3599998 ms..."}]}
+```
+
+Two clocks and a subtraction. Between two samples ten seconds apart, wall time and monotonic
+time should advance by the same amount; when they disagree by more than 250 ms, the wall
+clock moved and the difference goes into an append-only table
+([ADR-0011](adr/0011-append-only-enforced-by-triggers.md) — this needed no new decision, only
+the existing one about evidence).
+
+**Only a long-running process can see this.** A step is a discontinuity between two moments,
+and a one-shot command was not there for the first one. After liveness, it is the second
+thing the service can report that `splitforge status` structurally cannot — which is a
+better argument for the service existing than the health endpoint alone was.
+
+The reason it matters at all is that
+[`race start` records the gun](adr/0015-race-start-records-the-gun.md) from this clock. The
+design target is ±0.1 s across an event day; the jump above is 3,599,998 ms. `largest_ms`
+is chosen by magnitude and **keeps its sign**, because backward is the dangerous direction —
+it can give a later read an earlier timestamp than one recorded before it.
+
+**It warns, and blocks nothing.** Health degrades so `curl --fail` and a watchdog see it
+without parsing a body, and `doctor` raises a warning. Nothing refuses to start a race and
+nothing refuses to publish — and that is deliberately *not* an answer to
+[Q11](open-questions.md#q11-clock-error-budget-enforcement), which asks about accumulated
+drift measured against a reference, needs the GPS and RTC hardware, and stays open.
+
+Two defects surfaced, both from running it rather than from tests passing. The first was in
+storage: `record_clock_step` returned a timestamp carrying nanoseconds the column had
+truncated to microseconds, so the value handed back did not compare equal to the row it
+described. The second was cosmetic and would have shipped: every multi-line message in the
+new code had lost its line-continuation backslash, so health and `doctor` were emitting
+`"the largest by                          3600000 ms"`. Neither is visible in a passing test
+suite; both are obvious the moment a real command prints a real string.
+
+What this does not retire is the rest of the item. The DS3231, GPS/PPS, the Pi as a LAN NTP
+server, per-reader offset and skew into `clock_samples`, and `device_clock_state` — which
+nothing in the codebase determines today — all still need hardware, and the blocking
+pre-race check still needs `device_clock_state` before it can exist.
+
 **Still open in this milestone:** graceful shutdown on power loss, the Pi field guide, and
-every part of clock discipline — the RTC, GPS/PPS, the Pi as a LAN NTP server, and clock
-state as a pre-race gate. That last one is not hardware-free the way it looks: nothing in
-the codebase determines `DeviceClockState` today, determining it needs syscalls this
+the hardware half of clock discipline — the RTC, GPS/PPS, the Pi as a LAN NTP server, and
+clock state as a pre-race gate. That last one is not hardware-free the way it looks: nothing
+in the codebase determines `DeviceClockState` today, determining it needs syscalls this
 workspace's `unsafe_code = "deny"` rules out reaching for directly, and *which* states
 should block a start is [Q11](open-questions.md#q11-clock-error-budget-enforcement), which
 has no answer yet. Building it now would mean silently choosing one.
+
+With step detection landed, **every remaining item in this milestone needs hardware.**
 
 **Exit criterion:** a full-length event is timed on real hardware while an observer
 randomly pulls power, unplugs Ethernet, and restarts the service — and no acknowledged
