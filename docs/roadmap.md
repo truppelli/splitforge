@@ -19,7 +19,11 @@ flowchart LR
     style M1 fill:#2d6a4f,color:#fff
     style M2 fill:#2d6a4f,color:#fff
     style M4 fill:#2d6a4f,color:#fff
+    style M5 fill:#40916c,color:#fff
 ```
+
+Solid green is complete. **M5 is the lighter green**: everything in it that can be built
+without hardware is built, and what remains — like its exit criterion — needs a Pi.
 
 **M3 and M4 swapped.** The original order put the physical reader first, because reader risk
 is the larger risk and this roadmap is ordered by risk retired. That ordering assumed the
@@ -285,6 +289,8 @@ scoring path has never seen a physical reader — that is Milestone 3, and it is
 
 ## Milestone 5 — Field reliability
 
+**Status: the hardware-free work is complete; the exit criterion needs a Pi.**
+
 Operational safety, not features. This milestone is what separates a demo from a timer.
 
 - [x] systemd service with restart policy and startup ordering — the unit is
@@ -311,12 +317,16 @@ Operational safety, not features. This milestone is what separates a demo from a
   known risk. Installing the service is written up in [deployment.md](deployment.md); this
   is the half that needs a Pi in a field to write honestly
 
-**Seven items landed early**, for the same reason Milestone 4 did: they need no hardware, and
-leaving them until after Milestone 3 would have meant timing a real event with a recovery
-story that existed only as an open question. `backup restore` and `splitforge recover` are
-built and tested; [Q7](open-questions.md#q7-corruption-recovery-strategy) is closed, and so
-is [Q5](open-questions.md#q5-local-api-authentication-model), which had blocked the health
-endpoint since Milestone 0.
+**Everything above that needs no hardware is built**, for the same reason Milestone 4 was
+built ahead of Milestone 3: leaving it until after the reader arrived would have meant timing
+a real event with a recovery story that existed only as an open question. That inverts the
+usual framing — these items are not early, the hardware ones are late.
+
+Three questions closed on the way:
+[Q5](open-questions.md#q5-local-api-authentication-model), which had blocked the health
+endpoint since Milestone 0; [Q7](open-questions.md#q7-corruption-recovery-strategy), by
+`backup restore` and `splitforge recover`; and the free-space gate's override rule
+([ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md)).
 
 **Observed.** The same 5K, with a snapshot taken before the gun. Between the second command
 and the third, `event.db`, `event.db-wal`, and `event.db-shm` were deleted outright — the
@@ -399,8 +409,9 @@ who did and why. The backup is refused while the journal keeps accepting reads, 
 shedding order [architecture.md § 4](architecture.md#4-failure-behavior) asks for.
 
 **Observed**, the diagnostic bundle ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md)).
-A bundle is the one artifact SplitForge builds to be sent somewhere — emailed, pasted into an issue, dropped in a chat channel — and nobody is
-going to open it first and check what is inside. So it carries nothing about anybody. Here
+A bundle is the one artifact SplitForge builds to be sent somewhere — emailed, pasted into
+an issue, dropped in a chat channel — and nobody is going to open it first and check what is
+inside. So it carries nothing about anybody. Here
 the roster deliberately omits chips for two entrants, which is what makes `config.chips`
 fire, and `config.chips` reports entrants **by bib**:
 
@@ -453,24 +464,20 @@ compare two derivations byte for byte, so the first bundle from a real run repor
 latency of 128 days. Write latency needs a Pi, and it stays with the rest of the work that
 does.
 
-What this does **not** retire is the reliability work that needs a Pi: whether an SD card
-honors `fsync` at all, what the second sync per reader report costs on real flash, what
-happens to a write in flight when the power goes, and what a full day's journal actually
-weighs — the 256 MiB default is a judgement against the 5K fixture, not a measurement.
-Those stay exactly where they were.
-
 **Observed**, the health endpoint ([ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)).
 The same 5K, run and left in the journal, with `splitforge-edge` started against it:
 
 ```console
 $ splitforge-edge --database event.db --socket api.sock &
+$ EDGE=$!
 
 $ ls -l api.sock
-srw-rw---- 1 root root 0 Aug 18 15:51 api.sock
+srw-rw---- 1 root root 0 Aug 24 04:42 api.sock
 
 $ curl -s --unix-socket api.sock http://localhost/health
 {"status":"ok","degraded_by":[],"version":"0.0.0","uptime_seconds":0,"database":"event.db",
- "schema_version":4,"raw_reads":638,"free_mb":936503,"min_free_mb":256,"above_floor":true}
+ "schema_version":5,"raw_reads":638,"free_mb":935969,"min_free_mb":256,"above_floor":true,
+ "clock_steps":0}
 HTTP 200
 
 $ awk 'NR>1 && $4=="0A"' /proc/$EDGE/net/tcp /proc/$EDGE/net/tcp6 | grep -c .
@@ -480,10 +487,10 @@ $ splitforge device set --min-free-mb 999999999
 {"min_free_mb":999999999}
 
 $ curl -s --unix-socket api.sock http://localhost/health
-{"status":"degraded","degraded_by":["936503 MB free, below the 999999999 MB floor;
+{"status":"degraded","degraded_by":["935969 MB free, below the 999999999 MB floor;
  `splitforge race start` will refuse"],"version":"0.0.0","uptime_seconds":0,
- "database":"event.db","schema_version":4,"raw_reads":638,"free_mb":936503,
- "min_free_mb":999999999,"above_floor":false}
+ "database":"event.db","schema_version":5,"raw_reads":638,"free_mb":935969,
+ "min_free_mb":999999999,"above_floor":false,"clock_steps":0}
 HTTP 503
 
 $ curl --fail --unix-socket api.sock http://localhost/health >/dev/null; echo $?
@@ -526,153 +533,104 @@ and still be the thing the ADR forbids, so the constraint is checked the way ADR
 the dependency rules: by a test, not by whoever reviews the pull request.
 
 **Observed**, the systemd unit ([ADR-0022](adr/0022-the-service-never-waits-for-the-network.md)).
-Installed the way [deployment.md](deployment.md) says to install it, under a real systemd,
-and then attacked:
+Installed under a real systemd and then attacked: `systemd-analyze verify` clean, `SIGKILL`
+restarted by systemd, `systemctl stop` exiting 0 and taking the socket with it, exposure
+level 1.0. The full transcript is in [deployment.md](deployment.md#observed), where somebody
+installing it will actually be looking.
 
-```console
-$ systemd-analyze verify /etc/systemd/system/splitforge-edge.service; echo $?
-0
-
-$ systemctl enable --now splitforge-edge && systemctl is-active splitforge-edge
-active
-
-$ ls -l /run/splitforge /var/lib/splitforge
-srw-rw---- 1 splitforge splitforge      0 api.sock
--rw-r----- 1 splitforge splitforge   4096 event.db
--rw-r----- 1 splitforge splitforge  32768 event.db-shm
--rw-r----- 1 splitforge splitforge 230752 event.db-wal
--rw-rw---- 1 splitforge splitforge      0 event.db.reads.jsonl
-
-$ kill -9 $(systemctl show -p MainPID --value splitforge-edge)
-$ systemctl is-active splitforge-edge
-active                                           # pid 392 -> 428
-
-$ systemctl stop splitforge-edge
-$ systemctl show -p Result -p ExecMainStatus splitforge-edge
-Result=success
-ExecMainStatus=0
-$ ls /run/splitforge
-ls: cannot access '/run/splitforge': No such file or directory
-
-$ systemd-analyze security splitforge-edge.service | tail -1
-→ Overall exposure level for splitforge-edge.service: 1.0 OK :-)
-```
-
-`SIGKILL` is the only signal that actually tests `Restart=always`, and the missing
-`/run/splitforge` afterwards is the graceful path working: the service removed its socket on
-SIGTERM and systemd removed the directory with the service. Neither of those is the
-interesting part.
-
-**The interesting part is the file modes, because the first run of this unit got them
-wrong.** `event.db` and `event.db.reads.jsonl` came out `-rw-r--r--` — world-readable — on a
-device the threat model already describes as physically reachable by strangers. The database
-holds participant names and the sidecar holds every raw read in plain text
-([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)), so that is the same exposure the
-repository's own `.gitignore` spends a paragraph warning about, reproduced on the machine
-where the data actually lives. `UMask=0007` fixes it, and the modes above are what the unit
-produces now rather than what it intends.
+The part worth repeating here is that **the first run of that unit created the event database
+world-readable.** `event.db` and `event.db.reads.jsonl` came out `-rw-r--r--` on a device the
+threat model already describes as physically reachable by strangers — participant names and
+every raw read in plain text ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)), which is
+the same exposure this repository's own `.gitignore` spends a paragraph warning about,
+reproduced on the machine where the data actually lives. `UMask=0007` fixes it.
 
 Nothing about reading the unit file would have found that. It took installing it and running
-`ls`, which is the same reason the diagnostic bundle's write-latency bug and the free-space
-gate's path leak were both found by running real commands rather than by passing tests.
+`ls` — the same reason the diagnostic bundle's write-latency bug and the free-space gate's
+path leak were both found by running real commands rather than by passing tests. The
+measurement then corrected a claim rather than confirming one: a umask can only remove
+permission bits and SQLite asks for `0644`, so the database ends up `0640`, group-readable
+but not group-writable.
 
-The measurement also corrected a claim rather than confirming one: a umask can only remove
-permission bits, and SQLite asks the kernel for `0644`, so the database ends up `0640` — the
-group can read the event but not write it. The comment in the unit now says that, and
-[deployment.md](deployment.md) documents the two access tiers that follow.
-
-Three things in that unit are load-bearing rather than hygiene, and each is enforced by
-`apps/splitforge-edge/tests/unit_file.rs`, which compares the unit against the binary's own
-`--help` output and against `splitforge_api::DEFAULT_SOCKET_PATH` rather than against
-constants restated in the test:
+Three directives in that unit are load-bearing rather than hygiene, and
+`apps/splitforge-edge/tests/unit_file.rs` enforces each by comparing the unit against the
+binary's own `--help` output rather than against constants restated in the test:
 
 - **No `Wants=` on any network target.** A checkpoint has no DHCP and often no switch;
   `network-online.target` would have delayed every boot by 90 seconds waiting for a network
-  that is not coming. Architecture § 6 had specified exactly that, and it is corrected there.
+  that is not coming. Architecture § 6 had specified exactly that, and is corrected there.
 - **`StartLimitIntervalSec=0`.** `Restart=always` is not what it sounds like — systemd stops
-  a unit permanently after five starts in ten seconds. A timer that has given up records
+  a unit permanently after five starts in ten seconds, and a timer that has given up records
   nothing for the rest of the event.
 - **`RestrictAddressFamilies=AF_UNIX`.** [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)
   enforced by the kernel rather than by review, including against a dependency, which no
-  source-reading test can see. Milestone 3 needs `AF_INET` for the reader and will have to
-  add it deliberately, failing this test until it does.
+  source-reading test can see. Milestone 3 needs `AF_INET` and will have to add it
+  deliberately, failing that test until it does.
 
 **Observed**, wall-clock step detection — the one part of clock discipline that needs no
 hardware and no unanswered question. The service was run under `libfaketime` with
-`CLOCK_MONOTONIC` deliberately left alone, so the two clocks diverge exactly the way they do
-when something corrects a Pi that has no battery-backed clock:
+`CLOCK_MONOTONIC` deliberately left alone, stepped an hour forward and ten minutes back; the
+full transcript is in
+[clock discipline § 10](clock-and-time-discipline.md#built-backward-and-forward-wall-clock-steps).
 
 ```console
-$ curl -s --unix-socket api.sock http://localhost/health
-{"status":"ok","degraded_by":[],...,"clock_steps":0}                       HTTP 200
-
-$ echo "+3600" > faketime.rc                    # one hour forward
-
 $ curl -s --unix-socket api.sock http://localhost/health
 {"status":"degraded","degraded_by":["the device clock has jumped 1 time(s), the largest
  by 3599998 ms; run `splitforge doctor` before publishing"],...,"clock_steps":1}
                                                                            HTTP 503
-
-$ echo "+3000" > faketime.rc                    # and ten minutes back
-
-$ splitforge clock steps
-{"steps":2,"largest_ms":3599998,"entries":[
-  {"seq":2,"from":"2026-08-19T02:50:52Z","to":"2026-08-19T02:41:02Z",
-   "monotonic_ms":10000,"step_ms":-599999,"direction":"backwards"},
-  {"seq":1,"from":"2026-08-19T01:50:32Z","to":"2026-08-19T02:50:42Z",
-   "monotonic_ms":10000,"step_ms":3599998,"direction":"forwards"}]}
-
-$ splitforge doctor
-{"errors":0,"warnings":1,"findings":[{"severity":"warning","check":"clock.steps",
- "detail":"the device clock has jumped 2 time(s) since this database was created, the
-           largest forwards by 3599998 ms..."}]}
 ```
 
 Two clocks and a subtraction. Between two samples ten seconds apart, wall time and monotonic
-time should advance by the same amount; when they disagree by more than 250 ms, the wall
-clock moved and the difference goes into an append-only table
+time should advance by the same amount; when they disagree by more than 250 ms the wall clock
+moved, and the difference goes into an append-only table
 ([ADR-0011](adr/0011-append-only-enforced-by-triggers.md) — this needed no new decision, only
 the existing one about evidence).
 
 **Only a long-running process can see this.** A step is a discontinuity between two moments,
 and a one-shot command was not there for the first one. After liveness, it is the second
-thing the service can report that `splitforge status` structurally cannot — which is a
-better argument for the service existing than the health endpoint alone was.
+thing the service can report that `splitforge status` structurally cannot — a better argument
+for the service existing than the health endpoint alone was.
 
-The reason it matters at all is that
-[`race start` records the gun](adr/0015-race-start-records-the-gun.md) from this clock. The
-design target is ±0.1 s across an event day; the jump above is 3,599,998 ms. `largest_ms`
-is chosen by magnitude and **keeps its sign**, because backward is the dangerous direction —
-it can give a later read an earlier timestamp than one recorded before it.
+It matters because [`race start` records the gun](adr/0015-race-start-records-the-gun.md)
+from this clock. The design target is ±0.1 s across an event day; the jump above is
+3,599,998 ms. `largest_ms` is chosen by magnitude and **keeps its sign**, because backward is
+the dangerous direction — it can give a later read an earlier timestamp than one recorded
+before it.
 
 **It warns, and blocks nothing.** Health degrades so `curl --fail` and a watchdog see it
 without parsing a body, and `doctor` raises a warning. Nothing refuses to start a race and
-nothing refuses to publish — and that is deliberately *not* an answer to
+nothing refuses to publish — which is deliberately *not* an answer to
 [Q11](open-questions.md#q11-clock-error-budget-enforcement), which asks about accumulated
 drift measured against a reference, needs the GPS and RTC hardware, and stays open.
 
-Two defects surfaced, both from running it rather than from tests passing. The first was in
-storage: `record_clock_step` returned a timestamp carrying nanoseconds the column had
-truncated to microseconds, so the value handed back did not compare equal to the row it
-described. The second was cosmetic and would have shipped: every multi-line message in the
-new code had lost its line-continuation backslash, so health and `doctor` were emitting
+Two defects surfaced, both from running it rather than from tests passing. `record_clock_step`
+returned a timestamp carrying nanoseconds the column had truncated to microseconds, so the
+value handed back did not compare equal to the row it described. And every multi-line message
+in the new code had lost its line-continuation backslash, so health and `doctor` were emitting
 `"the largest by                          3600000 ms"`. Neither is visible in a passing test
 suite; both are obvious the moment a real command prints a real string.
 
-What this does not retire is the rest of the item. The DS3231, GPS/PPS, the Pi as a LAN NTP
-server, per-reader offset and skew into `clock_samples`, and `device_clock_state` — which
-nothing in the codebase determines today — all still need hardware, and the blocking
-pre-race check still needs `device_clock_state` before it can exist.
+### Still open — and every item of it needs hardware
 
-**Still open in this milestone:** graceful shutdown on power loss, the Pi field guide, and
-the hardware half of clock discipline — the RTC, GPS/PPS, the Pi as a LAN NTP server, and
-clock state as a pre-race gate. That last one is not hardware-free the way it looks: nothing
-in the codebase determines `DeviceClockState` today, determining it needs syscalls this
-workspace's `unsafe_code = "deny"` rules out reaching for directly, and *which* states
-should block a start is [Q11](open-questions.md#q11-clock-error-budget-enforcement), which
-has no answer yet. Building it now would mean silently choosing one.
+**Work:**
 
-With step detection landed, **every remaining item in this milestone needs hardware.**
+- **Graceful shutdown on power loss**, where the hardware permits it.
+- **The Pi field guide** — external power, wired Ethernet first, race-day Wi-Fi as a known
+  risk. Installing the service is written up in [deployment.md](deployment.md); this is the
+  half that cannot be written honestly from a desk.
+- **The hardware half of clock discipline** — the DS3231 RTC, GPS/PPS, the Pi as a LAN NTP
+  server, per-reader offset and skew into `clock_samples`, and clock state as a blocking
+  pre-race check. That last one is not hardware-free the way it looks: nothing in the
+  codebase determines `DeviceClockState` today, determining it needs syscalls this
+  workspace's `unsafe_code = "deny"` rules out reaching for directly, and *which* states
+  should block a start is [Q11](open-questions.md#q11-clock-error-budget-enforcement), which
+  has no answer. Building it now would mean silently choosing one.
+
+**Measurements nothing here has taken**, because they are properties of real flash and real
+power rather than of code: whether an SD card honors `fsync` at all, what the second sync per
+reader report ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)) costs on it, what happens
+to a write in flight when the power goes, and what a full day's journal actually weighs — the
+256 MiB default floor is a judgement against the 5K fixture, not a measurement.
 
 **Exit criterion:** a full-length event is timed on real hardware while an observer
 randomly pulls power, unplugs Ethernet, and restarts the service — and no acknowledged
@@ -682,14 +640,24 @@ read is missing from the journal afterward.
 
 ## Milestone 6 — Integrations
 
-Only after the local timer is dependable on its own.
+Only after the local timer is dependable on its own — which means after Milestone 5's exit
+criterion, and therefore after hardware.
 
-- Stable, versioned CSV export contract
-- Versioned JSON results export
+- [x] **Versioned JSON results export.** `RESULTS_FORMAT` and `RESULTS_VERSION` ship in the
+      envelope of `splitforge export results --as json`
+- [x] **Stable CSV export contract.** `RESULTS_CSV_COLUMNS` is the contract, and
+      `the_csv_column_list_is_the_contract` fails if a column moves. The CSV carries no
+      version *marker* of its own — the one piece of this bullet still outstanding
 - Optional RaceDay Connect publish adapter
 - Signed/credentialed outbound sync
 - Local outbox with safe retry
 - **Timing never blocks on integration success**
+
+The first two landed with Milestone 4 rather than here: results are a published contract the
+moment anyone can export them, and shipping an unversioned one and versioning it later would
+have meant breaking the consumers who adopted it first. `splitforge-export` exists to hold
+exactly the outputs that carry that promise — the crossings dump stays in the CLI, where it
+can change whenever the diagnostic needs it to.
 
 **Exit criterion:** an event times identically, and produces byte-identical exports, with
 integrations enabled and disabled.
