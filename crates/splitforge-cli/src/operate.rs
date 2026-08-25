@@ -232,6 +232,25 @@ pub(crate) fn doctor(
         ));
     }
 
+    // Wall-clock steps. The device records these while it runs
+    // (docs/clock-and-time-discipline.md § 10); doctor is where an operator finds out
+    // before publishing rather than after a time is disputed.
+    checks_run += 1;
+    let steps = journal.clock_step_count()?;
+    if steps > 0 {
+        let largest = journal.largest_clock_step_ms()?.unwrap_or(0);
+        let direction = if largest < 0 { "backwards" } else { "forwards" };
+        findings.push(Finding::warning(
+            "clock.steps",
+            format!(
+                "the device clock has jumped {steps} time(s) since this database was \
+                 created, the largest {direction} by {} ms. Times recorded on either side \
+                 of a jump came from different clocks. `splitforge clock steps` lists them.",
+                largest.abs()
+            ),
+        ));
+    }
+
     // The journal's sequence numbers are the independent answer to "did we lose a read?".
     // A gap means rows left a table that has no DELETE path, which is worth shouting about.
     checks_run += 1;

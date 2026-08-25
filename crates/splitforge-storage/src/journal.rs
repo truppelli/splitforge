@@ -3,11 +3,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, Row, Transaction, params};
+use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 use sha2::{Digest, Sha256};
 use splitforge_domain::{
-    ChipId, DeviceClockState, FallbackReason, JournalError, RawRead, RawReadId, RawReadJournal,
-    ReaderId, StoredRawRead, TimestampSource,
+    ChipId, ClockStep, DeviceClockState, FallbackReason, JournalError, RawRead, RawReadId,
+    RawReadJournal, ReaderId, StoredClockStep, StoredRawRead, TimestampSource,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -267,6 +267,111 @@ impl SqliteJournal {
     /// Returns [`StorageError`] if the migration table cannot be read.
     pub fn schema_version(&self) -> Result<i64, StorageError> {
         connection::schema_version(&self.conn)
+    }
+
+    /// Records one observed wall-clock discontinuity.
+    ///
+    /// No sidecar. The sidecar exists so a read survives a database that dies between the
+    /// reader acknowledging it and the commit landing (ADR-0018); a clock step is derived
+    /// from state this process already holds, and a process that dies mid-write simply
+    /// observes the next comparison against a fresh baseline. Paying a second fsync per
+    /// step would buy nothing and would put the clock monitor on the same latency budget
+    /// as the read path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the row cannot be written.
+    pub fn record_clock_step(&mut self, step: &ClockStep) -> Result<StoredClockStep, StorageError> {
+        // Every timestamp is converted to microseconds, written, and converted back, so
+        // the value returned is the value stored rather than the value passed in. The
+        // column holds microseconds; `now_utc()` carries nanoseconds. Returning the
+        // un-truncated original would hand the caller a `StoredClockStep` that no longer
+        // compares equal to the row it describes.
+        let recorded_us = connection::to_micros(OffsetDateTime::now_utc())?;
+        let before_us = connection::to_micros(step.observed_before)?;
+        let after_us = connection::to_micros(step.observed_after)?;
+
+        self.conn.execute(
+            "INSERT INTO clock_steps
+                (recorded_at_us, observed_before_us, observed_after_us, monotonic_ms, step_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                recorded_us,
+                before_us,
+                after_us,
+                i64::try_from(step.monotonic_ms).unwrap_or(i64::MAX),
+                step.step_ms,
+            ],
+        )?;
+
+        let seq = u64::try_from(self.conn.last_insert_rowid()).unwrap_or(0);
+        Ok(StoredClockStep {
+            seq,
+            recorded_at: connection::from_micros(recorded_us)?,
+            step: ClockStep {
+                observed_before: connection::from_micros(before_us)?,
+                observed_after: connection::from_micros(after_us)?,
+                ..*step
+            },
+        })
+    }
+
+    /// How many clock steps this device has observed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be queried.
+    pub fn clock_step_count(&self) -> Result<u64, StorageError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM clock_steps", [], |row| row.get(0))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// The most recent clock steps, newest first, capped at `limit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or decoded.
+    pub fn recent_clock_steps(&self, limit: u32) -> Result<Vec<StoredClockStep>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT seq, recorded_at_us, observed_before_us, observed_after_us,
+                    monotonic_ms, step_ms
+             FROM clock_steps ORDER BY seq DESC LIMIT ?1",
+        )?;
+        let mut rows = statement.query([limit])?;
+
+        let mut steps = Vec::new();
+        while let Some(row) = rows.next()? {
+            steps.push(StoredClockStep {
+                seq: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                recorded_at: connection::from_micros(row.get(1)?)?,
+                step: ClockStep {
+                    observed_before: connection::from_micros(row.get(2)?)?,
+                    observed_after: connection::from_micros(row.get(3)?)?,
+                    monotonic_ms: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                    step_ms: row.get(5)?,
+                },
+            });
+        }
+        Ok(steps)
+    }
+
+    /// The largest step ever observed, by magnitude, ignoring direction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be queried.
+    pub fn largest_clock_step_ms(&self) -> Result<Option<i64>, StorageError> {
+        let largest: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT step_ms FROM clock_steps ORDER BY ABS(step_ms) DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(largest)
     }
 
     fn insert_all(&mut self, reads: &[RawRead]) -> Result<Vec<StoredRawRead>, StorageError> {
@@ -855,5 +960,91 @@ mod tests {
             journal.schema_version().expect("version"),
             crate::SCHEMA_VERSION
         );
+    }
+
+    fn a_step(step_ms: i64) -> ClockStep {
+        let before = OffsetDateTime::from_unix_timestamp(1_775_000_000).expect("timestamp");
+        ClockStep {
+            observed_before: before,
+            observed_after: before + time::Duration::milliseconds(10_000 + step_ms),
+            monotonic_ms: 10_000,
+            step_ms,
+        }
+    }
+
+    #[test]
+    fn a_clock_step_survives_a_round_trip_through_the_database() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        assert_eq!(journal.clock_step_count().expect("count"), 0);
+
+        let step = a_step(3_600_000);
+        let stored = journal.record_clock_step(&step).expect("record");
+
+        assert_eq!(stored.seq, 1);
+        assert_eq!(stored.step, step);
+        assert_eq!(journal.clock_step_count().expect("count"), 1);
+
+        let recent = journal.recent_clock_steps(10).expect("recent");
+        assert_eq!(recent, vec![stored]);
+    }
+
+    #[test]
+    fn the_newest_step_comes_back_first() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        for step_ms in [1_000, -2_000, 500_000] {
+            journal.record_clock_step(&a_step(step_ms)).expect("record");
+        }
+
+        let recent = journal.recent_clock_steps(2).expect("recent");
+        assert_eq!(recent.len(), 2, "the limit is honored");
+        assert_eq!(recent[0].step.step_ms, 500_000);
+        assert_eq!(recent[1].step.step_ms, -2_000);
+    }
+
+    #[test]
+    fn the_largest_step_is_by_magnitude_and_keeps_its_sign() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        assert_eq!(journal.largest_clock_step_ms().expect("largest"), None);
+
+        // The biggest jump is backwards, which is the dangerous direction. Reporting it as
+        // +1000 because that is the larger signed number would hide exactly the case that
+        // matters most.
+        for step_ms in [1_000, -40_000, 700] {
+            journal.record_clock_step(&a_step(step_ms)).expect("record");
+        }
+
+        assert_eq!(
+            journal.largest_clock_step_ms().expect("largest"),
+            Some(-40_000)
+        );
+    }
+
+    #[test]
+    fn clock_steps_are_append_only_at_the_database() {
+        // Same guarantee as raw_reads, and for the same reason (ADR-0011): the device
+        // recording that its own clock jumped is the kind of fact somebody disputes after
+        // a result is questioned, and a row that can be quietly edited answers nothing.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        journal.record_clock_step(&a_step(1_000)).expect("record");
+
+        let update = journal
+            .conn
+            .execute("UPDATE clock_steps SET step_ms = 0", [])
+            .expect_err("UPDATE must be refused");
+        assert!(
+            update.to_string().contains("append-only"),
+            "the refusal should say why: {update}"
+        );
+
+        let delete = journal
+            .conn
+            .execute("DELETE FROM clock_steps", [])
+            .expect_err("DELETE must be refused");
+        assert!(
+            delete.to_string().contains("append-only"),
+            "the refusal should say why: {delete}"
+        );
+
+        assert_eq!(journal.clock_step_count().expect("count"), 1);
     }
 }

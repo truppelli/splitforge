@@ -106,6 +106,9 @@ const DETAIL_IS_SAFE_TO_SHARE: &[&str] = &[
     "scoring.start",
     "scoring.gun",
     "clock.device",
+    // Counts and millisecond magnitudes. A step is a property of the device's clock, and
+    // the message names no race, no participant, and no path.
+    "clock.steps",
 ];
 
 /// Hashes identifiers with a salt that lives only as long as one bundle.
@@ -258,6 +261,10 @@ pub struct DeviceSection {
     /// Why the volume could not be measured, when it could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_error: Option<String>,
+    /// Wall-clock discontinuities recorded on this device.
+    pub clock_steps: u64,
+    /// The largest of them by magnitude, keeping its sign. Negative went backwards.
+    pub largest_clock_step_ms: Option<i64>,
 }
 
 /// What the journal holds, counted rather than listed.
@@ -515,7 +522,7 @@ pub(crate) fn build(
         tool_version: env!("CARGO_PKG_VERSION"),
         generated_at: OffsetDateTime::now_utc(),
         privacy: PrivacyNote::new(),
-        device: device_section(database, store)?,
+        device: device_section(database, store, journal)?,
         doctor: BundledDoctor {
             checks_run: report.checks_run,
             errors: report.errors,
@@ -546,7 +553,11 @@ pub(crate) fn build(
 }
 
 /// Summarizes the device and its storage.
-fn device_section(database: &Path, store: &ConfigStore) -> Result<DeviceSection> {
+fn device_section(
+    database: &Path,
+    store: &ConfigStore,
+    journal: &SqliteJournal,
+) -> Result<DeviceSection> {
     let floor = store.min_free_bytes().context("reading the floor")?;
     let measured = splitforge_storage::disk_space(database);
 
@@ -566,6 +577,10 @@ fn device_section(database: &Path, store: &ConfigStore) -> Result<DeviceSection>
             .as_ref()
             .err()
             .map(|error| redact_paths(&error.to_string(), database)),
+        clock_steps: journal.clock_step_count().context("counting clock steps")?,
+        largest_clock_step_ms: journal
+            .largest_clock_step_ms()
+            .context("reading the largest clock step")?,
     })
 }
 

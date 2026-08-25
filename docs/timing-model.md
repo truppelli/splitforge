@@ -289,15 +289,25 @@ raw_reads          ←   append-only evidence
 manual_entries     ←   append-only evidence
 accepted_reads         timing_events          rejected_reads
 clock_samples          time_corrections
+clock_steps        ←   append-only evidence
 result_revisions       result_entries
 audit_log              outbox_messages        schema_migrations
 ```
 
-As of Milestone 4 the following exist: `events`, `races`, `checkpoints`, `participants`,
-`chip_assignments`, `readers`, `reader_antennas`, `timing_policies`, `race_sessions`,
-`raw_reads`, `status_declarations`, `result_revisions`, `result_entries`, `audit_log`,
-`schema_migrations`. The rest arrive with the milestone that needs them — `clock_samples`
-and `time_corrections` with Milestone 3, `manual_entries` and `outbox_messages` later.
+The following exist: `events`, `races`, `checkpoints`, `participants`, `chip_assignments`,
+`readers`, `reader_antennas`, `timing_policies`, `race_sessions`, `raw_reads`,
+`status_declarations`, `result_revisions`, `result_entries`, `audit_log`, `device_settings`,
+`clock_steps`, `schema_migrations`. The rest arrive with the milestone that needs them —
+`clock_samples` and `time_corrections` with Milestone 3, `manual_entries` and
+`outbox_messages` later.
+
+`clock_steps` is not in the original list above. It records the device's *own* wall clock
+jumping, measured against its monotonic clock, and it is append-only for the same reason
+`raw_reads` is: it is evidence about how a timestamp came to be, and it is exactly the kind
+of fact somebody wants to dispute after a result is questioned. It is distinct from
+`clock_samples`, which will measure a *reader's* offset against the device — one is about
+this machine's clock moving, the other about two clocks disagreeing. See
+[clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms).
 
 `status_declarations` is not in the original list above either. It records an operator
 deciding how someone's race ended — a disqualification most importantly, since no
