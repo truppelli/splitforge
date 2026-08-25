@@ -189,6 +189,10 @@ the journal has observed, and claims nothing about a connection it has no way to
 **Gated on having the hardware.** Do not start this milestone from protocol documentation
 alone — see [hardware-support.md](hardware-support.md).
 
+[hardware-plan.md](hardware-plan.md) proposes splitting this milestone into **M3a** (a serial
+reader, purchasable now) and **M3b** (a networked LLRP reader, keeping every exit criterion
+below verbatim). That split is not adopted — it needs an amendment here and an ADR first.
+
 - `splitforge-llrp`: connect to one specific physical reader
 - Log protocol connection lifecycle and reports
 - Handle **both** `UTCTimestamp` and `Uptime` correctly — an uptime value must never be

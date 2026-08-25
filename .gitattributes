@@ -8,5 +8,6 @@
 *.jpg binary
 *.pcap binary
 *.db binary
+*.xlsx binary
 *.sqlite binary
 *.sqlite3 binary

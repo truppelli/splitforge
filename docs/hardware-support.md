@@ -8,6 +8,10 @@
 
 This table is empty on purpose, and it is the honest state of the project.
 
+[hardware-plan.md](hardware-plan.md) is the current **proposal** for changing that, under a
+real budget. It is a proposal and not a decision: it asks for a roadmap amendment and
+several ADRs, and until those exist nothing in it binds this document.
+
 ## The rule
 
 > **SplitForge does not claim support for a reader vendor or model until that physical
