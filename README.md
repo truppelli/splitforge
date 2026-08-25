@@ -100,6 +100,7 @@ Four rules constrain every design decision in this repository:
 | [Roadmap](docs/roadmap.md) | Milestones 0–6 and their exit criteria |
 | [Threat model](docs/threat-model.md) | Security and operational risk register |
 | [Hardware support](docs/hardware-support.md) | Reader support matrix and validation requirements |
+| [Hardware plan](docs/hardware-plan.md) | Procurement and productization plan — three phases, and the parts list behind them |
 | [Deployment](docs/deployment.md) | Installing the systemd service on a Pi, and what running it proved |
 | [Open questions](docs/open-questions.md) | Decisions that need an owner, not a guess |
 | [CI](docs/ci.md) | What CI checks, and what it deliberately cannot prove |
