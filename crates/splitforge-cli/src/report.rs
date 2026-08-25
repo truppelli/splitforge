@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use splitforge_domain::{
     AcceptedRead, AcceptedReadId, Checkpoint, ChipId, Derivation, DeviceClockState, Event,
-    ParticipantId, Race, RaceConfig, RaceSession, RawReadId, Reader, ReaderId, StoredRawRead,
-    TimestampSource, TimingEventOrigin, TimingPolicy,
+    ParticipantId, Race, RaceConfig, RaceSession, RawReadId, Reader, ReaderId, StoredClockStep,
+    StoredRawRead, TimestampSource, TimingEventOrigin, TimingPolicy,
 };
 use splitforge_storage::{AuditEntry, ImportSummary};
 use time::OffsetDateTime;
@@ -29,6 +29,70 @@ pub struct InitReport {
     pub reads: u64,
     /// Races already configured.
     pub races: usize,
+}
+
+/// One recorded wall-clock discontinuity, as an operator wants to see it.
+#[derive(Debug, Serialize)]
+pub struct ClockStepView {
+    /// Insertion sequence. The only ordering here that does not come from the clock under
+    /// suspicion.
+    pub seq: u64,
+    /// The wall clock immediately before the jump was noticed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub from: OffsetDateTime,
+    /// The wall clock immediately after.
+    #[serde(with = "time::serde::rfc3339")]
+    pub to: OffsetDateTime,
+    /// How much real time actually passed between the two readings.
+    pub monotonic_ms: u64,
+    /// Wall movement minus real movement. Negative means the clock went backwards.
+    pub step_ms: i64,
+    /// `forwards` or `backwards`, so a reader does not have to interpret a sign.
+    pub direction: &'static str,
+}
+
+/// Every recorded step, newest first, with the summary an operator reads first.
+#[derive(Debug, Serialize)]
+pub struct ClockStepsView {
+    /// How many are listed here.
+    pub steps: usize,
+    /// The largest by magnitude among those listed, keeping its sign.
+    pub largest_ms: Option<i64>,
+    /// The steps themselves.
+    pub entries: Vec<ClockStepView>,
+}
+
+impl ClockStepsView {
+    /// Builds the view from what storage returned.
+    #[must_use]
+    pub fn of(steps: &[StoredClockStep]) -> Self {
+        let entries: Vec<ClockStepView> = steps
+            .iter()
+            .map(|stored| ClockStepView {
+                seq: stored.seq,
+                from: stored.step.observed_before,
+                to: stored.step.observed_after,
+                monotonic_ms: stored.step.monotonic_ms,
+                step_ms: stored.step.step_ms,
+                direction: if stored.step.is_backward() {
+                    "backwards"
+                } else {
+                    "forwards"
+                },
+            })
+            .collect();
+
+        let largest_ms = entries
+            .iter()
+            .map(|entry| entry.step_ms)
+            .max_by_key(|step| step.unsigned_abs());
+
+        Self {
+            steps: entries.len(),
+            largest_ms,
+            entries,
+        }
+    }
 }
 
 /// A raw read, as an operator wants to see it.

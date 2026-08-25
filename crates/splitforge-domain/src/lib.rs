@@ -30,6 +30,7 @@
 // the point. See CONTRIBUTING.md, "Code standards".
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod clock;
 mod derived;
 mod entity;
 mod error;
@@ -39,6 +40,7 @@ mod ports;
 mod read;
 mod result;
 
+pub use clock::{ClockStep, SAMPLE_INTERVAL_MS, STEP_THRESHOLD_MS, StoredClockStep};
 pub use derived::{
     AcceptedRead, Derivation, RejectedRead, RejectionReason, TimingEvent, TimingEventOrigin,
 };

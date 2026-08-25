@@ -16,6 +16,9 @@ clap.workspace = true
 splitforge-api.workspace = true
 splitforge-domain.workspace = true
 splitforge-storage.workspace = true
+# ADR-0010: `time` is the project's timestamp crate. The clock monitor needs one directly,
+# because the discontinuity it looks for is between this crate and `std`'s monotonic clock.
+time.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]

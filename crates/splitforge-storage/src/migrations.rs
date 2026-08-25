@@ -16,7 +16,7 @@ pub struct Migration {
 }
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Every migration, in order.
 pub const MIGRATIONS: &[Migration] = &[
@@ -39,6 +39,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "device_settings",
         sql: DEVICE_SETTINGS,
+    },
+    Migration {
+        version: 5,
+        name: "clock_steps",
+        sql: CLOCK_STEPS,
     },
 ];
 
@@ -395,3 +400,79 @@ CREATE TABLE device_settings (
     updated_at_us  INTEGER NOT NULL
 ) STRICT;
 ";
+
+const CLOCK_STEPS: &str = r"
+-- Wall-clock discontinuities, observed by comparing the wall clock against the monotonic
+-- clock (docs/clock-and-time-discipline.md 10).
+--
+-- Evidence, so append-only like raw_reads (ADR-0005, ADR-0011). The device recording that
+-- its own clock jumped is exactly the kind of fact somebody wants to dispute after a
+-- result is questioned, and a row that can be edited answers nothing.
+--
+-- `seq` is the only ordering in this table that can be trusted, which is the point: every
+-- other column here is a timestamp taken from the clock under suspicion.
+CREATE TABLE clock_steps (
+    seq                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at_us      INTEGER NOT NULL,
+    observed_before_us  INTEGER NOT NULL,
+    observed_after_us   INTEGER NOT NULL,
+    monotonic_ms        INTEGER NOT NULL,
+    step_ms             INTEGER NOT NULL
+) STRICT;
+
+CREATE TRIGGER clock_steps_no_update
+BEFORE UPDATE ON clock_steps
+BEGIN
+    SELECT RAISE(ABORT, 'clock_steps is append-only: UPDATE is not permitted');
+END;
+
+CREATE TRIGGER clock_steps_no_delete
+BEFORE DELETE ON clock_steps
+BEGIN
+    SELECT RAISE(ABORT, 'clock_steps is append-only: DELETE is not permitted');
+END;
+";
+
+#[cfg(test)]
+mod tests {
+    use super::{MIGRATIONS, SCHEMA_VERSION};
+
+    #[test]
+    fn the_schema_version_is_the_last_migration() {
+        // The failure this catches is bumping one without the other. A constant that runs
+        // ahead of the migrations makes every database look like it came from a newer
+        // build and be refused; a constant that lags leaves the newest table unmigrated on
+        // a device that already has it.
+        let last = MIGRATIONS.last().expect("at least one migration");
+        assert_eq!(
+            SCHEMA_VERSION, last.version,
+            "SCHEMA_VERSION is {SCHEMA_VERSION} but the last migration is {} ({})",
+            last.version, last.name
+        );
+    }
+
+    #[test]
+    fn migrations_are_numbered_from_one_without_gaps() {
+        // Applied in ascending order and never re-applied, so a gap or a repeat silently
+        // changes which SQL a given database has run.
+        for (index, migration) in MIGRATIONS.iter().enumerate() {
+            let expected = i64::try_from(index + 1).expect("a small index");
+            assert_eq!(
+                migration.version, expected,
+                "migration {:?} is numbered {} but sits at position {expected}",
+                migration.name, migration.version
+            );
+        }
+    }
+
+    #[test]
+    fn every_migration_has_a_distinct_name() {
+        // The name is what `schema_migrations` records, and it is what somebody reads when
+        // they are working out which version a device in a field is on.
+        let mut names: Vec<&str> = MIGRATIONS.iter().map(|migration| migration.name).collect();
+        names.sort_unstable();
+        let total = names.len();
+        names.dedup();
+        assert_eq!(names.len(), total, "two migrations share a name");
+    }
+}

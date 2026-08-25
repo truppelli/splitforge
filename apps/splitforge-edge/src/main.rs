@@ -24,13 +24,18 @@
 //! Health answers both, and at Milestone 3 it becomes the only thing that can report reader
 //! connection state — which lives in this process and in no file.
 //!
-//! ## It does not write
+//! ## The API does not write
 //!
-//! Nothing here appends to the journal. That is [S10](../../../docs/threat-model.md):
+//! Serving health appends nothing. That is [S10](../../../docs/threat-model.md):
 //! *"API failure must never stop journaling. The read path does not traverse the API."*
-//! Today that is trivially true because nothing writes at all; when Milestone 3 gives this
-//! process a reader, the ordering in [architecture § 3](../../../docs/architecture.md)
-//! still puts the durable write before anything the API can observe.
+//! When Milestone 3 gives this process a reader, the ordering in
+//! [architecture § 3](../../../docs/architecture.md) still puts the durable write before
+//! anything the API can observe.
+//!
+//! The *service* does write, in exactly one place: the clock monitor below appends to
+//! `clock_steps` when the device's wall clock jumps. That is an observation this process
+//! makes and nothing else can — a one-shot command cannot notice a discontinuity it was
+//! not running across.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -39,7 +44,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::Parser;
 use splitforge_api::{Health, HealthSource};
-use splitforge_domain::RawReadJournal;
+use splitforge_domain::{ClockStep, RawReadJournal, SAMPLE_INTERVAL_MS};
 use splitforge_storage::{ConfigStore, SqliteJournal};
 
 /// The SplitForge edge service.
@@ -65,9 +70,11 @@ struct Args {
 ///
 /// `rusqlite::Connection` is `Send` but not `Sync`, so a shared handle needs a mutex. A
 /// blocking lock inside an async handler is normally a smell; it is acceptable here for a
-/// specific reason — every query behind it is a counting query or a `statvfs`, bounded in
-/// time regardless of how long the event has run, and there is exactly one endpoint
-/// contending for it. If either of those stops being true this needs `spawn_blocking`.
+/// specific reason — everything behind it is a counting query, a `statvfs`, or a single-row
+/// insert, all bounded in time regardless of how long the event has run. Two tasks contend
+/// for it: the health handler and the clock monitor, and the monitor holds it for one
+/// `INSERT` at most once per [`SAMPLE_INTERVAL_MS`]. If either of those stops being true
+/// this needs `spawn_blocking`.
 struct Device {
     database: PathBuf,
     started: Instant,
@@ -121,6 +128,29 @@ impl HealthSource for Device {
         };
         health.min_free_mb = floor / (1024 * 1024);
 
+        match stores.journal.clock_step_count() {
+            Ok(steps) => {
+                health.clock_steps = steps;
+                if steps > 0 {
+                    // Degraded rather than merely reported. A step is not a transient
+                    // condition that clears: every timestamp written on the other side of
+                    // it was taken from a clock that moved, and the operator needs to know
+                    // before they publish, not after somebody disputes a time.
+                    let largest = stores
+                        .journal
+                        .largest_clock_step_ms()
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
+                    health.degrade(format!(
+                        "the device clock has jumped {steps} time(s), the largest by \
+                         {largest} ms; run `splitforge doctor` before publishing"
+                    ));
+                }
+            }
+            Err(error) => health.degrade(format!("clock steps could not be counted: {error}")),
+        }
+
         match splitforge_storage::disk_space(&self.database) {
             Ok(space) => {
                 health.free_mb = Some(space.available_mb());
@@ -138,6 +168,72 @@ impl HealthSource for Device {
 
         health
     }
+}
+
+/// Watches the wall clock for discontinuities, forever.
+///
+/// The whole mechanism is two clocks and a subtraction. Wall time and monotonic time are
+/// sampled together; between two samples they should advance by the same amount, and when
+/// they do not, something moved the wall clock — NTP finding a network, an RTC module, an
+/// operator with `date`. The Pi 3 has no battery-backed clock ([ADR-0002]), so it boots
+/// believing whatever it believed last and *something* is going to correct it.
+///
+/// Why this lives in the service rather than in `splitforge doctor`: a step is only visible
+/// to something that was running across it. A one-shot command sees the clock as it is now
+/// and has nothing to compare it against.
+///
+/// A failure to record is logged and the loop continues. Losing the ability to note that
+/// the clock jumped is bad; stopping the process that also serves health is worse, and the
+/// next sample re-baselines against a clock that has already moved.
+///
+/// [ADR-0002]: ../../../docs/adr/0002-raspberry-pi-target.md
+async fn watch_the_clock(device: Arc<Device>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(SAMPLE_INTERVAL_MS));
+
+    // `Delay` rather than the default `Burst`: if the whole process is descheduled — which
+    // on a loaded Pi is exactly when the clock is also being corrected — `Burst` fires every
+    // missed tick back to back, and each of those would compare two samples taken
+    // microseconds apart and call the accumulated wall movement a step.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await;
+
+    let mut baseline = sample();
+
+    loop {
+        interval.tick().await;
+        let current = sample();
+
+        let monotonic_ms =
+            u64::try_from(current.1.saturating_duration_since(baseline.1).as_millis())
+                .unwrap_or(u64::MAX);
+
+        if let Some(step) = ClockStep::detect(baseline.0, current.0, monotonic_ms) {
+            eprintln!(
+                "splitforge-edge: the wall clock moved {} ms relative to elapsed time \
+                 ({} -> {})",
+                step.step_ms, step.observed_before, step.observed_after
+            );
+
+            match device.stores.lock() {
+                Ok(mut stores) => {
+                    if let Err(error) = stores.journal.record_clock_step(&step) {
+                        eprintln!("splitforge-edge: the clock step could not be recorded: {error}");
+                    }
+                }
+                Err(_) => eprintln!(
+                    "splitforge-edge: the clock step could not be recorded; device state is \
+                     unreadable after an earlier failure"
+                ),
+            }
+        }
+
+        baseline = current;
+    }
+}
+
+/// Both clocks, read as close together as the machine allows.
+fn sample() -> (time::OffsetDateTime, Instant) {
+    (time::OffsetDateTime::now_utc(), Instant::now())
 }
 
 #[tokio::main]
@@ -181,6 +277,11 @@ async fn main() -> Result<()> {
         args.database.display(),
         args.socket.display()
     );
+
+    // Detached rather than joined. The clock monitor is a background observation, and a
+    // service that refused to serve health because its clock watcher fell over would have
+    // traded the smaller problem for the larger one. It ends when the process does.
+    tokio::spawn(watch_the_clock(Arc::clone(&device)));
 
     serve(&args.socket, device).await
 }
