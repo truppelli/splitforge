@@ -342,7 +342,7 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, StorageError> {
     }
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(text.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let high = hex_value(pair[0])?;
         let low = hex_value(pair[1])?;
         out.push(high << 4 | low);
