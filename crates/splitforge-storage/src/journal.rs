@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 use sha2::{Digest, Sha256};
 use splitforge_domain::{
-    ChipId, ClockStep, DeviceClockState, FallbackReason, JournalError, RawRead, RawReadId,
-    RawReadJournal, ReaderId, StoredClockStep, StoredRawRead, TimestampSource,
+    CheckpointId, ChipId, ClockStep, DeviceClockState, FallbackReason, JournalError, ManualEntry,
+    ManualEntryId, ParticipantId, RaceId, RawRead, RawReadId, RawReadJournal, ReaderId,
+    StoredClockStep, StoredManualEntry, StoredRawRead, TimestampSource,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -357,6 +358,107 @@ impl SqliteJournal {
         Ok(steps)
     }
 
+    /// Records one operator's claim that a participant was at a checkpoint at a time.
+    ///
+    /// No sidecar, for the same reason clock steps have none: the sidecar exists so a read
+    /// survives a crash between the reader acknowledging it and the commit landing
+    /// (ADR-0018). A manual entry is typed by a person who is still standing there and can
+    /// retype it, and the transaction either commits or the CLI reports that it did not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the row cannot be written — including when the
+    /// participant or checkpoint does not exist, which the foreign keys refuse.
+    pub fn record_manual_entry(
+        &mut self,
+        entry: &ManualEntry,
+    ) -> Result<StoredManualEntry, StorageError> {
+        // Written and read back through the same microsecond conversion, so the value
+        // returned is the value stored rather than the value passed in.
+        let recorded_us = connection::to_micros(OffsetDateTime::now_utc())?;
+        let at_us = connection::to_micros(entry.at)?;
+
+        self.conn.execute(
+            "INSERT INTO manual_entries
+                (id, race_id, participant_id, checkpoint_id, at_us, actor, reason,
+                 recorded_at_us)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.id.to_string(),
+                entry.race.to_string(),
+                entry.participant.to_string(),
+                entry.checkpoint.to_string(),
+                at_us,
+                entry.actor,
+                entry.reason,
+                recorded_us,
+            ],
+        )?;
+
+        let seq = u64::try_from(self.conn.last_insert_rowid()).unwrap_or(0);
+        Ok(StoredManualEntry {
+            seq,
+            recorded_at: connection::from_micros(recorded_us)?,
+            entry: ManualEntry {
+                at: connection::from_micros(at_us)?,
+                ..entry.clone()
+            },
+        })
+    }
+
+    /// Every manual entry for one race, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or decoded.
+    pub fn manual_entries(&self, race: RaceId) -> Result<Vec<StoredManualEntry>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT seq, id, race_id, participant_id, checkpoint_id, at_us, actor, reason,
+                    recorded_at_us
+             FROM manual_entries WHERE race_id = ?1 ORDER BY seq",
+        )?;
+        let mut rows = statement.query([race.to_string()])?;
+
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next()? {
+            entries.push(StoredManualEntry {
+                seq: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                recorded_at: connection::from_micros(row.get(8)?)?,
+                entry: ManualEntry {
+                    id: ManualEntryId::from_uuid(parse_uuid(
+                        &row.get::<_, String>(1)?,
+                        "manual entry id",
+                    )?),
+                    race: RaceId::from_uuid(parse_uuid(&row.get::<_, String>(2)?, "race id")?),
+                    participant: ParticipantId::from_uuid(parse_uuid(
+                        &row.get::<_, String>(3)?,
+                        "participant id",
+                    )?),
+                    checkpoint: CheckpointId::from_uuid(parse_uuid(
+                        &row.get::<_, String>(4)?,
+                        "checkpoint id",
+                    )?),
+                    at: connection::from_micros(row.get(5)?)?,
+                    actor: row.get(6)?,
+                    reason: row.get(7)?,
+                },
+            });
+        }
+        Ok(entries)
+    }
+
+    /// How many manual entries this database holds, across every race.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be queried.
+    pub fn manual_entry_count(&self) -> Result<u64, StorageError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM manual_entries", [], |row| row.get(0))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     /// The largest step ever observed, by magnitude, ignoring direction.
     ///
     /// # Errors
@@ -513,6 +615,11 @@ fn insert_one(
         payload_sha256,
         read: read.clone(),
     })
+}
+
+/// Parses one stored UUID, naming which column failed rather than just "invalid UUID".
+fn parse_uuid(text: &str, what: &str) -> Result<Uuid, StorageError> {
+    Uuid::parse_str(text).map_err(|error| StorageError::Decode(format!("{what} {text:?}: {error}")))
 }
 
 fn row_to_stored(row: &Row<'_>) -> Result<StoredRawRead, StorageError> {
@@ -1046,5 +1153,196 @@ mod tests {
         );
 
         assert_eq!(journal.clock_step_count().expect("count"), 1);
+    }
+
+    /// A race with one entrant and one checkpoint, so the foreign keys have something to
+    /// point at. Manual entries are the first evidence table that references configuration.
+    fn a_race_with_one_entrant(journal: &SqliteJournal) -> (RaceId, ParticipantId, CheckpointId) {
+        let (event, race) = (Uuid::new_v4(), RaceId::new());
+        let (participant, checkpoint) = (ParticipantId::new(), CheckpointId::new());
+
+        journal
+            .conn
+            .execute(
+                "INSERT INTO events (id, name, created_at_us) VALUES (?1, 'Spring Series', 0)",
+                params![event.to_string()],
+            )
+            .expect("event");
+        journal
+            .conn
+            .execute(
+                "INSERT INTO races (id, event_id, name, expected_laps, created_at_us)
+                 VALUES (?1, ?2, '5K', 1, 0)",
+                params![race.to_string(), event.to_string()],
+            )
+            .expect("race");
+        journal
+            .conn
+            .execute(
+                "INSERT INTO participants (id, race_id, bib, name)
+                 VALUES (?1, ?2, '109', 'Runner 109')",
+                params![participant.to_string(), race.to_string()],
+            )
+            .expect("participant");
+        journal
+            .conn
+            .execute(
+                "INSERT INTO checkpoints (id, race_id, name, kind, sequence)
+                 VALUES (?1, ?2, 'finish', 'finish', 2)",
+                params![checkpoint.to_string(), race.to_string()],
+            )
+            .expect("checkpoint");
+
+        (race, participant, checkpoint)
+    }
+
+    fn an_entry(
+        race: RaceId,
+        participant: ParticipantId,
+        checkpoint: CheckpointId,
+        offset_secs: i64,
+    ) -> ManualEntry {
+        ManualEntry {
+            id: ManualEntryId::new(),
+            race,
+            participant,
+            checkpoint,
+            at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_700_000_000 + offset_secs),
+            actor: "marshal".to_owned(),
+            reason: "chip failed at the start".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_manual_entry_survives_a_round_trip_with_every_field_intact() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let (race, participant, checkpoint) = a_race_with_one_entrant(&journal);
+        let entry = an_entry(race, participant, checkpoint, 0);
+
+        let stored = journal.record_manual_entry(&entry).expect("record");
+        let all = journal.manual_entries(race).expect("read back");
+
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].entry, entry, "an operator's claim must round-trip");
+        assert_eq!(all[0].seq, stored.seq);
+        assert_eq!(all[0].recorded_at, stored.recorded_at);
+    }
+
+    #[test]
+    fn the_claimed_time_and_the_time_it_was_typed_are_stored_separately() {
+        // The whole reason both columns exist. `at` is April; the row is written now.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let (race, participant, checkpoint) = a_race_with_one_entrant(&journal);
+        let entry = an_entry(race, participant, checkpoint, 0);
+        let claimed = entry.at;
+
+        let stored = journal.record_manual_entry(&entry).expect("record");
+
+        assert_eq!(stored.entry.at, claimed);
+        assert!(
+            stored.recorded_at > claimed,
+            "the data-entry time must not be overwritten by the claimed time: {stored:?}"
+        );
+    }
+
+    #[test]
+    fn an_entry_for_a_participant_who_does_not_exist_is_refused() {
+        // The roster is configuration and the entry points at it. A typo in a bib must fail
+        // at the database rather than producing evidence about nobody.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let (race, participant, checkpoint) = a_race_with_one_entrant(&journal);
+
+        let stranger = ManualEntry {
+            participant: ParticipantId::new(),
+            ..an_entry(race, participant, checkpoint, 0)
+        };
+
+        journal
+            .record_manual_entry(&stranger)
+            .expect_err("a foreign key must refuse an entry for somebody who is not entered");
+    }
+
+    #[test]
+    fn updating_a_manual_entry_is_refused_by_the_database() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let (race, participant, checkpoint) = a_race_with_one_entrant(&journal);
+        journal
+            .record_manual_entry(&an_entry(race, participant, checkpoint, 0))
+            .expect("record");
+
+        let error = journal
+            .conn
+            .execute("UPDATE manual_entries SET reason = 'TAMPERED'", [])
+            .expect_err("append-only must be enforced by the database, not by convention");
+        assert!(error.to_string().contains("append-only"), "got: {error}");
+    }
+
+    #[test]
+    fn deleting_a_manual_entry_is_refused_by_the_database() {
+        // An operator who enters the wrong bib corrects it by entering another row. The
+        // mistake stays visible, because the results published in between depended on it.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let (race, participant, checkpoint) = a_race_with_one_entrant(&journal);
+        journal
+            .record_manual_entry(&an_entry(race, participant, checkpoint, 0))
+            .expect("record");
+
+        let error = journal
+            .conn
+            .execute("DELETE FROM manual_entries", [])
+            .expect_err("evidence must not be deletable");
+        assert!(error.to_string().contains("append-only"), "got: {error}");
+        assert_eq!(journal.manual_entry_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn entries_come_back_in_insertion_order_and_only_for_the_race_asked_for() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let (race, participant, checkpoint) = a_race_with_one_entrant(&journal);
+
+        // Recorded newest-claim-first, to prove the ordering is by `seq` and not by `at`.
+        journal
+            .record_manual_entry(&an_entry(race, participant, checkpoint, 600))
+            .expect("record");
+        journal
+            .record_manual_entry(&an_entry(race, participant, checkpoint, 60))
+            .expect("record");
+
+        let entries = journal.manual_entries(race).expect("read back");
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries[0].seq < entries[1].seq,
+            "insertion order is the only ordering no clock can disturb"
+        );
+        assert!(entries[0].entry.at > entries[1].entry.at);
+
+        assert_eq!(journal.manual_entry_count().expect("count"), 2);
+        assert!(
+            journal
+                .manual_entries(RaceId::new())
+                .expect("read back")
+                .is_empty(),
+            "another race's entries must not leak into this one"
+        );
+    }
+
+    #[test]
+    fn reopening_the_database_preserves_every_manual_entry() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+
+        let (race, written) = {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            let (race, participant, checkpoint) = a_race_with_one_entrant(&journal);
+            let stored = journal
+                .record_manual_entry(&an_entry(race, participant, checkpoint, 0))
+                .expect("record");
+            (race, stored)
+        };
+
+        let journal = SqliteJournal::open(&path).expect("reopen");
+        let entries = journal.manual_entries(race).expect("read back");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], written, "a restart must not alter the claim");
     }
 }

@@ -296,9 +296,9 @@ audit_log              outbox_messages        schema_migrations
 
 The following exist: `events`, `races`, `checkpoints`, `participants`, `chip_assignments`,
 `readers`, `reader_antennas`, `timing_policies`, `race_sessions`, `raw_reads`,
-`status_declarations`, `result_revisions`, `result_entries`, `audit_log`, `device_settings`,
-`clock_steps`, `schema_migrations`. The rest arrive with the milestone that needs them —
-`clock_samples` and `time_corrections` with Milestone 3, `manual_entries` and
+`manual_entries`, `status_declarations`, `result_revisions`, `result_entries`, `audit_log`,
+`device_settings`, `clock_steps`, `schema_migrations`. The rest arrive with the milestone
+that needs them — `clock_samples` and `time_corrections` with Milestone 3,
 `outbox_messages` later.
 
 `clock_steps` is not in the original list above. It records the device's *own* wall clock
@@ -308,6 +308,14 @@ of fact somebody wants to dispute after a result is questioned. It is distinct f
 `clock_samples`, which will measure a *reader's* offset against the device — one is about
 this machine's clock moving, the other about two clocks disagreeing. See
 [clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms).
+
+`manual_entries` is in the original list above, and is the second kind of **evidence**
+rather than a correction to the first. It records an operator's claim that a participant was
+at a checkpoint at a time — with who said so, why, and when they typed it, which is a
+different time from the one they are claiming. It feeds derivation as an input, so a
+`timing_event` has two possible origins and a result that depends on a hand-written finish
+survives being re-derived. See
+[ADR-0023](adr/0023-manual-entries-are-derivation-inputs.md).
 
 `status_declarations` is not in the original list above either. It records an operator
 deciding how someone's race ended — a disqualification most importantly, since no

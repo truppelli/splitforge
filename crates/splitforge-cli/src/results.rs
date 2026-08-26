@@ -247,11 +247,13 @@ pub(crate) fn scoreboard(
 ) -> Result<(Vec<ResultEntry>, ScoringPolicy)> {
     let reads = journal.read_all()?;
     let chips = config.chips().context("chip assignments overlap")?;
+    let manual = crate::manual_entries_for(journal, config.race.id)?;
     let derivation = derive(&DerivationInput {
         reads: &reads,
         policy: &config.policy,
         chips: &chips,
         antennas: &config.antennas,
+        manual: &manual,
     });
 
     let declarations = store.declarations(config.race.id)?;

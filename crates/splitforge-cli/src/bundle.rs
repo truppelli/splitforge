@@ -263,6 +263,15 @@ pub struct DeviceSection {
     pub space_error: Option<String>,
     /// Wall-clock discontinuities recorded on this device.
     pub clock_steps: u64,
+    /// Manual entries recorded on this device, across every race.
+    ///
+    /// A count and nothing else. The bib, the claimed time, the operator and the reason
+    /// they typed are all exactly the material [ADR-0020] keeps out of a bundle — but the
+    /// fact that a device has hand-entered evidence at all is the first thing that explains
+    /// a time no read accounts for.
+    ///
+    /// [ADR-0020]: ../../../docs/adr/0020-diagnostic-bundles-carry-no-participant-data.md
+    pub manual_entries: u64,
     /// The largest of them by magnitude, keeping its sign. Negative went backwards.
     pub largest_clock_step_ms: Option<i64>,
 }
@@ -428,6 +437,8 @@ pub struct RaceSection {
     pub assignments: usize,
     /// Entrants with no chip, who therefore cannot be timed. A count, never a bib list.
     pub participants_without_a_chip: usize,
+    /// Timing evidence an operator produced by hand for this race. A count, never a list.
+    pub manual_entries: usize,
     /// Chips read by a reader but assigned to nobody, as hashed tokens.
     ///
     /// The correlation the tokens exist for, and the reason a bundle is worth taking: a mat
@@ -536,7 +547,7 @@ pub(crate) fn build(
         journal: journal_section(journal, &reads),
         races: configs
             .iter()
-            .map(|config| race_section(config, results, &reads, &names))
+            .map(|config| race_section(config, results, journal, &reads, &names))
             .collect::<Result<Vec<_>>>()?,
         audit: store
             .audit_trail(AUDIT_LIMIT)
@@ -578,6 +589,9 @@ fn device_section(
             .err()
             .map(|error| redact_paths(&error.to_string(), database)),
         clock_steps: journal.clock_step_count().context("counting clock steps")?,
+        manual_entries: journal
+            .manual_entry_count()
+            .context("counting manual entries")?,
         largest_clock_step_ms: journal
             .largest_clock_step_ms()
             .context("reading the largest clock step")?,
@@ -650,6 +664,7 @@ fn journal_section(journal: &SqliteJournal, reads: &[StoredRawRead]) -> JournalS
 fn race_section(
     config: &RaceConfig,
     results: &ResultStore,
+    journal: &SqliteJournal,
     reads: &[StoredRawRead],
     names: &Pseudonymizer,
 ) -> Result<RaceSection> {
@@ -732,6 +747,10 @@ fn race_section(
                     .any(|assignment| assignment.participant == participant.id)
             })
             .count(),
+        manual_entries: journal
+            .manual_entries(config.race.id)
+            .context("counting manual entries for the race")?
+            .len(),
         unassigned_chips_read: unassigned
             .iter()
             .take(TOKEN_LIMIT)

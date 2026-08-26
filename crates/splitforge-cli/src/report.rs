@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use splitforge_domain::{
     AcceptedRead, AcceptedReadId, Checkpoint, ChipId, Derivation, DeviceClockState, Event,
-    ParticipantId, Race, RaceConfig, RaceSession, RawReadId, Reader, ReaderId, StoredClockStep,
-    StoredRawRead, TimestampSource, TimingEventOrigin, TimingPolicy,
+    ManualEntryId, ParticipantId, Race, RaceConfig, RaceSession, RawReadId, Reader, ReaderId,
+    StoredClockStep, StoredManualEntry, StoredRawRead, TimestampSource, TimingEventOrigin,
+    TimingPolicy,
 };
 use splitforge_storage::{AuditEntry, ImportSummary};
 use time::OffsetDateTime;
@@ -527,6 +528,93 @@ pub struct AcceptedReadView {
     pub source_raw_read: RawReadId,
 }
 
+/// One manual entry, joined against the roster.
+///
+/// Both times are here on purpose. `at` is what the operator claims happened; `recorded_at`
+/// is when they typed it, and the gap between them can be an hour of walking back from a
+/// checkpoint with a clipboard. A dispute needs both.
+#[derive(Debug, Serialize)]
+pub struct ManualEntryView {
+    /// Insertion sequence.
+    pub seq: u64,
+    /// The entry's own identifier. Random, not derived — see [`ManualEntryId`].
+    pub id: ManualEntryId,
+    /// Bib, when the roster still lists the participant.
+    ///
+    /// `null` should be unreachable: the foreign key refuses an entry for a participant
+    /// who does not exist. A view that asserted that would turn a data question into a
+    /// panic, so it reports what it found instead.
+    pub bib: Option<String>,
+    /// Name, when the roster still lists the participant.
+    pub name: Option<String>,
+    /// Which participant the operator named.
+    pub participant: ParticipantId,
+    /// Checkpoint name, falling back to its identifier.
+    pub checkpoint: String,
+    /// **When the operator claims it happened.**
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// When the row was written — the data-entry time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub recorded_at: OffsetDateTime,
+    /// Who entered it.
+    pub actor: String,
+    /// Why it was entered by hand.
+    pub reason: String,
+}
+
+impl ManualEntryView {
+    /// Joins one stored entry against the roster and checkpoint list.
+    #[must_use]
+    pub fn of(stored: &StoredManualEntry, config: &RaceConfig) -> Self {
+        let participant = config.participant_by_id(stored.entry.participant);
+        let checkpoint = config
+            .checkpoint_by_id(stored.entry.checkpoint)
+            .map_or_else(|| stored.entry.checkpoint.to_string(), |c| c.name.clone());
+
+        Self {
+            seq: stored.seq,
+            id: stored.entry.id,
+            bib: participant.map(|p| p.bib.as_str().to_owned()),
+            name: participant.map(|p| p.name.clone()),
+            participant: stored.entry.participant,
+            checkpoint,
+            at: stored.entry.at,
+            recorded_at: stored.recorded_at,
+            actor: stored.entry.actor.clone(),
+            reason: stored.entry.reason.clone(),
+        }
+    }
+}
+
+/// Every manual entry recorded for one race, oldest first.
+#[derive(Debug, Serialize)]
+pub struct ManualEntriesView {
+    /// Which race they belong to.
+    pub race: String,
+    /// How many are listed here.
+    pub entries: usize,
+    /// The entries themselves.
+    pub manual_entries: Vec<ManualEntryView>,
+}
+
+impl ManualEntriesView {
+    /// Builds the view from what storage returned.
+    #[must_use]
+    pub fn of(entries: &[StoredManualEntry], config: &RaceConfig) -> Self {
+        let manual_entries: Vec<ManualEntryView> = entries
+            .iter()
+            .map(|stored| ManualEntryView::of(stored, config))
+            .collect();
+
+        Self {
+            race: config.race.name.clone(),
+            entries: manual_entries.len(),
+            manual_entries,
+        }
+    }
+}
+
 /// Everything derivation concluded, with the counts worth checking.
 #[derive(Debug, Serialize)]
 pub struct DerivationReport {
@@ -552,12 +640,16 @@ impl DerivationReport {
     /// Joins a derivation against the configuration that produced it.
     #[must_use]
     pub fn build(config: &RaceConfig, raw_reads: usize, derivation: &Derivation) -> Self {
+        // Only crossings have a lap to attach to a row in this report; a manual entry has
+        // no accepted read to key on, and is counted separately below.
         let laps: BTreeMap<AcceptedReadId, u16> = derivation
             .timing_events
             .iter()
-            .map(|event| {
-                let TimingEventOrigin::AcceptedRead { accepted_read } = event.origin;
-                (accepted_read, event.lap)
+            .filter_map(|event| match &event.origin {
+                TimingEventOrigin::AcceptedRead { accepted_read } => {
+                    Some((*accepted_read, event.lap))
+                }
+                TimingEventOrigin::Manual { .. } => None,
             })
             .collect();
 

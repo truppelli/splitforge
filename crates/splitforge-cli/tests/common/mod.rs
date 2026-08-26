@@ -95,6 +95,7 @@ pub fn derive_from(config: &RaceConfig, reads: &[StoredRawRead]) -> Derivation {
         policy: &config.policy,
         chips: &chips,
         antennas: &config.antennas,
+        manual: &[],
     })
 }
 

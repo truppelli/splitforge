@@ -118,8 +118,10 @@ async fn an_unrostered_chip_is_recorded_and_flagged_rather_than_discarded() {
         .timing_events
         .iter()
         .filter(|event| {
-            let TimingEventOrigin::AcceptedRead { accepted_read } = event.origin;
-            accepted_read == crossings[0].id
+            matches!(
+                event.origin,
+                TimingEventOrigin::AcceptedRead { accepted_read } if accepted_read == crossings[0].id
+            )
         })
         .collect();
     assert!(credited.is_empty());

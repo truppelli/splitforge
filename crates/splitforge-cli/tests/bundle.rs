@@ -88,6 +88,16 @@ async fn a_bundle_from_a_fully_operated_event_names_nobody() {
         !text.contains("disqualified after review"),
         "a publication reason reached the bundle"
     );
+    assert!(
+        !text.contains("marshal called the bib in"),
+        "a manual entry's reason reached the bundle"
+    );
+
+    // And the claimed time on that entry, which is a fact about one runner's race.
+    assert!(
+        !text.contains("08:26:41"),
+        "a manual entry's claimed time reached the bundle"
+    );
 }
 
 #[tokio::test]
@@ -146,6 +156,11 @@ async fn a_bundle_still_says_enough_to_debug_the_device() {
     assert_eq!(race["participants"], 12);
     assert_eq!(race["assignments"], 12);
     assert_eq!(race["participants_without_a_chip"], 0);
+    assert_eq!(
+        race["manual_entries"], 1,
+        "the count has to survive even though everything in the entry does not: {race}"
+    );
+    assert_eq!(json["device"]["manual_entries"], 1);
     assert_eq!(race["start_mode"], "gun");
     assert!(race["gun_time"].as_str().is_some());
     assert_eq!(
@@ -522,12 +537,27 @@ impl Event {
     /// Runs the race and takes it all the way to a corrected final revision.
     ///
     /// The DQ matters here: it is the step that puts a bib and an operator's prose about a
-    /// named competitor into the database, which is what the bundle has to not repeat.
+    /// named competitor into the database, which is what the bundle has to not repeat. The
+    /// manual entry is the second such step, and the more dangerous one — a reason field is
+    /// free text typed at a finish line, and this one names the runner outright.
     async fn run_and_publish(&self) {
         self.run_ok(&["race", "start", "--note", "the gun is the timekeeper today"])
             .await;
         self.run_ok(&["simulate", "--scenario", "five-k"]).await;
         self.run_ok(&["race", "stop"]).await;
+        self.run_ok(&[
+            "manual",
+            "add",
+            "--bib",
+            "109",
+            "--checkpoint",
+            "finish",
+            "--at",
+            "2026-04-11T08:26:41Z",
+            "--reason",
+            "Runner 109 crossed with a dead chip, marshal called the bib in",
+        ])
+        .await;
         self.run_ok(&["derive"]).await;
         self.run_ok(&[
             "results",

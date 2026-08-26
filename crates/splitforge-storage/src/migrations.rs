@@ -16,7 +16,7 @@ pub struct Migration {
 }
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Every migration, in order.
 pub const MIGRATIONS: &[Migration] = &[
@@ -44,6 +44,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "clock_steps",
         sql: CLOCK_STEPS,
+    },
+    Migration {
+        version: 6,
+        name: "manual_entries",
+        sql: MANUAL_ENTRIES,
     },
 ];
 
@@ -430,6 +435,48 @@ CREATE TRIGGER clock_steps_no_delete
 BEFORE DELETE ON clock_steps
 BEGIN
     SELECT RAISE(ABORT, 'clock_steps is append-only: DELETE is not permitted');
+END;
+";
+
+const MANUAL_ENTRIES: &str = r"
+-- What an operator writes down when the chip does not
+-- (docs/timing-model.md 6).
+--
+-- Evidence, so append-only like raw_reads (ADR-0005, ADR-0011). An official writing a bib
+-- on a clipboard at the finish because a chip failed is producing a primary record, and it
+-- earns the same immutability as a reader report. A mistaken entry is corrected by
+-- recording the correction, never by editing this row.
+--
+-- `at_us` is what the operator *claims*; `recorded_at_us` is when they typed it. Those can
+-- be an hour apart, and a dispute needs both.
+--
+-- Deliberately not a result override. Results are derived and re-deriving must reproduce
+-- them (ADR-0014), so the operator's claim has to enter as an input to derivation rather
+-- than as an edit to its output.
+CREATE TABLE manual_entries (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT    NOT NULL UNIQUE,
+    race_id         TEXT    NOT NULL REFERENCES races(id),
+    participant_id  TEXT    NOT NULL REFERENCES participants(id),
+    checkpoint_id   TEXT    NOT NULL REFERENCES checkpoints(id),
+    at_us           INTEGER NOT NULL,
+    actor           TEXT    NOT NULL,
+    reason          TEXT    NOT NULL,
+    recorded_at_us  INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX manual_entries_race_idx ON manual_entries (race_id, at_us);
+
+CREATE TRIGGER manual_entries_no_update
+BEFORE UPDATE ON manual_entries
+BEGIN
+    SELECT RAISE(ABORT, 'manual_entries is append-only: UPDATE is not permitted');
+END;
+
+CREATE TRIGGER manual_entries_no_delete
+BEFORE DELETE ON manual_entries
+BEGIN
+    SELECT RAISE(ABORT, 'manual_entries is append-only: DELETE is not permitted');
 END;
 ";
 

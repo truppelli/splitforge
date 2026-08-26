@@ -30,6 +30,7 @@ this?" two years from now, the ADR is the answer.
 | [0020](0020-diagnostic-bundles-carry-no-participant-data.md) | A diagnostic bundle carries no participant data, and is safe unread | Accepted |
 | [0021](0021-local-api-listens-on-a-unix-socket.md) | The local API listens on a Unix socket, not on the network | Accepted |
 | [0022](0022-the-service-never-waits-for-the-network.md) | The service never waits for the network and never stops restarting | Accepted |
+| [0023](0023-manual-entries-are-derivation-inputs.md) | A manual entry is an input to derivation, not an override of its output | Accepted |
 
 ## Process
 

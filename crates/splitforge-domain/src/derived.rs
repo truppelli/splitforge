@@ -16,8 +16,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::ids::{
-    AcceptedReadId, CheckpointId, ChipId, ParticipantId, RawReadId, ReaderId, SPLITFORGE_NAMESPACE,
-    TimingEventId,
+    AcceptedReadId, CheckpointId, ChipId, ManualEntryId, ParticipantId, RawReadId, ReaderId,
+    SPLITFORGE_NAMESPACE, TimingEventId,
 };
 
 /// Builds a deterministic identifier from a record kind and its distinguishing parts.
@@ -170,11 +170,19 @@ pub struct RejectedRead {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "origin", rename_all = "snake_case")]
 pub enum TimingEventOrigin {
-    /// Derived from a crossing. The only origin in Milestone 1; manual entries arrive in
-    /// Milestone 2.
+    /// Derived from a crossing — a chip read by a mat.
     AcceptedRead {
         /// The crossing.
         accepted_read: AcceptedReadId,
+    },
+    /// Entered by an operator, because no chip recorded it.
+    ///
+    /// Carries the entry rather than copying its contents, so the reason and the person who
+    /// typed it are one lookup away from any result that depends on them
+    /// ([timing model § 6](../../../docs/timing-model.md#6-timing-events-and-manual-entries)).
+    Manual {
+        /// The entry.
+        manual_entry: ManualEntryId,
     },
 }
 
@@ -222,6 +230,38 @@ impl TimingEvent {
             at,
             lap,
             origin: TimingEventOrigin::AcceptedRead { accepted_read },
+        }
+    }
+
+    /// Builds a timing event from an operator's entry, with a deterministic identifier.
+    ///
+    /// Deterministic for the same reason the crossing case is: re-deriving must reproduce
+    /// byte-identical output. The entry's own identifier is the random part, minted once
+    /// when the operator typed it; everything downstream of it is a pure function.
+    #[must_use]
+    pub fn from_manual(
+        participant: ParticipantId,
+        checkpoint: CheckpointId,
+        at: OffsetDateTime,
+        lap: u16,
+        manual_entry: ManualEntryId,
+    ) -> Self {
+        let id = TimingEventId::from_uuid(derived_uuid(
+            "timing-event",
+            &[
+                &participant.to_string(),
+                &checkpoint.to_string(),
+                &lap.to_string(),
+                &manual_entry.to_string(),
+            ],
+        ));
+        Self {
+            id,
+            participant,
+            checkpoint,
+            at,
+            lap,
+            origin: TimingEventOrigin::Manual { manual_entry },
         }
     }
 }
