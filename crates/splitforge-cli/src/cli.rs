@@ -169,6 +169,10 @@ pub enum Command {
     #[command(subcommand)]
     Clock(ClockCommand),
 
+    /// Record what an operator saw when the chip did not.
+    #[command(subcommand)]
+    Manual(ManualCommand),
+
     /// Replay the write-ahead sidecar into the database, and the database into it.
     ///
     /// Runs automatically whenever the writing process starts. Run it by hand after a
@@ -628,6 +632,51 @@ pub enum DeviceCommand {
 
     /// Show device settings and what the disk currently has left.
     Show,
+}
+
+/// Evidence an operator produces by hand.
+#[derive(Debug, Subcommand)]
+pub enum ManualCommand {
+    /// Record that a participant was at a checkpoint at a time.
+    ///
+    /// Evidence, not a result override: the entry feeds derivation, so re-deriving and
+    /// publishing a new revision picks it up like any other read
+    /// ([timing model § 6](../../../docs/timing-model.md#6-timing-events-and-manual-entries)).
+    Add {
+        /// Which race, when more than one is configured.
+        #[command(flatten)]
+        race: RaceRef,
+
+        /// The participant's bib.
+        #[arg(long, value_name = "BIB")]
+        bib: String,
+
+        /// Which checkpoint they were at.
+        #[arg(long, value_name = "NAME")]
+        checkpoint: String,
+
+        /// When they were there, as RFC 3339 — `2026-04-11T08:17:32Z`.
+        ///
+        /// Required, with deliberately no default of "now". The time somebody types an
+        /// entry is not the time the runner crossed the line, and a default would silently
+        /// record the first as the second.
+        #[arg(long, value_name = "TIME")]
+        at: String,
+
+        /// Why this is being entered by hand — "chip failed at the start".
+        ///
+        /// Required. An entry with no reason is indistinguishable from a typo six months
+        /// later, when somebody asks why a runner has a time nothing recorded.
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+    },
+
+    /// List the entries recorded for a race, oldest first.
+    List {
+        /// Which race, when more than one is configured.
+        #[command(flatten)]
+        race: RaceRef,
+    },
 }
 
 /// The device clock's history.

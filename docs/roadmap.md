@@ -227,6 +227,9 @@ Simple, transparent rules first. Complexity here is where scoring bugs live.
 - [x] Statuses: `Finished`, `DNS`, `DNF`, `DQ`
 - [x] Immutable result revisions with policy snapshots
 - [x] Overall placement by the selected timing policy
+- [x] **Manual entries** — what an operator writes down when the chip does not, entering
+      derivation as evidence rather than editing a result
+      ([ADR-0023](adr/0023-manual-entries-are-derivation-inputs.md))
 - [x] CSV and JSON exports
 
 ```bash
@@ -234,6 +237,8 @@ splitforge policy set  --start-mode chip        # or gun, the default
 splitforge results preview                       # the rehearsal for the irreversible command
 splitforge results publish --status provisional --reason "provisional results"
 splitforge results declare --bib 104 --status dq --reason "cut the course"
+splitforge manual add --bib 109 --checkpoint finish --at 2026-04-11T08:26:41Z --reason "chip failed"
+splitforge manual list
 splitforge results publish --status final --reason "bib 104 disqualified after review"
 splitforge results diff --from 1 --to 2
 splitforge results list
@@ -285,6 +290,74 @@ Two decisions were closed on the way:
 [ADR-0017](adr/0017-placement-semantics.md). A third was re-scoped rather than answered:
 [Q12](open-questions.md#q12-leap-second-handling), which turned out to constrain clock
 discipline rather than scoring.
+
+**Observed**, manual entries ([ADR-0023](adr/0023-manual-entries-are-derivation-inputs.md)).
+The `five-k` fixture supplies the case without being asked to: bib 109 starts, the chip stops
+reporting on course, and the runner is scored `dnf`. That is a correct reading of the
+evidence and the wrong answer about the race. A finish marshal saw them cross.
+
+```console
+$ splitforge results show --revision 1                      # bib 109, abridged
+{"bib":"109","status":"dnf","place":null,"gun_time":null,"chip_time":null,"finish_at":null}
+
+$ splitforge manual add --bib 109 --checkpoint finish --at 2026-04-11T08:26:41Z \
+    --reason "chip stopped reporting on course; finish marshal recorded the bib"
+{"seq":1,"id":"cfdf52be-3c70-4725-b383-53c0fcabfe85","bib":"109","name":"Runner 109",
+ "checkpoint":"finish","at":"2026-04-11T08:26:41Z","recorded_at":"2026-08-24T14:30:42.513467Z",
+ "actor":"operator","reason":"chip stopped reporting on course; finish marshal recorded the bib"}
+
+$ splitforge derive
+{"race":"5K","raw_reads":638,"accepted":24,"rejected":614,"timing_events":24,...}
+
+$ splitforge results publish --status final --reason "finish recorded by hand after a chip failure"
+{"revision":2,"status":"final","digest":"5eb97cfeecad5b389eb663aec39a7d3c",
+ "entries":12,"finished":12,"dnf":0,"dns":0,"dq":0,"changed":true}
+
+$ splitforge results show --revision 2                      # bib 109, abridged
+{"bib":"109","status":"finished","place":10,"gun_time":"0:26:41.000",
+ "chip_time":"0:26:33.872","finish_at":"2026-04-11T08:26:41Z"}
+
+$ splitforge results show --revision 1                      # unchanged
+{"bib":"109","status":"dnf","place":null,"gun_time":null,"chip_time":null,"finish_at":null}
+```
+
+Four numbers carry the decision. `raw_reads` and `accepted` do not move, because an entry is
+not a read and must not pretend to be one — the journal still holds exactly what the hardware
+reported. `timing_events` goes from 23 to 24, which is the entry entering derivation as an
+input. And `chip_time` is 7 seconds shorter than `gun_time`, because it is measured from this
+runner's own start crossing — which the chip *did* record. One result, assembled from both
+kinds of evidence.
+
+The last command is the other half. Revision 1 still says `dnf`, in the words it was published
+in, with the digest it was published under. It was true about what was known at the time and
+somebody may have acted on it; the correction lives in revision 2. Had the finish time been
+typed into the results table instead, the next re-derivation would have thrown it away.
+
+Nothing here can be taken back:
+
+```console
+>>> UPDATE manual_entries SET reason = 'never mind'
+    IntegrityError: manual_entries is append-only: UPDATE is not permitted
+
+>>> DELETE FROM manual_entries
+    IntegrityError: manual_entries is append-only: DELETE is not permitted
+```
+
+Both statements went straight at the file through a plain SQLite driver, with no SplitForge
+code in the path at all.
+
+An operator who enters the wrong bib appends a correction; both rows survive, because the
+results published in between depended on the first one. That is
+[ADR-0011](adr/0011-append-only-enforced-by-triggers.md) applied to the newest evidence table,
+and it is enforced by the database rather than by whoever reviews the pull request.
+
+One thing surfaced that no test would have. Both operator-facing error messages in the new
+code had lost their line-continuation backslashes, so `manual add` with an unknown bib printed
+`import the` followed by thirty spaces and then `roster first`. That is the second time this
+defect has shipped into a review — the wall-clock step work hit it too — and it is invisible
+in a passing suite, because the string is still one string. It is obvious the instant a real
+command prints it. The two tests that now hold it assert on the absence of a double space in
+`stderr`, which is the only part a human would have noticed.
 
 **Deliberately not done here:** any web interface, and any claim about reader behavior. The
 scoring path has never seen a physical reader — that is Milestone 3, and it is still gated.

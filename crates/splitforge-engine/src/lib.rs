@@ -31,9 +31,9 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use splitforge_domain::{
-    AcceptedRead, AntennaMap, CheckpointId, ChipId, ChipRegistry, Derivation, ParticipantId,
-    RawReadId, RejectedRead, RejectionReason, SelectionRule, StoredRawRead, TimingEvent,
-    TimingPolicy,
+    AcceptedRead, AntennaMap, CheckpointId, ChipId, ChipRegistry, Derivation, ManualEntry,
+    ParticipantId, RawReadId, RejectedRead, RejectionReason, SelectionRule, StoredRawRead,
+    TimingEvent, TimingPolicy,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -48,6 +48,13 @@ pub struct DerivationInput<'a> {
     pub chips: &'a ChipRegistry,
     /// Reader and antenna to checkpoint mapping.
     pub antennas: &'a AntennaMap,
+    /// What operators wrote down when a chip did not record it.
+    ///
+    /// A second kind of evidence, not a correction to the first
+    /// ([timing model § 6](../../../docs/timing-model.md#6-timing-events-and-manual-entries)).
+    /// Manual entries never suppress a read and a read never suppresses an entry: both
+    /// produce timing events, and the scoring rules decide which one counts.
+    pub manual: &'a [ManualEntry],
 }
 
 /// Derives crossings, suppressions, and timing events from raw reads.
@@ -174,24 +181,63 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
 
     accepted.sort_by(|left, right| left.at.cmp(&right.at).then(left.id.cmp(&right.id)));
 
+    // Both kinds of evidence, merged into one chronological sequence before laps are
+    // counted. Interleaving matters: a runner whose chip failed on lap 2 and was written
+    // down instead must still be on lap 3 for the read that follows, and counting the two
+    // sources separately would give them two lap 1s.
+    enum Source<'a> {
+        Crossing(&'a AcceptedRead),
+        Manual(&'a ManualEntry),
+    }
+
+    let mut sources: Vec<(OffsetDateTime, ParticipantId, CheckpointId, Source<'_>)> = Vec::new();
+    for crossing in &accepted {
+        if let Some(participant) = crossing.participant {
+            sources.push((
+                crossing.at,
+                participant,
+                crossing.checkpoint,
+                Source::Crossing(crossing),
+            ));
+        }
+    }
+    for entry in input.manual {
+        sources.push((
+            entry.at,
+            entry.participant,
+            entry.checkpoint,
+            Source::Manual(entry),
+        ));
+    }
+
+    // Sorted by time, then by kind, then by identifier, so a tie resolves the same way on
+    // every machine and every re-derivation. A crossing sorts ahead of an entry at the same
+    // instant: a chip that did record the runner keeps the lower lap number.
+    sources.sort_by(|left, right| {
+        let key = |source: &Source<'_>| match source {
+            Source::Crossing(crossing) => (0_u8, *crossing.id.as_uuid()),
+            Source::Manual(entry) => (1_u8, *entry.id.as_uuid()),
+        };
+        left.0
+            .cmp(&right.0)
+            .then_with(|| key(&left.3).cmp(&key(&right.3)))
+    });
+
     // Lap numbers count per participant, not per chip: a participant who swaps a failed
     // chip mid-race is still on the same lap.
     let mut lap_counters: BTreeMap<(ParticipantId, CheckpointId), u16> = BTreeMap::new();
     let mut timing_events = Vec::new();
-    for crossing in &accepted {
-        if let Some(participant) = crossing.participant {
-            let lap = lap_counters
-                .entry((participant, crossing.checkpoint))
-                .or_insert(0);
-            *lap = lap.saturating_add(1);
-            timing_events.push(TimingEvent::from_accepted(
-                participant,
-                crossing.checkpoint,
-                crossing.at,
-                *lap,
-                crossing.id,
-            ));
-        }
+    for (at, participant, checkpoint, source) in sources {
+        let lap = lap_counters.entry((participant, checkpoint)).or_insert(0);
+        *lap = lap.saturating_add(1);
+        timing_events.push(match source {
+            Source::Crossing(crossing) => {
+                TimingEvent::from_accepted(participant, checkpoint, at, *lap, crossing.id)
+            }
+            Source::Manual(entry) => {
+                TimingEvent::from_manual(participant, checkpoint, at, *lap, entry.id)
+            }
+        });
     }
 
     rejected.sort_by_key(|entry| entry.raw_read.0);
@@ -255,7 +301,8 @@ fn select<'a>(burst: &[&'a StoredRawRead], rule: SelectionRule) -> Option<&'a St
 mod tests {
     use super::*;
     use splitforge_domain::{
-        ChipAssignment, DeviceClockState, RaceId, RawRead, ReaderId, TimestampSource,
+        ChipAssignment, DeviceClockState, ManualEntryId, RaceId, RawRead, ReaderId,
+        TimestampSource, TimingEventOrigin,
     };
 
     const READER: &str = "finish";
@@ -337,6 +384,7 @@ mod tests {
             policy,
             chips: &fixture.chips,
             antennas: &fixture.antennas,
+            manual: &[],
         })
     }
 
@@ -578,6 +626,203 @@ mod tests {
             derivation.accepted.len(),
             2,
             "deduplication groups by chip, so two runners crossing together both count"
+        );
+    }
+
+    /// One operator's claim, for the fixture's participant at the fixture's checkpoint.
+    fn manual_at(fixture: &Fixture, millis: i64) -> ManualEntry {
+        ManualEntry {
+            id: ManualEntryId::new(),
+            race: RaceId::new(),
+            participant: fixture.participant,
+            checkpoint: fixture.checkpoint,
+            at: at(millis),
+            actor: "marshal".to_owned(),
+            reason: "chip failed".to_owned(),
+        }
+    }
+
+    /// Derives from both kinds of evidence at once.
+    fn run_with(
+        reads: &[StoredRawRead],
+        manual: &[ManualEntry],
+        policy: &TimingPolicy,
+        fixture: &Fixture,
+    ) -> Derivation {
+        derive(&DerivationInput {
+            reads,
+            policy,
+            chips: &fixture.chips,
+            antennas: &fixture.antennas,
+            manual,
+        })
+    }
+
+    #[test]
+    fn an_entry_with_no_reads_at_all_still_times_the_runner() {
+        // The case the feature exists for: the chip never reported, so there is nothing to
+        // deduplicate and nothing to score — until somebody writes down what they saw.
+        let fixture = fixture();
+        let entry = manual_at(&fixture, 0);
+
+        let derivation = run_with(
+            &[],
+            std::slice::from_ref(&entry),
+            &TimingPolicy::default(),
+            &fixture,
+        );
+
+        assert!(derivation.accepted.is_empty());
+        assert_eq!(derivation.timing_events.len(), 1);
+        let event = &derivation.timing_events[0];
+        assert_eq!(event.participant, fixture.participant);
+        assert_eq!(event.at, at(0));
+        assert_eq!(event.lap, 1);
+        assert_eq!(
+            event.origin,
+            TimingEventOrigin::Manual {
+                manual_entry: entry.id
+            }
+        );
+    }
+
+    #[test]
+    fn an_entry_never_suppresses_a_read_and_a_read_never_suppresses_an_entry() {
+        // Two kinds of evidence, not a correction of one by the other. A chip that did
+        // report and an official who also wrote it down produce two timing events, and
+        // which one counts is a scoring question rather than a derivation one.
+        let fixture = fixture();
+        let reads = burst_of(12, CHIP, 35, Some(-55));
+
+        let derivation = run_with(
+            &reads,
+            &[manual_at(&fixture, 0)],
+            &TimingPolicy::default(),
+            &fixture,
+        );
+
+        assert_eq!(
+            derivation.accepted.len(),
+            1,
+            "the burst is still one crossing"
+        );
+        assert_eq!(
+            derivation.rejected.len(),
+            11,
+            "and the entry did not change how the burst was deduplicated"
+        );
+        assert_eq!(derivation.timing_events.len(), 2);
+        assert_eq!(
+            derivation
+                .timing_events
+                .iter()
+                .filter(|event| matches!(event.origin, TimingEventOrigin::Manual { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_hand_written_lap_keeps_the_reads_around_it_in_sequence() {
+        // The interleaving claim. A runner clears the mat on lap 1, the chip dies on lap 2
+        // and a marshal writes it down, and the chip recovers for lap 3. Counting the two
+        // sources separately would hand the recovered read lap 2 and put the runner a whole
+        // lap behind for the rest of the race.
+        let fixture = fixture();
+        let policy = TimingPolicy::default();
+        // Well clear of the dedup window, so each burst is unambiguously its own crossing.
+        let lap_ms = 10_000_i64;
+
+        let mut reads = burst_of(3, CHIP, 35, Some(-55));
+        reads.extend((0..3).map(|i| {
+            stored(
+                u64::try_from(i + 4).unwrap_or(4),
+                CHIP,
+                2 * lap_ms + i * 35,
+                Some(-55),
+            )
+        }));
+
+        let derivation = run_with(&reads, &[manual_at(&fixture, lap_ms)], &policy, &fixture);
+
+        assert_eq!(
+            derivation.accepted.len(),
+            2,
+            "the two bursts are two crossings before laps are counted"
+        );
+
+        let laps: Vec<u16> = derivation.timing_events.iter().map(|e| e.lap).collect();
+        assert_eq!(laps, vec![1, 2, 3], "got: {:?}", derivation.timing_events);
+
+        let origins: Vec<bool> = derivation
+            .timing_events
+            .iter()
+            .map(|event| matches!(event.origin, TimingEventOrigin::Manual { .. }))
+            .collect();
+        assert_eq!(
+            origins,
+            vec![false, true, false],
+            "the hand-written lap must sit between the two the chip recorded"
+        );
+    }
+
+    #[test]
+    fn deriving_twice_from_the_same_entry_produces_the_same_identifiers() {
+        // The property that makes an entry evidence rather than an edit: re-deriving after
+        // a restore has to reproduce the timing event byte for byte, not merely an
+        // equivalent one.
+        let fixture = fixture();
+        let reads = burst_of(6, CHIP, 35, Some(-55));
+        let manual = vec![manual_at(&fixture, 500), manual_at(&fixture, 900)];
+
+        let first = run_with(&reads, &manual, &TimingPolicy::default(), &fixture);
+        let second = run_with(&reads, &manual, &TimingPolicy::default(), &fixture);
+
+        assert_eq!(first.timing_events, second.timing_events);
+    }
+
+    #[test]
+    fn the_order_entries_are_supplied_in_does_not_change_the_result() {
+        // Storage returns entries in insertion order, and an operator can record a 9 a.m.
+        // crossing at 11 a.m. Derivation sorts by the claimed time, so the order the rows
+        // happen to arrive in cannot reach the output.
+        let fixture = fixture();
+        let early = manual_at(&fixture, 100);
+        let late = manual_at(&fixture, 8_000);
+
+        let forwards = run_with(
+            &[],
+            &[early.clone(), late.clone()],
+            &TimingPolicy::default(),
+            &fixture,
+        );
+        let backwards = run_with(&[], &[late, early], &TimingPolicy::default(), &fixture);
+
+        assert_eq!(forwards.timing_events, backwards.timing_events);
+        assert_eq!(forwards.timing_events[0].at, at(100));
+        assert_eq!(forwards.timing_events[0].lap, 1);
+        assert_eq!(forwards.timing_events[1].lap, 2);
+    }
+
+    #[test]
+    fn two_officials_recording_the_same_runner_produce_two_events() {
+        // Deliberate. Two people writing down bib 104 at 08:17:32 saw one thing and produced
+        // two records of it, and collapsing them would throw away the corroboration that
+        // makes a disputed time defensible.
+        let fixture = fixture();
+        let first = manual_at(&fixture, 4_000);
+        let second = ManualEntry {
+            id: ManualEntryId::new(),
+            actor: "second marshal".to_owned(),
+            ..first.clone()
+        };
+
+        let derivation = run_with(&[], &[first, second], &TimingPolicy::default(), &fixture);
+
+        assert_eq!(derivation.timing_events.len(), 2);
+        assert_ne!(
+            derivation.timing_events[0].id, derivation.timing_events[1].id,
+            "identical claims by two people must not collapse into one event"
         );
     }
 }

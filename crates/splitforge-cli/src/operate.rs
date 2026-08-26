@@ -521,11 +521,13 @@ pub(crate) fn export_crossings(
 ) -> Result<usize> {
     let reads = journal.read_all()?;
     let chips = config.chips().context("chip assignments overlap")?;
+    let manual = crate::manual_entries_for(journal, config.race.id)?;
     let derivation = derive(&DerivationInput {
         reads: &reads,
         policy: &config.policy,
         chips: &chips,
         antennas: &config.antennas,
+        manual: &manual,
     });
 
     let report = crate::report::DerivationReport::build(config, reads.len(), &derivation);

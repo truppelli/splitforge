@@ -35,6 +35,7 @@ mod derived;
 mod entity;
 mod error;
 mod ids;
+mod manual;
 mod policy;
 mod ports;
 mod read;
@@ -50,9 +51,11 @@ pub use entity::{
 };
 pub use error::DomainError;
 pub use ids::{
-    AcceptedReadId, Bib, CheckpointId, ChipId, EventId, ParticipantId, RaceId, RawReadId, ReaderId,
-    ResultRevisionId, SPLITFORGE_NAMESPACE, StatusDeclarationId, TimingEventId,
+    AcceptedReadId, Bib, CheckpointId, ChipId, EventId, ManualEntryId, ParticipantId, RaceId,
+    RawReadId, ReaderId, ResultRevisionId, SPLITFORGE_NAMESPACE, StatusDeclarationId,
+    TimingEventId,
 };
+pub use manual::{ManualEntry, StoredManualEntry};
 pub use policy::{
     CheckpointPolicy, DEFAULT_MIN_INTERVAL_MS, SelectionRule, TimestampTrust, TimingPolicy,
 };

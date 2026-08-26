@@ -47,23 +47,27 @@ mod simulate;
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
-use splitforge_domain::{RaceConfig, RawReadJournal, SessionAction};
+use anyhow::{Context, Result, anyhow, bail};
+use splitforge_domain::{
+    ManualEntry, ManualEntryId, RaceConfig, RaceId, RawReadJournal, SessionAction,
+};
 use splitforge_engine::{DerivationInput, derive};
 use splitforge_storage::{ConfigStore, ResultStore, SqliteJournal};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 pub use bundle::{BUNDLE_FORMAT, BUNDLE_VERSION, Bundle};
 pub use cli::{
     BackupCommand, CheckpointCommand, ChipsCommand, Cli, ClockCommand, Command, DeviceCommand,
-    EventCommand, ExportCommand, ExportFormat, FixtureCommand, Format, PolicyCommand, RaceCommand,
-    RaceRef, ReaderCommand, ResultsCommand, RosterCommand, Speed,
+    EventCommand, ExportCommand, ExportFormat, FixtureCommand, Format, ManualCommand,
+    PolicyCommand, RaceCommand, RaceRef, ReaderCommand, ResultsCommand, RosterCommand, Speed,
 };
 pub use configure::load_fixture;
 pub use report::{
     AcceptedReadView, AssignmentView, AuditView, CheckpointView, ClockStepView, ClockStepsView,
-    DerivationReport, DoctorReport, EventView, Finding, ImportReport, InitReport, ParticipantView,
-    PolicyView, RaceView, RawReadView, ReaderStatusView, SessionView, SimulationReport,
-    StatusReport, reader_status,
+    DerivationReport, DoctorReport, EventView, Finding, ImportReport, InitReport,
+    ManualEntriesView, ManualEntryView, ParticipantView, PolicyView, RaceView, RawReadView,
+    ReaderStatusView, SessionView, SimulationReport, StatusReport, reader_status,
 };
 pub use simulate::into_journal;
 
@@ -416,6 +420,85 @@ pub async fn run(cli: Cli) -> Result<()> {
                         }),
                         format,
                     )
+                }
+            }
+        }
+
+        Command::Manual(command) => {
+            let mut store = open_store(&database)?;
+            match command {
+                ManualCommand::Add {
+                    race,
+                    bib,
+                    checkpoint,
+                    at,
+                    reason,
+                } => {
+                    let config = load_config(&store, race.race.as_deref())?;
+                    let participant = config.participant(&bib).with_context(|| {
+                        format!(
+                            "no participant with bib {bib} in race {:?}; import the \
+                             roster first, or check the bib",
+                            config.race.name
+                        )
+                    })?;
+                    let checkpoint_id = config
+                        .checkpoint(&checkpoint)
+                        .map(|found| found.id)
+                        .with_context(|| {
+                            let known: Vec<&str> = config
+                                .checkpoints
+                                .iter()
+                                .map(|found| found.name.as_str())
+                                .collect();
+                            format!(
+                                "no checkpoint named {checkpoint:?}; configured: {}",
+                                if known.is_empty() {
+                                    "none".to_owned()
+                                } else {
+                                    known.join(", ")
+                                }
+                            )
+                        })?;
+                    let at = OffsetDateTime::parse(&at, &Rfc3339).map_err(|error| {
+                        anyhow!(
+                            "{at:?} is not an RFC 3339 timestamp; expected something \
+                             like 2026-04-11T08:17:32Z ({error})"
+                        )
+                    })?;
+
+                    let entry = ManualEntry {
+                        id: ManualEntryId::new(),
+                        race: config.race.id,
+                        participant: participant.id,
+                        checkpoint: checkpoint_id,
+                        at,
+                        actor: actor.clone(),
+                        reason: reason.clone(),
+                    };
+
+                    let mut journal = open_journal(&database)?;
+                    let stored = journal.record_manual_entry(&entry)?;
+                    store.record_audit(
+                        &actor,
+                        "manual.add",
+                        Some(&bib),
+                        Some(
+                            &serde_json::json!({
+                                "checkpoint": checkpoint,
+                                "at": at.format(&Rfc3339).unwrap_or_default(),
+                                "reason": reason,
+                            })
+                            .to_string(),
+                        ),
+                    )?;
+                    emit(&report::ManualEntryView::of(&stored, &config), format)
+                }
+                ManualCommand::List { race } => {
+                    let config = load_config(&store, race.race.as_deref())?;
+                    let journal = open_journal(&database)?;
+                    let entries = journal.manual_entries(config.race.id)?;
+                    emit(&report::ManualEntriesView::of(&entries, &config), format)
                 }
             }
         }
@@ -806,6 +889,22 @@ fn run_results(
     }
 }
 
+/// The operator's own entries for one race, as derivation input.
+///
+/// Loaded on every derivation rather than cached: a manual entry recorded after results were
+/// published has to change the next revision, which only works if re-deriving picks it up
+/// (timing model § 6).
+pub(crate) fn manual_entries_for(
+    journal: &SqliteJournal,
+    race: RaceId,
+) -> Result<Vec<ManualEntry>> {
+    Ok(journal
+        .manual_entries(race)?
+        .into_iter()
+        .map(|stored| stored.entry)
+        .collect())
+}
+
 /// Resolves a race and loads its complete configuration.
 fn load_config(store: &ConfigStore, selector: Option<&str>) -> Result<RaceConfig> {
     let race = configure::resolve_race(store, selector)?;
@@ -937,11 +1036,13 @@ fn derivation_report(database: &Path, selector: Option<&str>) -> Result<Derivati
     let reads = journal.read_all()?;
     let chips = config.chips().context("chip assignments overlap")?;
 
+    let manual = manual_entries_for(&journal, config.race.id)?;
     let derivation = derive(&DerivationInput {
         reads: &reads,
         policy: &config.policy,
         chips: &chips,
         antennas: &config.antennas,
+        manual: &manual,
     });
 
     Ok(DerivationReport::build(&config, reads.len(), &derivation))

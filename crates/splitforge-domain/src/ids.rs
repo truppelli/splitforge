@@ -129,6 +129,15 @@ uuid_newtype! {
 }
 
 uuid_newtype! {
+    /// Identifies a manual entry.
+    ///
+    /// Random v4, not derived: an operator typing a bib and a time is an **act**, and two
+    /// operators recording the same runner at the same second are two separate records of
+    /// it, not one. Deriving the identifier from the contents would silently collapse them.
+    ManualEntryId
+}
+
+uuid_newtype! {
     /// Identifies a participant.
     ParticipantId
 }
