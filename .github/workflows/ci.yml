@@ -26,11 +26,20 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    name: Clippy
+    name: Clippy (1.98)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned on purpose. `@stable` moves on its own, and a new release can add a lint
+      # that fails every open pull request on code none of them touched — 1.98.0 did
+      # exactly that on 2026-08-20 with `chunks_exact_to_as_chunks`, reddening two PRs
+      # and main itself.
+      #
+      # Pinning does not skip the new lints, it schedules them: bumping this line is a
+      # small deliberate change that fixes whatever it surfaces, instead of a surprise
+      # that lands on somebody trying to merge something unrelated. Keep it moving —
+      # a pin left alone for a year is how a codebase collects a hundred lints at once.
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
