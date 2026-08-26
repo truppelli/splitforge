@@ -723,8 +723,8 @@ criterion, and therefore after hardware.
 - [x] **Versioned JSON results export.** `RESULTS_FORMAT` and `RESULTS_VERSION` ship in the
       envelope of `splitforge export results --as json`
 - [x] **Stable CSV export contract.** `RESULTS_CSV_COLUMNS` is the contract, and
-      `the_csv_column_list_is_the_contract` fails if a column moves. The CSV carries no
-      version *marker* of its own — the one piece of this bullet still outstanding
+      `the_csv_column_list_is_the_contract` fails if a column moves. Every row carries the
+      contract version in a trailing `format_version` column
 - Optional RaceDay Connect publish adapter
 - Signed/credentialed outbound sync
 - Local outbox with safe retry
@@ -735,6 +735,15 @@ moment anyone can export them, and shipping an unversioned one and versioning it
 have meant breaking the consumers who adopted it first. `splitforge-export` exists to hold
 exactly the outputs that carry that promise — the crossings dump stays in the CLI, where it
 can change whenever the diagnostic needs it to.
+
+The CSV's marker is a trailing column rather than a preamble line, and per row rather than
+per file. A `# splitforge.results 1` line above the header would leave the column contract
+untouched and break every consumer that opens the file the way organizers actually do —
+Excel would show the marker in row 1 and the header in row 2. Appending is the one column
+change a positional reader survives, and a per-row marker still says what produced it after
+the file has been split, concatenated, or pasted into a sheet beside another race. Adding
+the column did not bump `RESULTS_VERSION`, by the rule the crate already states: a consumer
+that ignores unknown fields keeps working.
 
 **Exit criterion:** an event times identically, and produces byte-identical exports, with
 integrations enabled and disabled.

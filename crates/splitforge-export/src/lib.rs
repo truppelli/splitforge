@@ -25,10 +25,17 @@
 //!
 //! ## Versioning
 //!
-//! [`RESULTS_FORMAT`] and [`RESULTS_VERSION`] are emitted in the JSON envelope and are the
-//! contract's identity. The CSV's contract is its **column list and order**, which is
-//! asserted by a test in this crate — if a column moves, that test fails, and moving it
-//! anyway means saying so in the version.
+//! [`RESULTS_FORMAT`] and [`RESULTS_VERSION`] are the contract's identity, and both
+//! renderings carry them: the JSON in its envelope, the CSV in a `format_version` column on
+//! every row. A CSV row therefore says what contract produced it even after the file has
+//! been split, concatenated, or pasted into a spreadsheet alongside another one.
+//!
+//! The CSV's contract is also its **column list and order**, which is asserted by a test in
+//! this crate — if a column moves, that test fails, and moving it anyway means saying so in
+//! the version.
+//!
+//! `format_version` is last because appending is the one column change a positional reader
+//! survives: anything reading fields 0..12 is untouched by it.
 
 // No panicking on any path reachable during an event: a corrupt frame, a missing
 // field, or an out-of-range value must become an error the caller can act on, never a
@@ -40,10 +47,10 @@ use serde::Serialize;
 use splitforge_domain::{ResultEntry, ResultRevision};
 use time::format_description::well_known::Rfc3339;
 
-/// The JSON export's format identifier.
+/// The export contract's format identifier.
 pub const RESULTS_FORMAT: &str = "splitforge.results";
 
-/// The JSON export's contract version.
+/// The export contract's version, carried by both renderings.
 ///
 /// Bumped when a field changes meaning or disappears. Adding a field does not require a
 /// bump — a consumer that ignores unknown fields keeps working, and one that does not was
@@ -65,6 +72,7 @@ pub const RESULTS_CSV_COLUMNS: &[&str] = &[
     "start_at",
     "finish_at",
     "flags",
+    "format_version",
 ];
 
 /// Why an export could not be produced.
@@ -164,6 +172,7 @@ pub fn results_csv(revision: &ResultRevision) -> Result<String, ExportError> {
                 .map(|flag| flag.label())
                 .collect::<Vec<_>>()
                 .join(" "),
+            RESULTS_VERSION.to_string(),
         ])?;
     }
 
@@ -287,8 +296,38 @@ mod tests {
                 "start_at",
                 "finish_at",
                 "flags",
+                "format_version",
             ]
         );
+    }
+
+    #[test]
+    fn every_csv_row_carries_the_contract_version() {
+        // The marker is per-row rather than per-file on purpose. These files get split,
+        // concatenated, and pasted into a spreadsheet next to another race; a header-only
+        // marker does not survive any of that, and a row that cannot say which contract
+        // produced it is a row somebody has to guess about.
+        let published = revision(vec![
+            entry("101", Some(1), ResultStatus::Finished, Some(1_100_000)),
+            entry("102", None, ResultStatus::Dnf, None),
+        ]);
+        let csv = results_csv(&published).expect("csv");
+        let mut lines = csv.lines();
+
+        let header = lines.next().expect("header");
+        assert!(
+            header.ends_with("format_version"),
+            "the marker is the last column so a positional reader of 0..12 is unaffected: {header}"
+        );
+
+        let rows: Vec<&str> = lines.filter(|line| !line.is_empty()).collect();
+        assert_eq!(rows.len(), 2, "one row per entry");
+        for row in rows {
+            assert!(
+                row.ends_with(&format!(",{RESULTS_VERSION}")),
+                "every row ends with the contract version: {row}"
+            );
+        }
     }
 
     #[test]
@@ -305,9 +344,10 @@ mod tests {
         assert!(lines[0].starts_with("place,bib,name,status"));
         assert!(lines[1].starts_with("1,101,Runner 101,finished,derived,,0:18:20.000"));
         assert_eq!(
-            lines[2], ",102,Runner 102,dnf,derived,,,,,,1970-01-01T00:00:00Z,,",
+            lines[2], ",102,Runner 102,dnf,derived,,,,,,1970-01-01T00:00:00Z,,,1",
             "a DNF has no place and no finish time, but it keeps the start crossing that \
-             proves they started — that is what makes it a DNF rather than a DNS"
+             proves they started — that is what makes it a DNF rather than a DNS. The \
+             trailing 1 is the contract version every row carries"
         );
     }
 
