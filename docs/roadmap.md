@@ -221,16 +221,18 @@ captures.
 
 **No hardware required:**
 
-- [ ] `crates/splitforge-thingmagic/`, behind the existing `ReaderProvider` port — may depend
-      on `splitforge-domain` and `splitforge-reader` and nothing else. Adding it means a
-      hand-edited row in `dependency_rules.rs` and in
-      [architecture § 2](architecture.md#dependency-rules), which is the point of listing that
+- [x] `crates/splitforge-thingmagic/` exists, holding the same boundary `splitforge-llrp`
+      declares — `splitforge-domain` and `splitforge-reader` and nothing else. The
+      hand-edited rows in `dependency_rules.rs` and
+      [architecture § 2](architecture.md#dependency-rules) are the point of listing that
       table exhaustively ([ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md))
-- [ ] **Framing before semantics.** `0xFF` / length / opcode / payload / CRC-16 as a pure
-      function over `&[u8]`, with no I/O near it. Truncated frames, bad CRCs, absurd length
-      fields, and a frame claiming 64 KB of payload are test cases rather than hypotheticals.
-      This is the highest-risk code in the project and it is fully testable before a module
-      exists
+- [x] **Framing before semantics.** `0xFF` / length / opcode / payload / CRC-16 as pure
+      functions over `&[u8]`, with no I/O near them. Truncated frames, bad CRCs, corrupted
+      length fields, and a payload that is itself a whole valid frame are test cases rather
+      than hypotheticals. This is the highest-risk code in the project and it was fully
+      testable before a module existed
+- [ ] Implement `ReaderProvider` on top of the codec. The crate does **not** yet — framing is
+      there and nothing above it, which is why `serialport` is not a dependency yet either
 - [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
       ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps))
@@ -253,6 +255,43 @@ captures.
 **Exit criterion:** a serial module runs for several hours while every read is preserved
 through deliberately induced disconnections and service restarts, and the count of reads the
 module believes it sent matches the count in the journal.
+
+**Observed**, the frame codec. Thirty-four tests, none of which need hardware, and most of
+which feed the parser input that is deliberately wrong. Three carry the claim:
+
+- **Every truncation of a valid frame** — all 12 of them for a 5-byte payload, and 2,000
+  random buffers decoded at every possible cut — reports `Incomplete` rather than failing.
+  On a serial port a partial buffer is the *ordinary* case, and a codec that treats it as an
+  error is one that discards good reads under load.
+- **Every single bit flipped** in a frame's opcode, status, payload, or checksum is caught.
+  That is a total claim rather than a statistical one, because CRC-16/CCITT detects all
+  single-bit errors — so the test fails loudly if the CRC's coverage is ever narrowed to
+  exclude a field somebody thought was unimportant.
+- **A payload that is itself a complete, valid frame** decodes as a payload. `0xFF` is a
+  synchronization hint and not a delimiter, and the fastest way to a permanently
+  desynchronized stream is to treat it as one.
+
+Two properties fell out of the wire format rather than being designed in, and both are worth
+writing down because they retire risks the plan had listed. The length field is one byte, so
+**a frame claiming 64 KB of payload is unrepresentable** — that attack is not mitigated, it
+cannot be expressed, and `MAX_FRAME_LEN` is 262 bytes as a fact about the protocol. And the
+decoder **allocates nothing**: the payload borrows from the caller's buffer, which a test
+checks by pointer rather than asserting in prose.
+
+**What none of that can tell you is whether these are the right bytes.** The layout and the
+CRC coverage come from vendor documentation, not from a capture. Both are written down as
+named assumptions in the crate — `crc_covered_range` is a public function for exactly that
+reason — so the first person holding a real capture knows the two places to look. A parser
+that is internally consistent and externally wrong passes all thirty-four.
+
+The one test anchored outside the crate is the CRC's published check vector,
+`crc16(b"123456789") == 0x29B1`. Every other checksum assertion here is self-consistent and
+would still pass with the wrong polynomial, because the same wrong function computes both
+sides.
+
+`serialport` is deliberately **not** a dependency yet. ADR-0024 authorizes it onto the read
+path; the crate currently opens nothing, and a dependency that can lose a read is worth
+adding with the code that opens the port rather than one commit earlier.
 
 **What M3a explicitly does not do:** put anything in the support matrix. Two of the nine
 criteria — a reader clock to measure offset and skew against, and per-antenna identity — are

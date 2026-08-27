@@ -1,0 +1,25 @@
+[package]
+name = "splitforge-thingmagic"
+description = "ThingMagic serial reader adapter: frame parsing, connection lifecycle, and reconnect."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Deliberately no `serialport` yet. ADR-0024 authorizes it onto the read path, but this
+# crate currently holds only the frame codec — pure functions over `&[u8]` with no I/O
+# anywhere near them. A dependency that can lose a read is worth adding when the code that
+# opens the port lands, and not one commit sooner.
+#
+# `splitforge-domain` and `splitforge-reader` are permitted by the rule table in
+# `crates/splitforge-testkit/tests/dependency_rules.rs` and unused for the same reason:
+# that table grants permission, not obligation.
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
