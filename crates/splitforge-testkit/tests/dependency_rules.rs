@@ -30,6 +30,13 @@ const ALLOWED: &[(&str, &[&str])] = &[
         "splitforge-llrp",
         &["splitforge-domain", "splitforge-reader"],
     ),
+    // The first *physical* adapter (ADR-0024), holding the same boundary as llrp above.
+    // LLRP stays the first *networked* protocol and M3b keeps every support criterion; the
+    // two crates are peers here because the port is what makes them peers.
+    (
+        "splitforge-thingmagic",
+        &["splitforge-domain", "splitforge-reader"],
+    ),
     ("splitforge-storage", &["splitforge-domain"]),
     ("splitforge-engine", &["splitforge-domain"]),
     ("splitforge-results", &["splitforge-domain"]),
@@ -62,8 +69,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
         "splitforge-simulator",
         &["splitforge-domain", "splitforge-reader"],
     ),
-    // "Everything except llrp internals." Listed exhaustively rather than as a wildcard,
-    // so that adding a crate to the workspace forces a deliberate answer here.
+    // "Everything except a protocol adapter's internals." Listed exhaustively rather than
+    // as a wildcard, so that adding a crate to the workspace forces a deliberate answer
+    // here — which is how splitforge-thingmagic came to be absent from this list rather
+    // than quietly included in it.
     (
         "splitforge-cli",
         &[
@@ -96,6 +105,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "splitforge-storage",
             "splitforge-sync",
             "splitforge-testkit",
+            "splitforge-thingmagic",
         ],
     ),
 ];
@@ -197,6 +207,13 @@ fn no_crate_depends_on_something_the_architecture_forbids() {
     }
 }
 
+/// Every crate that speaks a specific reader's wire protocol.
+///
+/// There are two now (ADR-0024), which is the first real test of the claim below: until a
+/// second adapter existed, "the engine must not depend on `llrp`" and "the engine must not
+/// depend on *a protocol*" were the same sentence, and only one of them was being checked.
+const PROTOCOL_ADAPTERS: &[&str] = &["splitforge-llrp", "splitforge-thingmagic"];
+
 #[test]
 fn the_engine_cannot_reach_a_reader_protocol() {
     // Stated separately from the table because it is the rule the architecture is built
@@ -206,12 +223,44 @@ fn the_engine_cannot_reach_a_reader_protocol() {
     for crate_name in ["splitforge-engine", "splitforge-results", "splitforge-api"] {
         let manifest = &manifests[crate_name];
         for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-            assert!(
-                !workspace_dependencies(manifest, section).contains("splitforge-llrp"),
-                "{crate_name} reached for splitforge-llrp in [{section}]. The engine must \
-                 not know that any particular reader protocol exists — that is what makes \
-                 a second protocol an adapter instead of a rewrite. See ADR-0004."
-            );
+            let dependencies = workspace_dependencies(manifest, section);
+            for adapter in PROTOCOL_ADAPTERS {
+                assert!(
+                    !dependencies.contains(*adapter),
+                    "{crate_name} reached for {adapter} in [{section}]. The engine must \
+                     not know that any particular reader protocol exists — that is what \
+                     makes a second protocol an adapter instead of a rewrite. See \
+                     ADR-0004 and ADR-0012."
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn only_the_composition_root_knows_a_protocol_adapter_exists() {
+    // The generalization of the rule above. `splitforge-edge` wires concrete
+    // implementations together and is allowed to name them; every other crate — including
+    // the CLI, which is otherwise permitted almost everything — is not.
+    //
+    // Without this, the second adapter could be reached for from anywhere the first one
+    // was carefully kept out of, and each import would look individually reasonable.
+    let manifests = manifests();
+
+    for (name, manifest) in &manifests {
+        if name == "splitforge-edge" || PROTOCOL_ADAPTERS.contains(&name.as_str()) {
+            continue;
+        }
+        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            let dependencies = workspace_dependencies(manifest, section);
+            for adapter in PROTOCOL_ADAPTERS {
+                assert!(
+                    !dependencies.contains(*adapter),
+                    "{name} depends on {adapter} in [{section}]. Only splitforge-edge, the \
+                     composition root, may name a concrete reader protocol — see \
+                     docs/architecture.md § 2."
+                );
+            }
         }
     }
 }
