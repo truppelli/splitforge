@@ -487,6 +487,12 @@ pub struct DoctorReport {
     pub database: String,
     /// Schema version.
     pub schema_version: i64,
+    /// What the device's time source is, or why that could not be determined.
+    ///
+    /// Always present. A device checked before a race should be able to show that the
+    /// question was asked, and an absent field would leave "not synchronized" and "not
+    /// asked" looking identical.
+    pub clock_source: crate::clock_source::ClockSourceView,
     /// Checks that ran.
     pub checks_run: usize,
     /// Problems that will produce wrong results or lose data.

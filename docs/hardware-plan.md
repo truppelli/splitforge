@@ -399,22 +399,47 @@ every assertion compares the unit against a fact taken from somewhere else — b
 udev rule's group against `deploy/splitforge.sysusers.conf` rather than a string restated in
 the test.
 
-### Step 6 — clock state without reaching for `unsafe`
+### Step 6 — clock state without reaching for `unsafe` — **done**
 
-[Milestone 5](roadmap.md#milestone-5--field-reliability) records that determining
+[Milestone 5](roadmap.md#milestone-5--field-reliability) recorded that determining
 `DeviceClockState` *"needs syscalls this workspace's `unsafe_code = deny` rules out reaching
 for directly."* There is a way around it, and the unit file already points at it: *"the
 service reads the clock and never sets it. Clock discipline is the system's NTP or GPS
 daemon's job."*
 
 So read the daemon rather than the syscall. `chronyc -c tracking` emits parseable CSV —
-reference ID, stratum, leap status, offset — mapping cleanly onto the five states: a PPS
-refclock at stratum 1 gives `GpsLocked`, a real upstream source gives `NtpSynced`,
-RTC-set-only gives `Rtc`, and a leap status of "Not synchronised" gives `Unsynced`.
-`ProtectClock=yes` stays untouched.
+reference ID, stratum, leap status, offset — and `ProtectClock=yes` stays untouched, because
+reading is all that happens. Parsing and classification are pure and live in
+`splitforge-domain`; running the process lives in the CLI. `splitforge doctor` reports the
+result unconditionally, and warns without blocking anything.
 
-Phase 0 will honestly report `Rtc` or `Unsynced`. Phase 1's GPS/PPS is what makes `GpsLocked`
-reachable at all.
+**This step's original mapping was wrong, and building it is what found out.** It claimed
+*"RTC-set-only gives `Rtc`"*. It does not — **`Rtc` and `Manual` are not reachable from
+tracking output at all**:
+
+| State | From `chronyc -c tracking`? |
+|---|---|
+| `GpsLocked` | **Yes** — a local reference with a GPS/PPS refid |
+| `NtpSynced` | **Yes** — synchronized to any other source |
+| `Unsynced` | **Yes** — leap status says so, or there is no reference |
+| `Rtc` | **No** |
+| `Manual` | **No** |
+
+A Pi whose clock was set from a DS3231 at boot and has reached no source since reports *"Not
+synchronised"*, exactly like a Pi that booted with no clock at all — because from chrony's
+point of view they *are* the same situation. Telling them apart means knowing whether an RTC
+device exists and was read at boot, which is a different question asked of a different place.
+
+So both report `Unsynced`, which is the safe direction: `is_trustworthy` is false for
+`Unsynced` and true for `Rtc`, so the error is toward warning about a clock that was fine
+rather than staying quiet about one that was not.
+
+**Phase 0 therefore reports `Unsynced`, not `Rtc`** — even with the DS3231 fitted and
+working. Phase 1's GPS/PPS is what makes `GpsLocked` reachable at all, and it is also what
+would make a Phase 0 device stop reporting `Unsynced`.
+
+What stays gated is making any of this **blocking**. *Which* states should refuse a race
+start is [Q11](open-questions.md#q11-clock-error-budget-enforcement), which has no answer.
 
 ```text
 # Phase 0 - /boot/firmware/config.txt

@@ -497,11 +497,15 @@ Operational safety, not features. This milestone is what separates a demo from a
       ([ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md))
 - [x] Free-disk warning and defined write-failure behavior
       ([ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md))
-- **Clock discipline** — *partly built.* Wall-clock step detection is done: the service
-  compares the wall clock against the monotonic clock and records every jump as append-only
-  evidence ([clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms)).
-  Still hardware-gated: DS3231 RTC support, GPS/PPS integration, Pi as LAN NTP server, and
-  clock state as a blocking pre-race check
+- **Clock discipline** — *partly built.* Two halves are done. Wall-clock step detection: the
+  service compares the wall clock against the monotonic clock and records every jump as
+  append-only evidence
+  ([clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms)). And
+  **determining `DeviceClockState`**, by asking the time daemon rather than the kernel — the
+  question this milestone had recorded as blocked on `unsafe`. Still hardware-gated: DS3231
+  RTC support, GPS/PPS integration, and Pi as LAN NTP server. Still *question*-gated, which
+  is not the same thing: clock state as a **blocking** pre-race check waits on
+  [Q11](open-questions.md#q11-clock-error-budget-enforcement)
 - [x] Manual backup and **restore drills** — restore is rehearsed, not discovered
 - [x] Corruption recovery ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
 - Graceful shutdown on power loss where the hardware permits
@@ -806,6 +810,92 @@ in the new code had lost its line-continuation backslash, so health and `doctor`
 `"the largest by                          3600000 ms"`. Neither is visible in a passing test
 suite; both are obvious the moment a real command prints a real string.
 
+**Observed**, the device's time source. `DeviceClockState` has been recorded on every read
+since Milestone 1 and `is_trustworthy` has gated publication for as long — but nothing in the
+workspace *determined* it, and this milestone recorded the reason as syscalls that
+`unsafe_code = "deny"` rules out reaching for. That was the wrong way round the problem. The
+unit file already said the way through: *"the service reads the clock and never sets it."*
+**So ask the daemon rather than the kernel.** `chronyc -c tracking` prints one CSV line, no
+`unsafe` is involved, and `ProtectClock=yes` stays untouched because reading is all that
+happens.
+
+```console
+$ splitforge doctor                                     # a Pi disciplined by a PPS refclock
+{"clock_source":{"measurement":"measured","state":"gps_locked",
+ "detail":"chrony reports stratum 1, following a local reference clock",
+ "reference_kind":"local","reference":"PPS","stratum":1,"rms_offset_ms":0.000034,
+ "leap_pending":false},"errors":0,"warnings":0,"findings":[]}
+
+$ splitforge doctor                                     # a device that has reached nothing
+{"clock_source":{"measurement":"measured","state":"unsynced",
+ "detail":"chrony reports stratum 0, following no reference at all","stratum":0,
+ "rms_offset_ms":0.0,"leap_pending":false},"errors":0,"warnings":1,
+ "findings":[{"severity":"warning","check":"clock.source",
+ "detail":"the device clock is not synchronized to any time source. Gun and finish times
+           will still be recorded from it, and their accuracy is whatever the clock
+           happens to be — see docs/clock-and-time-discipline.md."}]}
+
+$ splitforge doctor                                     # chronyd installed and not answering
+{"clock_source":{"measurement":"daemon_unreachable","state":null,
+ "detail":"`chronyc` could not reach the time daemon: 506 Cannot talk to daemon"},
+ "warnings":1,...}
+```
+
+`state` is `null` in the last one and that is the point of the field. **"Not measured" and
+"measured, and the clock is bad" are different facts that call for opposite reactions**, and
+a report that collapsed them would tell an operator their clock was broken because nobody
+asked. `measurement` names which of the four happened as a fixed token, so a watchdog never
+has to parse the sentence beside it.
+
+Two states are **structurally** unreachable from here, and that corrects
+[hardware-plan § 7](hardware-plan.md#7-software-plan), which expected `chronyc` to report an
+RTC. It cannot. A Pi whose clock was set from a DS3231 at boot and has reached no source
+since reports *"Not synchronised"* — identical to a Pi that booted with no clock at all,
+because from chrony's point of view they are the same situation. So both report `Unsynced`,
+which is the **safe** direction to be wrong in: `is_trustworthy` is false for `Unsynced` and
+true for `Rtc`, so the error is toward warning about a clock that was fine rather than
+staying quiet about one that was not.
+
+**It warns and blocks nothing**, for the same reason step detection does. *Which* states
+should refuse a `race start` is [Q11](open-questions.md#q11-clock-error-budget-enforcement),
+Q11 has no answer, and choosing one in the code would be answering it silently.
+
+A bundle carries the answer, because a set of finish times that are all shifted by the same
+amount is explained by this and by almost nothing else. What it does not carry is the
+reference's **name** — on a race-day LAN that is an internal address — or the text of a
+failure, which is program output nobody can make promises about:
+
+```console
+$ splitforge doctor                                     # on the device
+{"clock_source":{...,"reference_kind":"network","reference":"192.168.1.1","stratum":3,...}}
+
+$ jq -c '.device.clock_source' bundle.json              # in the file that gets emailed
+{"measurement":"measured","state":"ntp_synced","reference_kind":"network","stratum":3,
+ "rms_offset_ms":0.067,"leap_pending":false}
+```
+
+`reference_kind` survives and `reference` does not, which is the whole design in two fields:
+*which kind* of source a device was following is the diagnostic, and the address is not. That
+check is on the bundle's allowlist and was put there deliberately rather than by default —
+both messages it can emit are compile-time constants with no interpolation at all, which is
+the strongest case [ADR-0020](adr/0020-diagnostic-bundles-carry-no-participant-data.md)'s
+allowlist can be given.
+
+**One defect surfaced, and again by running it rather than by a test failing.** The first
+version classified the reference by asking `is_local_reference`, which answers false for a
+network peer *and* false for no reference at all — so a device following **nothing** was
+reported as *"following a network time source"*, with `"reference": ""` beside it. That is
+the one description that is definitely wrong, and an operator would read it as *the network
+is fine, look elsewhere*. It is now a three-way distinction with a test on it. This is the
+third time in this milestone that a defect invisible to a green suite was obvious the moment
+a real command printed a real string.
+
+**What no test here can tell you is whether a real `chronyd` prints these bytes.** The four
+states above were observed end to end through the real subprocess path, against a **stub**
+daemon on a development machine — the field layout comes from chrony's documentation, and
+`TRACKING_FIELDS` and `looks_plausible` are where the first person running this on a real Pi
+should look. Reading the daemon is hardware-free; being sure it is *this* daemon is not.
+
 ### Still open — and nearly every item of it needs hardware
 
 **Work:**
@@ -815,17 +905,11 @@ suite; both are obvious the moment a real command prints a real string.
   risk. Installing the service is written up in [deployment.md](deployment.md); this is the
   half that cannot be written honestly from a desk.
 - **The hardware half of clock discipline** — the DS3231 RTC, GPS/PPS, the Pi as a LAN NTP
-  server, per-reader offset and skew into `clock_samples`, and clock state as a blocking
-  pre-race check. *Half of that last one has since come unstuck.* Determining
-  `DeviceClockState` was listed here as needing syscalls this workspace's
-  `unsafe_code = "deny"` rules out reaching for directly — but the unit file already points
-  at the way around it: *"the service reads the clock and never sets it."* So read the
-  daemon rather than the syscall. `chronyc -c tracking` emits parseable CSV that maps onto
-  the five states, needs no `unsafe`, and is testable against fixture output. What stays
-  gated is making it **blocking**, because *which* states should refuse a start is
-  [Q11](open-questions.md#q11-clock-error-budget-enforcement) and Q11 has no answer.
-  Determining and reporting the state is hardware-free; on a desk it honestly reports
-  `Unsynced` or `Rtc`, and only Phase 1's GPS/PPS makes `GpsLocked` reachable at all.
+  server, and per-reader offset and skew into `clock_samples`. Clock state as a **blocking**
+  pre-race check stays gated too, but for a different reason than the rest: not hardware, but
+  [Q11](open-questions.md#q11-clock-error-budget-enforcement) — *which* states should refuse
+  a start has no answer, and choosing one in the code would be answering it silently.
+  **Determining and reporting the state is now built** — see below.
 
 **Measurements nothing here has taken**, because they are properties of real flash and real
 power rather than of code: whether an SD card honors `fsync` at all, what the second sync per

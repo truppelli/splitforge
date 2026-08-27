@@ -331,10 +331,25 @@ Q11 is about *drift measured against a reference*, needs the hardware in items 3
 above, and remains open. A step is a different and cruder signal: the clock demonstrably
 moved, by a knowable amount, with no reference required.
 
+**Also built: `device_clock_state` is now determined**, by asking the system's time daemon
+rather than the kernel — `chronyc -c tracking`, which needs no `unsafe` and leaves
+`ProtectClock=yes` untouched because reading is all that happens. `splitforge doctor` reports
+it unconditionally, including *"nothing could be measured"*, which is deliberately a
+different answer from `unsynced`.
+
+Two of the five states are not reachable that way. `rtc` and `manual` both look like *"Not
+synchronised"* to chrony, so both are reported as `unsynced` — the safe direction, since
+`is_trustworthy` is false for `unsynced` and true for `rtc`. See
+[roadmap M5](roadmap.md#milestone-5--field-reliability) for the observed output and
+[hardware-plan § 7](hardware-plan.md#7-software-plan), whose Step 6 originally claimed
+otherwise and is corrected there.
+
+Item 8's **blocking** pre-race check is still not built, and it is no longer waiting on
+hardware — it is waiting on [Q11](open-questions.md#q11-clock-error-budget-enforcement) to
+say which states should refuse a start.
+
 **Still not built**, and still needing hardware: the DS3231, GPS/PPS, the Pi as a LAN NTP
-server, per-reader offset and skew into `clock_samples`, time since last good sync, and
-`device_clock_state` itself — nothing in the codebase determines it today, and item 8's
-blocking pre-race check cannot be built until something does.
+server, per-reader offset and skew into `clock_samples`, and time since last good sync.
 
 ## 11. Summary of recommendations
 

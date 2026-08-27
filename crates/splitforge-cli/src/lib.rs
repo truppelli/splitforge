@@ -39,6 +39,7 @@
 
 mod bundle;
 mod cli;
+mod clock_source;
 mod configure;
 mod operate;
 mod report;
@@ -62,6 +63,7 @@ pub use cli::{
     EventCommand, ExportCommand, ExportFormat, FixtureCommand, Format, ManualCommand,
     PolicyCommand, RaceCommand, RaceRef, ReaderCommand, ResultsCommand, RosterCommand, Speed,
 };
+pub use clock_source::ClockSourceView;
 pub use configure::load_fixture;
 pub use report::{
     AcceptedReadView, AssignmentView, AuditView, CheckpointView, ClockStepView, ClockStepsView,
