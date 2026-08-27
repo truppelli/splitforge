@@ -1,8 +1,9 @@
 # SplitForge Architecture
 
 > Status: partly implemented. `domain`, `reader`, `storage`, `engine`, `results`, `export`,
-> `simulator`, `testkit`, `cli`, `api`, and `edge` exist; `llrp` and `sync` are still
-> empty — see the [roadmap](roadmap.md). Decisions marked **OPEN** are tracked in
+> `simulator`, `testkit`, `cli`, `api`, and `edge` exist; `thingmagic` holds its frame
+> codec and nothing above it; `llrp` and `sync` are still empty — see the
+> [roadmap](roadmap.md). Decisions marked **OPEN** are tracked in
 > [open-questions.md](open-questions.md).
 
 ## 1. System context
@@ -43,6 +44,7 @@ local disk accepted it. Nothing else participates.
 flowchart LR
   subgraph adapters["Adapters — I/O lives here"]
     llrp["splitforge-llrp"]
+    tm["splitforge-thingmagic"]
     sim["splitforge-simulator"]
     store["splitforge-storage"]
     sync["splitforge-sync"]
@@ -63,6 +65,7 @@ flowchart LR
   reader["splitforge-reader<br/><i>ReaderProvider trait</i>"]
 
   llrp --> reader
+  tm --> reader
   sim --> reader
   reader --> domain
   engine --> domain
@@ -79,6 +82,7 @@ flowchart LR
   edge["<b>splitforge-edge</b><br/>composition root — wires everything"]
   edge --> api
   edge --> llrp
+  edge --> tm
   edge --> store
   edge --> sync
 ```
@@ -90,20 +94,27 @@ flowchart LR
 | `splitforge-domain` | nothing in this workspace | any I/O crate, Tokio, SQLx, Axum |
 | `splitforge-reader` | `domain` | any specific protocol crate |
 | `splitforge-llrp` | `reader`, `domain` | `engine`, `storage`, `api` |
-| `splitforge-storage` | `domain` | `engine`, `llrp`, `api` |
-| `splitforge-engine` | `domain` | **`llrp`**, `api`, `sync` |
-| `splitforge-results` | `domain` | `llrp`, `api`, `sync` |
-| `splitforge-export` | `domain`, `results` | `llrp`, `storage` |
-| `splitforge-api` | `domain`, `engine`, `results`, `export` | `llrp` |
-| `splitforge-sync` | `domain`, `export` | `engine`, `llrp` |
-| `splitforge-cli` | everything except `llrp` internals | — |
+| `splitforge-thingmagic` | `reader`, `domain` | `engine`, `storage`, `api` |
+| `splitforge-storage` | `domain` | `engine`, any protocol adapter, `api` |
+| `splitforge-engine` | `domain` | **any protocol adapter**, `api`, `sync` |
+| `splitforge-results` | `domain` | any protocol adapter, `api`, `sync` |
+| `splitforge-export` | `domain`, `results` | any protocol adapter, `storage` |
+| `splitforge-api` | `domain`, `engine`, `results`, `export` | any protocol adapter |
+| `splitforge-sync` | `domain`, `export` | `engine`, any protocol adapter |
+| `splitforge-cli` | everything except a protocol adapter's internals | `llrp`, `thingmagic` |
 | `splitforge-testkit` | `domain`, `storage`, `reader` | — |
 | `splitforge-edge` | everything | — |
-| `splitforge-simulator` | `domain`, `reader` | `llrp` |
+| `splitforge-simulator` | `domain`, `reader` | any protocol adapter |
 
-The rule that earns its keep is **`engine` must not depend on `llrp`**. It is what makes
-a second reader protocol — or a serial timing box, or a barcode scanner, or a CSV import
-of somebody else's reads — a new adapter rather than a rewrite.
+The rule that earns its keep is **`engine` must not depend on any protocol adapter**. It is
+what makes a second reader protocol — or a serial timing box, or a barcode scanner, or a
+CSV import of somebody else's reads — a new adapter rather than a rewrite.
+
+That rule was written as `engine` must not depend on `llrp`, and for as long as `llrp` was
+the only adapter the two sentences were indistinguishable — so only the narrow one was
+being checked. `splitforge-thingmagic` ([ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md))
+is the second, which is why the table now names *any protocol adapter* and why
+`dependency_rules.rs` grew a test saying only `splitforge-edge` may name one.
 
 These rules are **enforced**, not merely documented: `crates/splitforge-testkit/tests/dependency_rules.rs`
 parses every member manifest and fails the test suite on a violation. See
