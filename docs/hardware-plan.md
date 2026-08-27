@@ -1,8 +1,15 @@
 # Hardware Plan
 
-> Status: **proposal**. Nothing here is decided. The decisions it asks for are listed in
-> [§ 10](#10-what-this-asks-someone-to-decide), and each needs an ADR or a roadmap
-> amendment before it binds anything.
+> Status: **partly adopted.** Decisions 1, 2, and 3 of
+> [§ 10](#10-what-this-asks-someone-to-decide) are now recorded in
+> [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md): M3 has split into M3a/M3b, the
+> M7e-Pico is the first physical adapter, and `serialport` may join the read path.
+> **Decisions 4, 5, and 6 are still open and bind nothing.** Everything below about the
+> shipped compute platform, the radio subassembly, and Phase 2 remains a proposal.
+>
+> **No hardware has been ordered.** The four questions in
+> [§ 3](#four-questions-to-answer-before-ordering) are unanswered, and each can turn a $345
+> order into a box that cannot be used on arrival.
 > Companion to [hardware-support.md](hardware-support.md) and [roadmap.md](roadmap.md).
 > The parts themselves are in [`Materials-and-Cost-Table.xlsx`](Materials-and-Cost-Table.xlsx),
 > which is the submission template rather than a file this repository designed.
@@ -256,19 +263,28 @@ Seven steps. The first three need no hardware and should be underway before the 
 the same argument [ADR-0004](adr/0004-llrp-first-reader-adapter.md) makes for writing a
 parser against captures.
 
-### Step 0 — write the decisions down first *(no hardware)*
+### Step 0 — write the decisions down first *(no hardware)* — **done**
 
-- `docs/adr/00NN-serial-reader-adapter-before-llrp.md` — records that ADR-0004 **stands**
-  while the M7e-Pico becomes the first physical adapter, and names what it cannot exercise.
-- The same ADR covers the new dependency. `deny.toml`'s `[bans]` section says it outright:
-  *"every crate on the read path is a crate that can lose a read. Additions to the read path
-  warrant an ADR."*
-- Split [Q9](open-questions.md#q9-first-reader-model): Q9a (first serial module) closes as the
-  M7e-Pico; Q9b (first LLRP reader) stays open and keeps blocking M3b.
-- Amend [roadmap.md](roadmap.md) to M3a / M3b, M3b's exit criteria unchanged.
-- Create `docs/readers/thingmagic-m7e-pico.md` — the per-model notes file the checklist
-  requires — and list the module as **experimental — under evaluation** with its gaps named.
-  It does not enter the support table.
+- [x] [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) — records that ADR-0004
+      **stands** while the M7e-Pico becomes the first physical adapter, and names what it
+      cannot exercise.
+- [x] The same ADR covers the new dependency. `deny.toml`'s `[bans]` section says it outright:
+      *"every crate on the read path is a crate that can lose a read. Additions to the read
+      path warrant an ADR."*
+- [x] Split [Q9](open-questions.md#q9-first-reader-model):
+      [Q9a](open-questions.md#q9a-first-serial-module) closes as the M7e-Pico;
+      [Q9b](open-questions.md#q9b-first-llrp-reader-model) stays open and keeps blocking M3b.
+- [x] Amend [roadmap.md](roadmap.md) to [M3a](roadmap.md#milestone-3a--one-serial-reader) /
+      [M3b](roadmap.md#milestone-3b--one-networked-llrp-reader), M3b's exit criteria
+      unchanged.
+- [x] Create [`docs/readers/thingmagic-m7e-pico.md`](readers/thingmagic-m7e-pico.md) — the
+      per-model notes file the checklist requires — listing the module as **experimental —
+      under evaluation** with its gaps named. It does not enter the support table.
+- [x] **One thing this plan missed.** `hardware-support.md` listed *"Handheld/USB readers —
+      different integration model, revisit after LLRP"* under **Deliberately unsupported**,
+      which decisions 1 and 2 directly contradict. Amending that file was not in this step and
+      had to be added to it — otherwise the document whose entire job is being the project's
+      honest state would have contradicted the ADR beside it.
 
 ### Step 1 — the adapter crate *(no hardware)*
 
@@ -475,17 +491,21 @@ it is what makes the $2,000 ask legible rather than speculative.
 
 ## 10. What this asks someone to decide
 
-Nothing above is binding until these are answered. Each is a decision, not a guess, and
-belongs in [open-questions.md](open-questions.md) until it has an owner.
+Each is a decision, not a guess, and belongs in
+[open-questions.md](open-questions.md) until it has an owner.
 
-| # | Decision | Needs |
-|---|---|---|
-| 1 | Does M3 split into M3a / M3b as § 2 proposes? | Roadmap amendment |
-| 2 | Is the M7e-Pico the first physical adapter, with ADR-0004 standing? | New ADR |
-| 3 | Does `serialport` join the read path? | Covered by the same ADR, per `deny.toml` `[bans]` |
-| 4 | Does CM4/CM5 become the shipped platform with Pi 3 as the support floor? | New ADR, plus one line in ADR-0002 |
-| 5 | Is the product's radio a replaceable subassembly, or soldered down? | New ADR — it constrains the carrier design |
-| 6 | Is [Q10](open-questions.md#q10-gps-pps-time-reference) answered as "required for published results"? | Q10 has been open since M0, and Phase 1 is when it becomes answerable |
+| # | Decision | Needs | Status |
+|---|---|---|---|
+| 1 | Does M3 split into M3a / M3b as § 2 proposes? | Roadmap amendment | **Decided** — [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md); [roadmap](roadmap.md#milestone-3--one-physical-reader) amended |
+| 2 | Is the M7e-Pico the first physical adapter, with ADR-0004 standing? | New ADR | **Decided** — ADR-0024; ADR-0004 stands unamended, [Q9a](open-questions.md#q9a-first-serial-module) closed, [Q9b](open-questions.md#q9b-first-llrp-reader-model) still gates M3b |
+| 3 | Does `serialport` join the read path? | Covered by the same ADR, per `deny.toml` `[bans]` | **Decided** — ADR-0024, with `default-features = false` mandatory for the Pi cross-build |
+| 4 | Does CM4/CM5 become the shipped platform with Pi 3 as the support floor? | New ADR, plus one line in ADR-0002 | **Open** |
+| 5 | Is the product's radio a replaceable subassembly, or soldered down? | New ADR — it constrains the carrier design | **Open** |
+| 6 | Is [Q10](open-questions.md#q10-gps-pps-time-reference) answered as "required for published results"? | Q10 has been open since M0, and Phase 1 is when it becomes answerable | **Open** |
+
+Decisions 4 and 5 are deliberately *not* bundled into ADR-0024. They constrain a product this
+project has not committed to building, on a timescale where nothing forces the choice yet —
+and ADR-0024 is expensive enough to reverse already. Nothing in M3a depends on either.
 
 ## 11. What this plan does not claim
 

@@ -17,10 +17,19 @@ checkpoint on a Raspberry Pi.
 > Milestones [0](docs/roadmap.md#milestone-0--project-charter),
 > [1](docs/roadmap.md#milestone-1--simulation-first-vertical-slice),
 > [2](docs/roadmap.md#milestone-2--local-event-console), and
-> [4](docs/roadmap.md#milestone-4--timing-and-results) are complete.
+> [4](docs/roadmap.md#milestone-4--timing-and-results) are complete, and
+> [5](docs/roadmap.md#milestone-5--field-reliability)'s hardware-free half is too.
 > Milestone 3 is gated on physical hardware — see
-> [hardware support](docs/hardware-support.md) — and Milestone 4 was built ahead of it
-> rather than waiting.
+> [hardware support](docs/hardware-support.md) — and 4 and 5 were built ahead of it rather
+> than waiting.
+>
+> M3 has since split into
+> [M3a](docs/roadmap.md#milestone-3a--one-serial-reader) (a serial module, purchasable) and
+> [M3b](docs/roadmap.md#milestone-3b--one-networked-llrp-reader) (a networked LLRP reader,
+> still gated on hardware nobody has), so that the work which never needed a *networked*
+> reader could stop waiting for one
+> ([ADR-0024](docs/adr/0024-serial-reader-adapter-before-llrp.md)). **No exit criterion was
+> weakened, no device is supported, and Milestone 5 still depends on M3b.**
 
 ## What SplitForge is
 
