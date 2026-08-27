@@ -8,9 +8,25 @@
 
 This table is empty on purpose, and it is the honest state of the project.
 
-[hardware-plan.md](hardware-plan.md) is the current **proposal** for changing that, under a
-real budget. It is a proposal and not a decision: it asks for a roadmap amendment and
-several ADRs, and until those exist nothing in it binds this document.
+## Under evaluation
+
+Devices being worked on that have **not** met the bar above. Nothing here is a support claim.
+
+| Vendor | Model | Protocol | Status | Notes |
+|---|---|---|---|---|
+| JADAK / Novanta (ThingMagic) | M7e-Pico | ThingMagic serial | **experimental — under evaluation** | [notes](readers/thingmagic-m7e-pico.md) |
+
+The M7e-Pico is the first physical adapter
+([ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md),
+[Q9a](open-questions.md#q9a-first-serial-module)). **It can never reach the matrix above on
+its own**, and that is worth stating here rather than only in its notes file: it has no
+reader clock, so criterion 4 has nothing to measure; and it has one RF port, so criterion 5
+has no second antenna to identify. Those are structural, not pending.
+
+[hardware-plan.md](hardware-plan.md) is the budget behind that work. Its § 2 scores this
+module against the nine criteria below without softening any of them; the decisions it asked
+for are now recorded in ADR-0024, and the ones it asked for and did **not** get are still
+listed in its § 10.
 
 ## The rule
 
@@ -95,6 +111,21 @@ NTP. See [clock and time discipline](clock-and-time-discipline.md) for the full 
 
 - Multiple simultaneous readers — not until one works for a full event
 - Multiple checkpoints on separate devices — no distributed coordination in early milestones
-- Handheld/USB readers — different integration model, revisit after LLRP
-- Barcode and manual-entry-only timing — the ports exist for it; the work does not
+- **Handheld** readers — a different operating model, not just a different transport
+- Barcode-only timing — the ports exist for it; the work does not
 - Pi Zero / Pi 1 / Pi 2 — 32-bit and underpowered for sustained journal writes
+
+Two lines moved off this list, and both moves were decisions rather than drift:
+
+- **USB/serial readers were listed here as "revisit after LLRP."**
+  [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) revisits it early, and the
+  reasoning is in that ADR: LLRP is still the first *networked* protocol and M3b still holds
+  all nine criteria, but a current serial module can be bought now where a networked one
+  could not, and six of the nine can be retired with it. Being *worked on* is still not
+  being *supported* — that is what the [Under evaluation](#under-evaluation) table above is
+  for.
+- **Manual entry shipped in Milestone 4**
+  ([ADR-0023](adr/0023-manual-entries-are-derivation-inputs.md)), as an input to derivation
+  rather than an override of its output. It is not a reader and never appears in these
+  tables, but "manual-entry-only timing" is no longer an accurate description of what is
+  excluded.

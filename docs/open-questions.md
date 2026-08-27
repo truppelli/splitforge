@@ -8,9 +8,9 @@ is in the timing model.
 
 | # | Question | Blocks | Owner |
 |---|---|---|---|
-| [Q3](#q3-reader-clock-trust-defaults) | Reader clock trust defaults and alarm thresholds | M3 | — |
+| [Q3](#q3-reader-clock-trust-defaults) | Reader clock trust defaults and alarm thresholds | M3b | — |
 | [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
-| [Q9](#q9-first-reader-model) | Which physical reader model comes first? | **M3 — hard gate** | — |
+| [Q9b](#q9b-first-llrp-reader-model) | Which networked LLRP reader comes first? | **M3b — hard gate** | — |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | M5 | — |
 | [Q12](#q12-leap-second-handling) | Leap-second policy | M5 | — |
@@ -30,7 +30,10 @@ Specifically:
 - Should a reader reporting `Uptime` be usable for a race at all without an anchor?
 
 These need real measurements from real hardware, which makes this partly gated on
-[Q9](#q9-first-reader-model).
+[Q9b](#q9b-first-llrp-reader-model). It is **not** answerable by
+[Q9a](#q9a-first-serial-module)'s serial module, which has no reader clock at all — there
+is no offset to measure and no skew to threshold, which is one of the two criteria
+[ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) records that M3a cannot close.
 
 ### Q4: Code of Conduct enforcement contact
 
@@ -42,15 +45,44 @@ before the repo is publicized.
 
 ### Q9: First reader model
 
-**Raised in:** [hardware-support.md](hardware-support.md)
+**Split into [Q9a](#q9a-first-serial-module) and [Q9b](#q9b-first-llrp-reader-model)** by
+[ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md). Kept here so the inbound links
+from [hardware-support.md](hardware-support.md), [hardware-plan.md](hardware-plan.md), and
+older ADRs still resolve.
 
-**This is the hard gate on Milestone 3.** Milestone 3 cannot start until a physical
-LLRP-capable reader is in hand. Selection criteria: LLRP 1.0.1+ support, configurable NTP
-server (see [Q10](#q10-gps-pps-time-reference)), documented timestamp behavior,
-availability at a price an unfunded project can absorb, and a form factor suited to
+The question was raised as one and turned out to be two. It asked "which physical reader
+comes first," and assumed the answer to that was also the answer to "which reader closes
+the support checklist" — because when it was written the only candidates were networked LLRP
+readers, for which those are the same question.
+
+They are not the same question for a serial module, which can be bought this week and closes
+six of the nine criteria. So Q9a asks which module comes first and is closed; Q9b asks which
+LLRP reader comes first, is exactly as open as Q9 was, and keeps gating M3b — and therefore
+M5.
+
+**What did not happen:** Q9 was not answered by lowering what counts as an answer. M3b's
+exit criteria are M3's, verbatim.
+
+### Q9b: First LLRP reader model
+
+**Raised in:** [hardware-support.md](hardware-support.md). Formerly the second half of
+[Q9](#q9-first-reader-model).
+
+**This is the hard gate on Milestone 3b**, and through it on Milestone 5. M3b cannot start
+until a physical LLRP-capable reader is in hand. Selection criteria: LLRP 1.0.1+ support,
+configurable NTP server (see [Q10](#q10-gps-pps-time-reference)), documented timestamp
+behavior, availability at a price an unfunded project can absorb, and a form factor suited to
 outdoor race use.
 
-Milestones 1 and 2 are deliberately designed to make progress while this is unresolved.
+Milestones 1, 2, 4, and the hardware-free half of 5 were deliberately built to make progress
+while this is unresolved. [M3a](roadmap.md#milestone-3a--one-serial-reader) is the same
+strategy applied once more — and it is the last time it works, because M5's exit criterion
+names unplugging Ethernet and a serial module has none.
+
+[hardware-plan.md § 4](hardware-plan.md#4-phase-1--field-unit-and-finding-the-real-bom-2000)
+holds ~$350 to buy a used FCC-band Impinj R220/R420 or Zebra FX7500 opportunistically, as a
+**test instrument** rather than as product hardware. That would close this question. Do not
+block on it — blocking on it is what cost three milestones.
 
 ### Q10: GPS PPS time reference
 
@@ -136,6 +168,39 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q13](#q13-msrv-policy) | How is the MSRV chosen, and when does it move? | [ADR-0013](adr/0013-msrv-policy.md) |
 | [Q7](#q7-corruption-recovery-strategy) | Database corruption recovery strategy | [ADR-0018](adr/0018-write-ahead-sidecar-journal.md) |
 | [Q5](#q5-local-api-authentication-model) | Local API authentication model | [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md) |
+| [Q9a](#q9a-first-serial-module) | Which serial module is the first physical adapter? | [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) |
+
+### Q9a: First serial module
+
+**Resolved — [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md): the ThingMagic
+M7e-Pico, as the first *physical* adapter while LLRP stays the first *networked* protocol.**
+
+**Raised in:** [hardware-plan.md](hardware-plan.md). Formerly the first half of
+[Q9](#q9-first-reader-model).
+
+Chosen because it is a **current** part — FCC modular grant, US distributor, documented
+serial protocol — where every LLRP reader in the project's price range is out of production
+and priced by whatever a liquidator lists this month. You cannot build a repeatable bill of
+materials around a scavenged component.
+
+**Closing this closes less than it appears to**, which is the part worth keeping. The module
+cannot close two of the nine support criteria — there is no reader clock to measure offset
+and skew against, and there is one RF port, so no per-antenna identity. Neither is "not yet";
+both are structural. So the module enters
+[`docs/readers/thingmagic-m7e-pico.md`](readers/thingmagic-m7e-pico.md) as *experimental —
+under evaluation*, the support matrix stays empty, and
+[Q3](#q3-reader-clock-trust-defaults) stays open because this module cannot supply the
+measurements it asks for.
+
+What it does buy is the four Pi-side durability measurements M5 could not take — whether an
+SD card honors `fsync`, what the second sync costs on real flash, what a day's journal
+weighs, what a write in flight does when power goes — none of which ever needed LLRP, only a
+real stream of real reads.
+
+**Nothing has been ordered.** The decision is made; the purchase is not, and
+[hardware-plan.md § 3](hardware-plan.md#3-phase-0--bench-validation-500-now) lists four
+questions to answer before it, each of which can turn a $345 order into a box that cannot be
+used on arrival.
 
 ### Q5: Local API authentication model
 

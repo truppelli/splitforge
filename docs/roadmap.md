@@ -9,12 +9,15 @@ flowchart LR
     M0["<b>M0</b><br/>Charter"] --> M1["<b>M1</b><br/>Simulation<br/>vertical slice"]
     M1 --> M2["<b>M2</b><br/>Operator CLI"]
     M2 --> M4["<b>M4</b><br/>Timing &<br/>results"]
-    M2 -.-> M3["<b>M3</b><br/>One physical<br/>reader"]
+    M2 -.-> M3a["<b>M3a</b><br/>One serial<br/>reader"]
+    M2 -.-> M3b["<b>M3b</b><br/>One networked<br/>LLRP reader"]
     M4 --> M5["<b>M5</b><br/>Field<br/>reliability"]
-    M3 --> M5
+    M3b --> M5
+    M3a -.->|"informs,<br/>does not gate"| M5
     M5 --> M6["<b>M6</b><br/>Integrations"]
 
-    M3 -.->|"gate:<br/>real hardware<br/>in hand"| M3
+    M3a -.->|"gate:<br/>module<br/>purchased"| M3a
+    M3b -.->|"gate:<br/>LLRP reader<br/>in hand"| M3b
     style M0 fill:#2d6a4f,color:#fff
     style M1 fill:#2d6a4f,color:#fff
     style M2 fill:#2d6a4f,color:#fff
@@ -27,13 +30,20 @@ without hardware is built, and what remains — like its exit criterion — need
 
 **M3 and M4 swapped.** The original order put the physical reader first, because reader risk
 is the larger risk and this roadmap is ordered by risk retired. That ordering assumed the
-hardware would be available when M2 finished; it was not, and
-[Q9](open-questions.md#q9-first-reader-model) still has no owner. Blocking on an unbought
-reader would have stopped the project rather than sequenced it, so M4 — which needs no
-hardware at all — was built while M3 waits.
+hardware would be available when M2 finished; it was not, and Q9 still had no owner. Blocking
+on an unbought reader would have stopped the project rather than sequenced it, so M4 — which
+needs no hardware at all — was built while M3 waited.
 
-Nothing was skipped and no exit criterion was weakened. M3 remains gated exactly as written,
-and M5 now depends on both.
+**M3 has since split into M3a and M3b** ([ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md)),
+for a reason the swap above had already exposed: the gate was written as one door and is
+really two. A current serial module can be bought this week and closes six of the nine
+support criteria; a networked LLRP reader closes all nine and nobody has one. Splitting lets
+the six be retired now while the other three stay gated exactly as they were.
+
+Nothing was skipped and **no exit criterion was weakened** — M3b's nine criteria are M3's
+nine, verbatim, and M5 depends on M3b. M3a informs M5's open measurements without satisfying
+its exit criterion, because a real stream of real reads is what those measurements needed and
+LLRP was never what made them true.
 
 ---
 
@@ -190,12 +200,72 @@ the journal has observed, and claims nothing about a connection it has no way to
 
 ## Milestone 3 — One physical reader
 
-**Gated on having the hardware.** Do not start this milestone from protocol documentation
-alone — see [hardware-support.md](hardware-support.md).
+**Split into M3a and M3b** by [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md).
+Do not start either from protocol documentation alone — see
+[hardware-support.md](hardware-support.md).
 
-[hardware-plan.md](hardware-plan.md) proposes splitting this milestone into **M3a** (a serial
-reader, purchasable now) and **M3b** (a networked LLRP reader, keeping every exit criterion
-below verbatim). That split is not adopted — it needs an amendment here and an ADR first.
+The split is not a softening. M3b below is M3 as it was originally written, with all nine
+support criteria intact and the same hard gate on it. What changed is that the work which
+never needed a *networked* reader — the parser, the port, the Pi-side durability
+measurements — stopped being held hostage to one.
+
+---
+
+### Milestone 3a — One serial reader
+
+**Gated on buying the module.** [Q9a](open-questions.md#q9a-first-serial-module) is closed —
+the ThingMagic M7e-Pico — but nothing has been ordered. The three steps below that need no
+hardware can start immediately, and should, exactly as
+[ADR-0004](adr/0004-llrp-first-reader-adapter.md) argues for writing a parser against
+captures.
+
+**No hardware required:**
+
+- [ ] `crates/splitforge-thingmagic/`, behind the existing `ReaderProvider` port — may depend
+      on `splitforge-domain` and `splitforge-reader` and nothing else. Adding it means a
+      hand-edited row in `dependency_rules.rs` and in
+      [architecture § 2](architecture.md#dependency-rules), which is the point of listing that
+      table exhaustively ([ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md))
+- [ ] **Framing before semantics.** `0xFF` / length / opcode / payload / CRC-16 as a pure
+      function over `&[u8]`, with no I/O near it. Truncated frames, bad CRCs, absurd length
+      fields, and a frame claiming 64 KB of payload are test cases rather than hypotheticals.
+      This is the highest-risk code in the project and it is fully testable before a module
+      exists
+- [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
+      is **not** authoritative; the Pi's receipt time is
+      ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps))
+
+**Needs the module:**
+
+- [ ] Give `splitforge-edge` a read path, in the ordering
+      [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
+      first, always, then the journal append, then notify. Health gains reader connection
+      state
+- [ ] `PrivateDevices=no` / `DevicePolicy=closed` / `DeviceAllow=char-ttyUSB rw` in the unit,
+      plus a udev rule for a stable device name. `RestrictAddressFamilies=AF_UNIX` **stays** —
+      a serial adapter opens a file, not a socket
+- [ ] Measure what M5 could not: whether the SD card honors `fsync`, what the second sync per
+      reader report costs on real flash, what a full day's journal weighs, and what happens to
+      a write in flight when the power goes
+- [ ] Measure the Pi's receive-time jitter, which is what actually bounds accuracy on this
+      hardware — not the module's throughput specification
+
+**Exit criterion:** a serial module runs for several hours while every read is preserved
+through deliberately induced disconnections and service restarts, and the count of reads the
+module believes it sent matches the count in the journal.
+
+**What M3a explicitly does not do:** put anything in the support matrix. Two of the nine
+criteria — a reader clock to measure offset and skew against, and per-antenna identity — are
+**structurally** unclosable on a single-port module with no clock, not merely untested. The
+gaps are named in [the reader notes](readers/thingmagic-m7e-pico.md#why-this-cannot-become-supported),
+where the module sits as *experimental — under evaluation*.
+
+---
+
+### Milestone 3b — One networked LLRP reader
+
+**Gated on having the hardware**, on [Q9b](open-questions.md#q9b-first-llrp-reader-model),
+which is exactly as open as Q9 was. Every criterion below is M3's, verbatim.
 
 - `splitforge-llrp`: connect to one specific physical reader
 - Log protocol connection lifecycle and reports
@@ -207,9 +277,15 @@ below verbatim). That split is not adopted — it needs an amendment here and an
 - A network outage cannot erase already persisted reads
 - Measure CPU, memory, write latency, and recovery behavior on the Pi
 
+This is the milestone that has to widen `RestrictAddressFamilies` to `AF_INET`, failing
+`apps/splitforge-edge/tests/unit_file.rs` until it does so deliberately — which is exactly the
+review a quietly added listener would skip.
+
 **Exit criterion:** a reader runs for several hours while every read is preserved through
 deliberately induced network failures and service restarts, and the count of reads the
 reader believes it sent matches the count in the journal.
+
+**Milestone 5 depends on this milestone, not on M3a.**
 
 ---
 
@@ -595,7 +671,7 @@ open that file is a fully trusted operator, which is exactly the trust SSH acces
 implies.
 
 What health deliberately does **not** report is whether a reader is connected. There is no
-field for it, because there is no reader until Milestone 3 and a field that always said
+field for it, because there is no reader until Milestone 3a and a field that always said
 `false` would be read as an outage. That is also the reason this endpoint exists at all
 rather than being folded into `splitforge status`: reader connection state will live in the
 running process and in no file, so no one-shot command will ever be able to see it.
@@ -641,8 +717,12 @@ binary's own `--help` output rather than against constants restated in the test:
   nothing for the rest of the event.
 - **`RestrictAddressFamilies=AF_UNIX`.** [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)
   enforced by the kernel rather than by review, including against a dependency, which no
-  source-reading test can see. Milestone 3 needs `AF_INET` and will have to add it
-  deliberately, failing that test until it does.
+  source-reading test can see. **M3b** needs `AF_INET` and will have to add it deliberately,
+  failing that test until it does. M3a does not: a serial adapter opens a file, not a socket,
+  so of the two adapters the one arriving first is the *less* privileged
+  ([ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md)). What M3a widens instead is
+  `PrivateDevices`, which as it stands gives the service a private `/dev` that
+  `/dev/ttyUSB0` is not in.
 
 **Observed**, wall-clock step detection — the one part of clock discipline that needs no
 hardware and no unanswered question. The service was run under `libfaketime` with
@@ -687,7 +767,7 @@ in the new code had lost its line-continuation backslash, so health and `doctor`
 `"the largest by                          3600000 ms"`. Neither is visible in a passing test
 suite; both are obvious the moment a real command prints a real string.
 
-### Still open — and every item of it needs hardware
+### Still open — and nearly every item of it needs hardware
 
 **Work:**
 
@@ -697,11 +777,16 @@ suite; both are obvious the moment a real command prints a real string.
   half that cannot be written honestly from a desk.
 - **The hardware half of clock discipline** — the DS3231 RTC, GPS/PPS, the Pi as a LAN NTP
   server, per-reader offset and skew into `clock_samples`, and clock state as a blocking
-  pre-race check. That last one is not hardware-free the way it looks: nothing in the
-  codebase determines `DeviceClockState` today, determining it needs syscalls this
-  workspace's `unsafe_code = "deny"` rules out reaching for directly, and *which* states
-  should block a start is [Q11](open-questions.md#q11-clock-error-budget-enforcement), which
-  has no answer. Building it now would mean silently choosing one.
+  pre-race check. *Half of that last one has since come unstuck.* Determining
+  `DeviceClockState` was listed here as needing syscalls this workspace's
+  `unsafe_code = "deny"` rules out reaching for directly — but the unit file already points
+  at the way around it: *"the service reads the clock and never sets it."* So read the
+  daemon rather than the syscall. `chronyc -c tracking` emits parseable CSV that maps onto
+  the five states, needs no `unsafe`, and is testable against fixture output. What stays
+  gated is making it **blocking**, because *which* states should refuse a start is
+  [Q11](open-questions.md#q11-clock-error-budget-enforcement) and Q11 has no answer.
+  Determining and reporting the state is hardware-free; on a desk it honestly reports
+  `Unsynced` or `Rtc`, and only Phase 1's GPS/PPS makes `GpsLocked` reachable at all.
 
 **Measurements nothing here has taken**, because they are properties of real flash and real
 power rather than of code: whether an SD card honors `fsync` at all, what the second sync per
@@ -709,9 +794,17 @@ reader report ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)) costs on it,
 to a write in flight when the power goes, and what a full day's journal actually weighs — the
 256 MiB default floor is a judgement against the 5K fixture, not a measurement.
 
+**None of those four need LLRP** — only a real stream of real reads into a real Pi, which is
+why [M3a](#milestone-3a--one-serial-reader) can retire them while M5's exit criterion goes on
+waiting for M3b ([ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md)).
+
 **Exit criterion:** a full-length event is timed on real hardware while an observer
 randomly pulls power, unplugs Ethernet, and restarts the service — and no acknowledged
 read is missing from the journal afterward.
+
+Unchanged by the M3 split, and it **depends on M3b**. "Unplugs Ethernet" is not incidental
+phrasing: a serial module has no Ethernet to unplug, so M3a cannot produce this observation
+no matter how well it goes.
 
 ---
 
