@@ -40,6 +40,7 @@ mod policy;
 mod ports;
 mod read;
 mod result;
+mod timesource;
 
 pub use clock::{ClockStep, SAMPLE_INTERVAL_MS, STEP_THRESHOLD_MS, StoredClockStep};
 pub use derived::{
@@ -64,4 +65,7 @@ pub use read::{DeviceClockState, FallbackReason, RawRead, StoredRawRead, Timesta
 pub use result::{
     ResultEntry, ResultFlag, ResultRevision, ResultStatus, RevisionStatus, ScoringPolicy,
     StartMode, StatusDeclaration, StatusSource,
+};
+pub use timesource::{
+    ClockTracking, LeapStatus, TRACKING_FIELDS, TrackingError, parse_chrony_tracking,
 };

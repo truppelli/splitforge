@@ -10,6 +10,7 @@ use splitforge_engine::{DerivationInput, derive};
 use splitforge_storage::{ConfigStore, DiskSpace, RecoveryReport, SqliteJournal};
 
 use crate::cli::{ExportFormat, Format};
+use crate::clock_source;
 use crate::report::{DoctorReport, Finding, RawReadView};
 
 /// Streams raw reads, optionally following the journal as it grows.
@@ -495,12 +496,24 @@ pub(crate) fn doctor(
         ));
     }
 
+    // What the device's clock is following *right now*, as distinct from `clock.device`
+    // above, which reports reads already taken under a bad one. This is the question an
+    // operator can still act on: the reads have happened, the next hour's have not.
+    //
+    // It warns and blocks nothing. Which states should refuse a race start is
+    // Q11 (docs/open-questions.md), which has no answer, and choosing one here would be
+    // answering it silently.
+    checks_run += 1;
+    let clock_reading = clock_source::read_tracking();
+    findings.extend(clock_source::findings_for(&clock_reading));
+
     let errors = findings.iter().filter(|f| f.severity == "error").count();
     let warnings = findings.len() - errors;
 
     Ok(DoctorReport {
         database: database.display().to_string(),
         schema_version: store.schema_version()?,
+        clock_source: clock_source::ClockSourceView::of(&clock_reading),
         checks_run,
         errors,
         warnings,

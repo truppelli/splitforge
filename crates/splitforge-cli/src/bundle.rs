@@ -61,6 +61,7 @@ use splitforge_storage::{ConfigStore, DiskSpace, ResultStore, SidecarStatus, Sql
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::clock_source::ClockSourceView;
 use crate::report::{DoctorReport, Finding};
 
 /// Identifies the shape of the file to whatever reads it.
@@ -109,6 +110,11 @@ const DETAIL_IS_SAFE_TO_SHARE: &[&str] = &[
     // Counts and millisecond magnitudes. A step is a property of the device's clock, and
     // the message names no race, no participant, and no path.
     "clock.steps",
+    // Two compile-time constants with no interpolation at all — nothing from the database,
+    // nothing from `chronyc`'s output, nothing from the filesystem. The check reports which
+    // *kind* of time source a device was following, which is the first thing that explains
+    // a set of times that all look shifted.
+    "clock.source",
 ];
 
 /// Hashes identifiers with a salt that lives only as long as one bundle.
@@ -274,6 +280,60 @@ pub struct DeviceSection {
     pub manual_entries: u64,
     /// The largest of them by magnitude, keeping its sign. Negative went backwards.
     pub largest_clock_step_ms: Option<i64>,
+    /// What the device's time source was when the bundle was taken.
+    pub clock_source: BundledClockSource,
+}
+
+/// The device's time source, with everything that could name a network stripped out.
+///
+/// `clock_steps` above says the clock *moved*; this says what it was following, which is the
+/// other half of the same question. A set of finish times that are all wrong by the same
+/// amount is explained by this field and by almost nothing else, so a bundle that omitted it
+/// would send a maintainer looking at the journal for a fault that is not in the journal.
+///
+/// Two things `doctor` shows on the device are deliberately **not** here:
+///
+/// - **The reference's name.** `chronyc` prints an address for a network source, so on a
+///   race-day LAN that field is an internal IP. [`Self::reference_kind`] carries the part
+///   that diagnoses anything — local clock or network peer — and the address stays home.
+/// - **The text of a failure.** When `chronyc` cannot be read the device shows what it
+///   said; a bundle records only [`Self::measurement`], which is one of four fixed tokens.
+///   That is the same "withheld, not filtered" rule this module applies to operator prose,
+///   applied to program output for the same reason: nobody can promise what is in it.
+#[derive(Debug, Serialize)]
+pub struct BundledClockSource {
+    /// Which kind of answer `doctor` got: `measured`, `no_daemon_tool`,
+    /// `daemon_unreachable`, or `unreadable`.
+    pub measurement: &'static str,
+    /// The determined state, or `null` when nothing could be measured.
+    pub state: Option<String>,
+    /// `local` or `network`. Absent when there was no reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_kind: Option<&'static str>,
+    /// Distance from a reference clock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stratum: Option<u8>,
+    /// Long-term RMS offset in milliseconds, against the ±0.1 s budget in
+    /// `docs/clock-and-time-discipline.md`. The honest accuracy figure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rms_offset_ms: Option<f64>,
+    /// Whether a leap second was pending, which Q12 asks about and nothing else records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leap_pending: Option<bool>,
+}
+
+impl BundledClockSource {
+    /// Takes the shareable half of what `doctor` determined.
+    fn of(view: &ClockSourceView) -> Self {
+        Self {
+            measurement: view.measurement,
+            state: view.state.clone(),
+            reference_kind: view.reference_kind,
+            stratum: view.stratum,
+            rms_offset_ms: view.rms_offset_ms,
+            leap_pending: view.leap_pending,
+        }
+    }
 }
 
 /// What the journal holds, counted rather than listed.
@@ -533,7 +593,7 @@ pub(crate) fn build(
         tool_version: env!("CARGO_PKG_VERSION"),
         generated_at: OffsetDateTime::now_utc(),
         privacy: PrivacyNote::new(),
-        device: device_section(database, store, journal)?,
+        device: device_section(database, store, journal, &report.clock_source)?,
         doctor: BundledDoctor {
             checks_run: report.checks_run,
             errors: report.errors,
@@ -568,6 +628,7 @@ fn device_section(
     database: &Path,
     store: &ConfigStore,
     journal: &SqliteJournal,
+    clock_source: &ClockSourceView,
 ) -> Result<DeviceSection> {
     let floor = store.min_free_bytes().context("reading the floor")?;
     let measured = splitforge_storage::disk_space(database);
@@ -595,6 +656,7 @@ fn device_section(
         largest_clock_step_ms: journal
             .largest_clock_step_ms()
             .context("reading the largest clock step")?,
+        clock_source: BundledClockSource::of(clock_source),
     })
 }
 
