@@ -299,6 +299,15 @@ criteria — a reader clock to measure offset and skew against, and per-antenna 
 gaps are named in [the reader notes](readers/thingmagic-m7e-pico.md#why-this-cannot-become-supported),
 where the module sits as *experimental — under evaluation*.
 
+**One of those two is now in doubt, in the direction of being closable.** Answering the
+pre-order questions turned up vendor documentation that the *carrier board* — as opposed to
+the module — carries four switched U.FL antenna ports, which would make per-antenna identity
+reachable on one module and that criterion not structural at all. Nothing above is rewritten
+on the strength of a distributor's forum post, and it would still be a time-shared radio
+rather than two live antennas; the case is laid out in
+[the reader notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above).
+**The reader-clock criterion is untouched** — there is no clock, and no wiring changes that.
+
 ---
 
 ### Milestone 3b — One networked LLRP reader
