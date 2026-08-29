@@ -16,13 +16,16 @@
 //! a test file would test the copy.
 
 use splitforge_thingmagic::{
-    Decoded, EncodeError, FrameError, MAX_DATA_LEN, MAX_FRAME_LEN, RESPONSE_HEADER_LEN, Response,
-    SOH, crc16, decode, encode_command, resynchronize,
+    Decoded, EncodeError, FrameError, MAX_COMMAND_DATA_LEN, MAX_FRAME_LEN, MAX_RESPONSE_DATA_LEN,
+    RESPONSE_HEADER_LEN, Response, SOH, crc16, decode, encode_command, resynchronize,
 };
 
 /// Builds a well-formed response frame.
 fn response(opcode: u8, status: u16, data: &[u8]) -> Vec<u8> {
-    assert!(data.len() <= MAX_DATA_LEN, "test frame is over-long");
+    assert!(
+        data.len() <= MAX_RESPONSE_DATA_LEN,
+        "test frame is over-long"
+    );
 
     let mut frame = Vec::with_capacity(RESPONSE_HEADER_LEN + data.len() + 2);
     frame.push(SOH);
@@ -75,8 +78,8 @@ fn a_non_zero_status_is_reported_rather_than_refused() {
 
 #[test]
 fn every_payload_length_the_protocol_allows_round_trips() {
-    // 256 cases, which is all of them: `len` is one byte.
-    for length in 0..=MAX_DATA_LEN {
+    // 249 cases, which is all of them: user guide § 7.2 caps a response's data at 248.
+    for length in 0..=MAX_RESPONSE_DATA_LEN {
         let data: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
         let bytes = response(0x29, 0x0000, &data);
         let (response, consumed) = expect_frame(&bytes);
@@ -88,11 +91,11 @@ fn every_payload_length_the_protocol_allows_round_trips() {
 
 #[test]
 fn the_largest_possible_frame_fits_the_advertised_ceiling() {
-    let bytes = response(0x00, 0x0000, &[0xAA; MAX_DATA_LEN]);
+    let bytes = response(0x00, 0x0000, &[0xAA; MAX_RESPONSE_DATA_LEN]);
     assert_eq!(bytes.len(), MAX_FRAME_LEN);
 
     let (response, consumed) = expect_frame(&bytes);
-    assert_eq!(response.data.len(), MAX_DATA_LEN);
+    assert_eq!(response.data.len(), MAX_RESPONSE_DATA_LEN);
     assert_eq!(consumed, MAX_FRAME_LEN);
 }
 
@@ -147,11 +150,45 @@ fn a_lone_start_byte_asks_for_the_length_byte() {
 
 #[test]
 fn a_frame_announcing_more_than_arrived_names_the_full_size() {
-    // The length byte says 255 data bytes; only the header is here.
-    let partial = [SOH, 0xFF, 0x22, 0x00, 0x00];
+    // The length byte declares the largest payload a response may legally carry; only the
+    // header is here. That is the biggest frame that can still be honestly incomplete.
+    let partial = [SOH, MAX_RESPONSE_DATA_LEN as u8, 0x22, 0x00, 0x00];
     match decode(&partial) {
         Ok(Decoded::Incomplete { need_at_least }) => assert_eq!(need_at_least, MAX_FRAME_LEN),
         other => panic!("expected the full frame size, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_response_declaring_more_than_the_protocol_allows_is_rejected_rather_than_awaited() {
+    // The seven length bytes a one-byte field can hold but § 7.2 forbids. Each is a frame
+    // that can never be completed, so reporting `Incomplete` would park the reader waiting
+    // for bytes that cannot come while the stream stays desynchronized. The right answer is
+    // to reject now, so the caller resynchronizes on the next 0xFF.
+    for declared in (MAX_RESPONSE_DATA_LEN + 1)..=(u8::MAX as usize) {
+        let partial = [SOH, declared as u8, 0x22, 0x00, 0x00];
+        match decode(&partial) {
+            Err(FrameError::DataTooLong { declared: reported }) => {
+                assert_eq!(reported, declared, "length byte {declared}");
+            }
+            other => panic!("length byte {declared} should be refused, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_full_buffer_declaring_an_illegal_length_is_still_refused() {
+    // Not only a short-buffer path: even with every byte the frame claims to need present,
+    // and a CRC computed over them, the declared length is not one a response may use.
+    let mut frame = vec![SOH, 0xFF, 0x22, 0x00, 0x00];
+    frame.extend(std::iter::repeat_n(0xAA, u8::MAX as usize));
+    let crc = crc16(&frame[1..]);
+    frame.push((crc >> 8) as u8);
+    frame.push((crc & 0xFF) as u8);
+
+    match decode(&frame) {
+        Err(FrameError::DataTooLong { declared }) => assert_eq!(declared, u8::MAX as usize),
+        other => panic!("a valid CRC must not rescue an illegal length, got {other:?}"),
     }
 }
 
@@ -226,7 +263,10 @@ fn corrupting_the_length_byte_never_yields_the_original_frame() {
     let (expected, _) = expect_frame(&original);
     let expected_data = expected.data.to_vec();
 
-    for length in 0..=MAX_DATA_LEN {
+    // Every value a byte can hold, not only the legal ones — a corrupted length byte is
+    // not obliged to land inside the protocol's range, and the values above it are exactly
+    // where `DataTooLong` now answers instead of `Incomplete`.
+    for length in 0..=(u8::MAX as usize) {
         if length == 6 {
             continue;
         }
@@ -387,13 +427,17 @@ fn an_empty_command_is_valid() {
 }
 
 #[test]
-fn a_command_longer_than_the_length_field_is_refused() {
+fn a_command_longer_than_the_protocol_allows_is_refused() {
+    // 251 bytes fits the length field and does not fit § 7.1, which is the whole point:
+    // the limit is the documented one, not the one the field could express.
     let mut buffer = [0_u8; 1024];
-    let oversized = [0_u8; MAX_DATA_LEN + 1];
+    let oversized = [0_u8; MAX_COMMAND_DATA_LEN + 1];
 
     match encode_command(0x03, &oversized, &mut buffer) {
-        Err(EncodeError::DataTooLong { requested }) => assert_eq!(requested, MAX_DATA_LEN + 1),
-        other => panic!("expected the length field to be the limit, got {other:?}"),
+        Err(EncodeError::DataTooLong { requested }) => {
+            assert_eq!(requested, MAX_COMMAND_DATA_LEN + 1);
+        }
+        other => panic!("expected the documented cap to be the limit, got {other:?}"),
     }
 }
 
@@ -412,9 +456,25 @@ fn a_buffer_too_small_for_the_frame_is_refused_rather_than_truncated() {
 #[test]
 fn the_advertised_ceiling_is_large_enough_for_any_command() {
     let mut buffer = [0_u8; MAX_FRAME_LEN];
-    let frame = encode_command(0x03, &[0xAB; MAX_DATA_LEN], &mut buffer)
+    let frame = encode_command(0x03, &[0xAB; MAX_COMMAND_DATA_LEN], &mut buffer)
         .expect("MAX_FRAME_LEN should fit the largest command");
     assert!(frame.len() <= MAX_FRAME_LEN);
+}
+
+#[test]
+fn both_directions_reach_the_same_ceiling_on_the_wire() {
+    // A command carries two more data bytes than a response and spends two fewer on a
+    // status word, so the largest legal frame in either direction is the same 255 bytes.
+    // That is what lets one buffer size serve both, and the crate asserts it at compile
+    // time; this checks the encoder and the frame builder actually produce it.
+    let mut buffer = [0_u8; MAX_FRAME_LEN];
+    let command = encode_command(0x03, &[0xAB; MAX_COMMAND_DATA_LEN], &mut buffer)
+        .expect("the largest legal command must encode");
+    let response = response(0x03, 0x0000, &[0xAB; MAX_RESPONSE_DATA_LEN]);
+
+    assert_eq!(command.len(), MAX_FRAME_LEN);
+    assert_eq!(response.len(), MAX_FRAME_LEN);
+    assert_eq!(MAX_FRAME_LEN, 255);
 }
 
 // --- The blunt instrument --------------------------------------------------------------

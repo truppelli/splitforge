@@ -274,7 +274,11 @@ which feed the parser input that is deliberately wrong. Three carry the claim:
 Two properties fell out of the wire format rather than being designed in, and both are worth
 writing down because they retire risks the plan had listed. The length field is one byte, so
 **a frame claiming 64 KB of payload is unrepresentable** — that attack is not mitigated, it
-cannot be expressed, and `MAX_FRAME_LEN` is 262 bytes as a fact about the protocol. And the
+cannot be expressed. The ceiling that follows was initially read off the field's width as 262
+bytes; the user guide turned out to cap data at 250 for a command and 248 for a response, so
+`MAX_FRAME_LEN` is **255** and both directions reach it exactly
+([vendor-documents.md](readers/vendor-documents.md#2-max_data_len-was-wider-than-the-protocol--since-fixed)).
+And the
 decoder **allocates nothing**: the payload borrows from the caller's buffer, which a test
 checks by pointer rather than asserting in prose.
 

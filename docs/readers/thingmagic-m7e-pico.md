@@ -180,9 +180,9 @@ repository: the user guide's § 1 forbids reproduction without written authoriza
 repository is public.
 
 Retrieving them settled two of the open items above and put a third in a different light — the
-CRC coverage assumption is confirmed exactly, `MAX_DATA_LEN` turns out to be wider than the
-protocol allows, and § 8.7 answers the antenna-port question from the user guide rather than
-from a forum. All three are written up in
+CRC coverage assumption is confirmed exactly, `MAX_DATA_LEN` turned out to be wider than the
+protocol allows and has since been corrected, and § 8.7 answers the antenna-port question from
+the user guide rather than from a forum. All three are written up in
 [vendor-documents.md](vendor-documents.md#what-retrieving-these-already-settled); none is acted
 on there.
 

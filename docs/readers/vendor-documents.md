@@ -124,8 +124,9 @@ throughout.
 
 ## What retrieving these already settled
 
-Three things, none of which needed the module. Each is recorded here rather than acted on,
-because each belongs to a different file and a different review.
+Three things, none of which needed the module. Each was recorded here first, because each
+belongs to a different file and a different review; the second has since been fixed, and the
+other two are still open.
 
 ### 1. The CRC assumption is confirmed, exactly
 
@@ -138,26 +139,30 @@ or seed. `crc.rs` uses `POLYNOMIAL = 0x1021` and `INIT = 0xFFFF`, anchored on
 `crc16(b"123456789") == 0x29B1` — CRC-16/CCITT-FALSE. The user guide neither confirms nor
 contradicts that choice, so it stays an assumption pending a capture.
 
-### 2. `MAX_DATA_LEN` is wider than the protocol
+### 2. `MAX_DATA_LEN` was wider than the protocol — since fixed
 
-`frame.rs` assumption 1 — that `len` is one byte — is confirmed. The bound derived from it is
+`frame.rs` assumption 1 — that `len` is one byte — is confirmed. The bound derived from it was
 not:
 
-| | Crate | User Guide |
+| | Crate, as written | User Guide |
 |---|---|---|
 | Command data | 255 (`u8::MAX`) | **0 to 250 bytes** (§ 7.1) |
 | Response data | 255 (`u8::MAX`) | **0 to 248 bytes** (§ 7.2) |
 | Largest frame | `MAX_FRAME_LEN` = 262 | **255** either direction — 3+250+2 and 5+248+2 |
 
-Both directions cap at 255 total, which reads like the protocol's actual design intent rather
-than a coincidence. The crate accepts frames the module cannot legally send, and the docstring
-claim that *"`MAX_FRAME_LEN` is 262 bytes and that is a property of the protocol"* is not
-accurate — 262 is a property of assuming the length byte is unconstrained.
+Both directions cap at 255 total, which reads like the protocol's design intent rather than a
+coincidence. The crate accepted frames the module cannot legally send, and the docstring claim
+that *"`MAX_FRAME_LEN` is 262 bytes and that is a property of the protocol"* described an
+assumption rather than the protocol.
 
-Not merely cosmetic: on a desynchronized stream, a length byte of 254 in a response currently
-makes `decode` return `Incomplete` and wait for 261 bytes that will never form a valid frame,
-where the documented bound identifies it as malformed and resynchronizes. The CRC catches it
-either way; the difference is how long the stream stays desynchronized.
+Not merely cosmetic: on a desynchronized stream, a length byte of 254 in a response made
+`decode` return `Incomplete` and wait for 261 bytes that could never form a valid frame, where
+the documented bound identifies it as malformed and resynchronizes. The CRC catches it either
+way; the difference is how long the stream stays desynchronized.
+
+**Fixed.** `MAX_DATA_LEN` became `MAX_COMMAND_DATA_LEN` (250) and `MAX_RESPONSE_DATA_LEN`
+(248), `MAX_FRAME_LEN` is 255 with the two directions' agreement asserted at compile time, and
+an over-long length byte is now `FrameError::DataTooLong` rather than a wait.
 
 ### 3. Antenna identity is not structurally unreachable
 

@@ -57,6 +57,7 @@ pub mod frame;
 
 pub use crc::crc16;
 pub use frame::{
-    COMMAND_HEADER_LEN, CRC_LEN, Decoded, EncodeError, FrameError, MAX_DATA_LEN, MAX_FRAME_LEN,
-    RESPONSE_HEADER_LEN, Response, SOH, decode, encode_command, resynchronize,
+    COMMAND_HEADER_LEN, CRC_LEN, Decoded, EncodeError, FrameError, MAX_COMMAND_DATA_LEN,
+    MAX_FRAME_LEN, MAX_RESPONSE_DATA_LEN, RESPONSE_HEADER_LEN, Response, SOH, decode,
+    encode_command, resynchronize,
 };
