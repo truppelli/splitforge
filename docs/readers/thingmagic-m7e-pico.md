@@ -172,10 +172,19 @@ that.
 and the user-guide PDFs under `jadaktech.com/wp-content/uploads/…` return 404. The module
 specification sheet survives on DigiKey's CDN, which is why it carries the load above.
 
-This is worth writing down rather than working around: the protocol assumptions in
-`crates/splitforge-thingmagic/` were taken from documentation that is no longer where it was
-found, so **a copy of the user guide should be obtained and archived before the module is
-ordered** — not after, when it is the only thing standing between a box and a working adapter.
+**Both documents have since been located** on DigiKey's CDN, including the user guide the
+protocol assumptions came from — `875-0093-01 Rev 2.3`, which `jadaktech.com` no longer
+serves. Their URLs, retrieval dates, SHA-256 hashes, and every statement the codec depends on
+are recorded in [vendor-documents.md](vendor-documents.md). The PDFs themselves are not in the
+repository: the user guide's § 1 forbids reproduction without written authorization, and this
+repository is public.
+
+Retrieving them settled two of the open items above and put a third in a different light — the
+CRC coverage assumption is confirmed exactly, `MAX_DATA_LEN` turns out to be wider than the
+protocol allows, and § 8.7 answers the antenna-port question from the user guide rather than
+from a forum. All three are written up in
+[vendor-documents.md](vendor-documents.md#what-retrieving-these-already-settled); none is acted
+on there.
 
 ### Still unknown, and only answerable with hardware in hand
 
