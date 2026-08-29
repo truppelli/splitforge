@@ -28,20 +28,29 @@
 //! Both integers are big-endian. `len` counts **data bytes only** — not the header, not
 //! the status word, not the CRC.
 //!
-//! # Two assumptions, stated rather than buried
+//! # Two assumptions, now checked against the user guide
 //!
-//! Neither has been checked against a physical module, because nobody has one
-//! ([the reader notes](../../../docs/readers/thingmagic-m7e-pico.md)). Both are one-line
-//! changes if a capture disagrees, and both are written down here so that the person
-//! holding the capture knows where to look.
+//! Both were written down before anybody could open the document. Both have since been
+//! checked against `875-0093-01 Rev 2.3`, located and quoted in
+//! [vendor-documents.md](../../../docs/readers/vendor-documents.md). Neither has been
+//! checked against a physical module, because nobody has one
+//! ([the reader notes](../../../docs/readers/thingmagic-m7e-pico.md)).
 //!
-//! 1. **`len` is one byte.** This is load-bearing in a good way: it means a frame can
-//!    never claim more than 255 data bytes, so the "hostile reader announces a 64 KB
-//!    payload" attack is not mitigated here — it is unrepresentable. [`MAX_FRAME_LEN`] is
-//!    262 bytes and that is a property of the protocol, not a limit this crate imposes.
-//! 2. **The CRC covers `len`, `opcode`, `status`, and `data`** — everything between the
-//!    `0xFF` and the CRC itself, excluding both. If the module disagrees, it disagrees
+//! 1. **`len` is one byte** — confirmed, § 7.1 and § 7.2. What was wrong was the bound
+//!    derived from it. A byte holds 255, but a command's data is capped at 250 and a
+//!    response's at 248, so [`MAX_FRAME_LEN`] is **255**, not 262, and both directions
+//!    reach it exactly. The "hostile reader announces a 64 KB payload" attack is still
+//!    unrepresentable rather than mitigated — and a length byte above
+//!    [`MAX_RESPONSE_DATA_LEN`] is now [`FrameError::DataTooLong`] instead of a wait for
+//!    bytes that cannot arrive.
+//! 2. **The CRC covers `len`, `opcode`, `status`, and `data`** — confirmed exactly, § 7.3:
+//!    *"The CRC is calculated on the Data Length, Command, Status Word, and Data bytes.
+//!    The header is not included in the CRC."* If a capture ever disagrees, it disagrees
 //!    here and only here: see [`crc_covered_range`].
+//!
+//! What the guide does **not** settle is the CRC variant. § 7.3 names only "CCITT CRC-16"
+//! and gives no polynomial or seed, so [`crate::crc`]'s `0x1021`/`0xFFFF` remains an
+//! assumption pending a capture.
 //!
 //! # What this module promises
 //!
@@ -70,14 +79,28 @@ pub const COMMAND_HEADER_LEN: usize = 3;
 /// The trailing CRC, in bytes.
 pub const CRC_LEN: usize = 2;
 
-/// The most data any frame can carry, because `len` is a single byte.
-pub const MAX_DATA_LEN: usize = u8::MAX as usize;
+/// The most data a **command** may carry, from user guide § 7.1: `0 to 250 bytes`.
+pub const MAX_COMMAND_DATA_LEN: usize = 250;
 
-/// The largest frame this protocol can express, in bytes.
+/// The most data a **response** may carry, from user guide § 7.2: `0 to 248 bytes`.
+///
+/// Lower than [`MAX_COMMAND_DATA_LEN`] by exactly the two bytes a response spends on its
+/// status word, which is what makes both directions come out the same size on the wire.
+pub const MAX_RESPONSE_DATA_LEN: usize = 248;
+
+/// The largest frame this protocol can express, in bytes: **255**.
 ///
 /// A ceiling that comes from the wire format rather than from a policy decision, which is
 /// why a caller can size a fixed buffer to it and be finished with the question.
-pub const MAX_FRAME_LEN: usize = RESPONSE_HEADER_LEN + MAX_DATA_LEN + CRC_LEN;
+pub const MAX_FRAME_LEN: usize = RESPONSE_HEADER_LEN + MAX_RESPONSE_DATA_LEN + CRC_LEN;
+
+// Both directions reach exactly the same ceiling. That reads like the protocol's design
+// intent rather than a coincidence — a whole frame fits in 255 bytes either way — and
+// stating it as a compile-time check means a future edit to any one of these five
+// constants cannot quietly break the symmetry that lets one buffer size serve both.
+const _: () = assert!(COMMAND_HEADER_LEN + MAX_COMMAND_DATA_LEN + CRC_LEN == MAX_FRAME_LEN);
+const _: () = assert!(RESPONSE_HEADER_LEN + MAX_RESPONSE_DATA_LEN + CRC_LEN == MAX_FRAME_LEN);
+const _: () = assert!(MAX_FRAME_LEN == 255);
 
 /// One verified response, borrowing its payload from the buffer it was decoded out of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,8 +148,8 @@ pub enum Decoded<'a> {
 
 /// Why a buffer could not be decoded.
 ///
-/// Both variants mean *this buffer is not a frame*, which is recoverable: the caller
-/// resynchronizes and carries on. Neither means the process should stop, because a timer
+/// Every variant means *this buffer is not a frame*, which is recoverable: the caller
+/// resynchronizes and carries on. None means the process should stop, because a timer
 /// that exits on a corrupt frame has turned a glitch into an outage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
@@ -150,13 +173,28 @@ pub enum FrameError {
         /// What its covered bytes actually compute to.
         computed: u16,
     },
+    /// The length byte declares more data than a response is allowed to carry.
+    ///
+    /// A one-byte field can hold 255, but user guide § 7.2 caps a response's data at
+    /// [`MAX_RESPONSE_DATA_LEN`], so anything above that is not a short frame — it is not
+    /// a frame at all, and waiting for the rest of it would be waiting for bytes that
+    /// cannot arrive in a valid one.
+    #[error(
+        "a response may declare at most {MAX_RESPONSE_DATA_LEN} data bytes, not {declared}"
+    )]
+    DataTooLong {
+        /// What the length byte said.
+        declared: usize,
+    },
 }
 
 /// Why a command could not be encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EncodeError {
     /// More payload than the one-byte length field can describe.
-    #[error("a command carries at most {MAX_DATA_LEN} data bytes; {requested} were supplied")]
+    #[error(
+        "a command carries at most {MAX_COMMAND_DATA_LEN} data bytes; {requested} were supplied"
+    )]
     DataTooLong {
         /// How many bytes the caller offered.
         requested: usize,
@@ -213,7 +251,16 @@ pub fn decode(input: &[u8]) -> Result<Decoded<'_>, FrameError> {
     };
     let data_len = data_len as usize;
 
-    // Cannot overflow: data_len is at most 255 and the constants are single digits.
+    // Before treating a short buffer as incomplete, check that the length is one a
+    // response may legally declare. Skipping this is not merely permissive: a desynchronized
+    // stream whose length byte happens to read 254 would otherwise sit in `Incomplete`
+    // waiting for 261 bytes that can never form a valid frame, when the right answer is to
+    // reject it now and resynchronize.
+    if data_len > MAX_RESPONSE_DATA_LEN {
+        return Err(FrameError::DataTooLong { declared: data_len });
+    }
+
+    // Cannot overflow: data_len is bounded above and the constants are single digits.
     let frame_len = RESPONSE_HEADER_LEN + data_len + CRC_LEN;
     if input.len() < frame_len {
         return Ok(Decoded::Incomplete {
@@ -266,14 +313,14 @@ pub fn resynchronize(input: &[u8]) -> Option<usize> {
 ///
 /// # Errors
 ///
-/// [`EncodeError::DataTooLong`] if `data` exceeds [`MAX_DATA_LEN`], and
+/// [`EncodeError::DataTooLong`] if `data` exceeds [`MAX_COMMAND_DATA_LEN`], and
 /// [`EncodeError::BufferTooSmall`] if `out` cannot hold the finished frame.
 pub fn encode_command<'a>(
     opcode: u8,
     data: &[u8],
     out: &'a mut [u8],
 ) -> Result<&'a [u8], EncodeError> {
-    if data.len() > MAX_DATA_LEN {
+    if data.len() > MAX_COMMAND_DATA_LEN {
         return Err(EncodeError::DataTooLong {
             requested: data.len(),
         });
@@ -288,7 +335,7 @@ pub fn encode_command<'a>(
     }
 
     out[0] = SOH;
-    // Narrowing is checked above: data.len() <= MAX_DATA_LEN == u8::MAX.
+    // Narrowing is checked above: data.len() <= MAX_COMMAND_DATA_LEN, which is 250.
     out[1] = data.len() as u8;
     out[2] = opcode;
     out[COMMAND_HEADER_LEN..COMMAND_HEADER_LEN + data.len()].copy_from_slice(data);
