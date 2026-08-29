@@ -113,17 +113,71 @@ because they were never LLRP-specific:
 
 ## Known unknowns
 
-Four of these can turn a purchase into a box that cannot be used on arrival, and all four are
-answerable before ordering:
+### The four pre-order questions — answered from documentation
 
-| # | Question | Why it bites |
-|---|---|---|
-| 1 | What RF connector is on the carrier board — U.FL, MMCX, or SMA? | Determines the coax and whether a pigtail is needed. A CB-radio RG8X jumper terminates in PL-259, which is neither constant-impedance nor appropriate at 915 MHz and matches nothing here |
-| 2 | Does the carrier board ship with a power supply? | The developer kit lists a 9 V supply; the board sold alone may not |
-| 3 | What is the USB connector — micro-B, USB-C, or a bare header needing a USB-UART bridge? | A bare header is a second part nobody budgeted |
-| 4 | Is the unit factory-set to the NA/FCC region, or must the region be commanded at boot? | Changes the adapter's startup sequence, and it is the compliance story rather than a detail |
+All four were answerable before ordering, and all four have now been asked. **None of this is
+observed**; it is vendor documentation and distributor listings, which is exactly the standard
+the rest of this page holds itself to. Confidence is stated per row because it genuinely
+differs, and two of the four changed the bill of materials.
 
-Beyond those, and only answerable with hardware in hand:
+| # | Question | Answer | Confidence |
+|---|---|---|---|
+| 1 | RF connector on the carrier board | **U.FL (I-PEX compatible)** — and there are **four** of them, with RF switching on the board | Good — [DigiKey TechForum][q1], a moderator relaying manufacturer schematics and mechanical drawings. Not vendor-published |
+| 2 | Does the carrier board ship with a power supply? | **No.** The DEVKIT lists "Board(s), Cable(s), Power Supply, Accessories" at $741.40; the bare `M7E-PICO-CB` at $345.00 lists none | Moderate — inferred from distributor packaging fields, not a vendor statement |
+| 3 | USB connector | **There is no USB.** The module is `UART; 3.3V logic levels 9.6 to 921.6 kbps` and the carrier board brings power and control out on a 15-pin **Molex 532611571** (1.25 mm pin centers) | High for "UART only" — [module spec sheet][spec]. Good for the Molex part number — user guide |
+| 4 | Factory-set to NA/FCC? | **Neither, quite.** It is a *"Single SKU for Global Use"*, **pre-configured** for FCC (NA, SA) 902–928 MHz alongside ETSI, TRAI, KCC, ACMA, SRRC-MII, MIC and `Open` | High that the SKU is global — [module spec sheet][spec]. **Open:** whether a region selection persists across a power cycle |
+
+[q1]: https://forum.digikey.com/t/m7e-pico-cb-rf-connector-and-antenna-port-clarification/70439
+[spec]: https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/5735/M7E-PICO-Spec%20Sheet_06262023.pdf
+
+**Question 3 is the expensive one, and it is the answer nobody wanted.** The plan called a
+bare header *"a second part nobody budgeted"*, and a bare header is what it is. The $345 board
+cannot be plugged into a Pi — it needs a USB-UART bridge and a Molex 1.25 mm cable to reach it.
+That has a consequence beyond the ~$15: **the `/dev/ttyUSB0` that appears belongs to the
+bridge, not to the module.** So the udev rule below matches an FTDI or CP210x vendor and
+product ID, and two identical bridges are indistinguishable by VID/PID alone — telling them
+apart needs `ATTRS{serial}`. That is a real constraint on any two-antenna deployment, and it
+was invisible while the interface was assumed to be USB.
+
+**Question 1 confirms the coax line was wrong**, which [hardware-plan § 3](../hardware-plan.md#3-phase-0--bench-validation-500-now)
+already suspected in writing. U.FL to the antenna's connector needs a pigtail in LMR-195 or
+RG316; the RG8X/PL-259 jumper from a CB-radio supplier matches nothing on either end.
+
+**Question 4 does not close, and the open half is the half that matters.** A global SKU means
+the region is selectable rather than fixed, so the adapter must set it explicitly at startup
+rather than assume it — which is the right behavior whether or not the setting persists, and
+is the compliance story rather than a detail.
+
+### Question 1 also challenges row 5 of the checklist above
+
+The scoring above says row 5 **cannot** be closed because *"the Pico has one RF port. A second
+antenna means a second module."* The first half is true — the module's antenna connector is a
+`Single 50 Ω connection (board-edge)`. **The second half may not be.** The carrier board
+appears to carry four U.FL ports and the switching to drive them, and the module supports up to
+16 *logical* antennas through `PortSwitchGPO` on its four GPIO lines. If that holds, per-antenna
+identity is reachable on one module and row 5 is not structural at all.
+
+It is deliberately **not** rewritten above, for two reasons. The source is a forum answer rather
+than a published datasheet, and the vendor's own documentation portal is currently unreachable
+(see below). And even if it holds, only one antenna is active at a time — so two checkpoints on
+one module time-share the radio, and a runner crossing while the switch is on the other port is
+a missed read. That is a real trade-off for a finish line, not a free second antenna.
+
+**Row 4 is untouched by any of this.** There is still no reader clock, and nothing here changes
+that.
+
+### The vendor's documentation has moved
+
+`jadaktech.com/documents-downloads/…` now 302-redirects to `novanta.com/precision-medicine/`,
+and the user-guide PDFs under `jadaktech.com/wp-content/uploads/…` return 404. The module
+specification sheet survives on DigiKey's CDN, which is why it carries the load above.
+
+This is worth writing down rather than working around: the protocol assumptions in
+`crates/splitforge-thingmagic/` were taken from documentation that is no longer where it was
+found, so **a copy of the user guide should be obtained and archived before the module is
+ordered** — not after, when it is the only thing standing between a box and a working adapter.
+
+### Still unknown, and only answerable with hardware in hand
 
 - Read range and detection rate across a real lane at 24 dBm or below.
 - RSSI distribution, which is what calibrates `--selection-rule first-above-rssi:` instead of
@@ -160,6 +214,19 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="XXXX", ATTRS{idProduct}=="XXXX", \
 
 The vendor and product IDs are `XXXX` because nobody has plugged one in. That is the honest
 placeholder; filling it in with a guess would produce a rule that silently matches nothing.
+
+**And they will not be ThingMagic's.** Question 3 above settles what this device is: the
+carrier board speaks 3.3 V UART on a Molex header and has no USB at all, so the `ttyUSB`
+node belongs to whatever USB-UART bridge is wired to it — FTDI, Silicon Labs, WCH. The rule
+above will match *the bridge*, which has two consequences worth knowing before two of them
+are on one Pi:
+
+- Two identical bridges are **indistinguishable** by `idVendor`/`idProduct`. Telling them
+  apart needs `ATTRS{serial}`, and not every bridge ships with a unique one — the cheapest
+  CH340 boards frequently do not.
+- The rule identifies a *cable*, not a reader. Moving a bridge between two modules moves the
+  name with it, so `splitforge-reader` names a port and never a reader identity. Reader
+  identity stays where it already is: configuration, in the database.
 
 ## Validation plan
 

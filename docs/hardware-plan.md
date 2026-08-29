@@ -8,8 +8,10 @@
 > shipped compute platform, the radio subassembly, and Phase 2 remains a proposal.
 >
 > **No hardware has been ordered.** The four questions in
-> [§ 3](#four-questions-to-answer-before-ordering) are unanswered, and each can turn a $345
-> order into a box that cannot be used on arrival.
+> [§ 3](#four-questions-to-answer-before-ordering--asked) have now been answered from
+> documentation rather than from a device — and one of them found that the $345 board has no
+> USB port at all, so it cannot be plugged into a Pi without a bridge that was not in the
+> bill of materials.
 > Companion to [hardware-support.md](hardware-support.md) and [roadmap.md](roadmap.md).
 > The parts themselves are in [`Materials-and-Cost-Table.xlsx`](Materials-and-Cost-Table.xlsx),
 > which is the submission template rather than a file this repository designed.
@@ -67,6 +69,14 @@ Nothing has been softened.
 Six close, one is recast into something narrower and honest, and two cannot be closed at
 all on one single-port module with no clock.
 
+> **The antenna-identity row is now in question.** Answering
+> [§ 3's question 1](#four-questions-to-answer-before-ordering--asked) turned up documentation
+> that the *carrier board* carries four switched U.FL ports, which — if it holds — makes
+> per-antenna identity reachable on one module and that row not a "cannot" at all. The table
+> is left as scored until it is confirmed against something better than a distributor's forum;
+> see [the reader notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above).
+> **The clock row is unaffected** — there is still no reader clock.
+
 ### The roadmap consequence
 
 **M3 splits rather than weakens.**
@@ -93,6 +103,14 @@ A splitter halves transmit power, complicates matching, and destroys the per-ant
 identity that [timing-model.md](timing-model.md) depends on and that
 `splitforge reader map --antenna` already exposes to the operator. Two modules preserve it,
 and cost one module.
+
+**A switched carrier board is a third option, and it is not a splitter.** If the four U.FL
+ports and their RF switch are real, one module can address two antennas *sequentially* with
+full power into each and a logical antenna number on every read — which keeps the identity a
+splitter destroys. What it does not keep is simultaneity: one antenna is live at a time, so a
+runner crossing while the switch is on the other port is a read that never happens. For a
+finish line that is a worse trade than it sounds, and it is the measurement that decides
+between the two — not an argument to be settled on paper.
 
 ## 3. Phase 0 — bench validation ($500, now)
 
@@ -144,19 +162,45 @@ empirically regardless. The RTC and the tags are not trimmable: the RTC removes 
 of silent wrongness for the price of a coin cell, and without tags the reader has nothing to
 read.
 
-### Four questions to answer before ordering
+### Four questions to answer before ordering — **asked**
 
-Each can turn a $345 order into a box that cannot be used on arrival.
+Each could turn a $345 order into a box that cannot be used on arrival. All four have now been
+put to the documentation; the answers, their sources, and how far each can be trusted are in
+[the reader notes](readers/thingmagic-m7e-pico.md#the-four-pre-order-questions--answered-from-documentation).
+Two of them move money, and one moves it in a direction this plan did not anticipate.
 
-1. **What RF connector is on the carrier board** — U.FL, MMCX, or SMA? Determines the coax,
-   and whether a pigtail is needed.
-2. **Does the carrier board ship with a power supply?** The developer kit lists a 9 V supply;
-   the board sold alone may not include one. Add ~$12 if not.
-3. **What is the USB connector** — micro-B, USB-C, or a bare header needing a separate
-   USB-UART bridge?
-4. **Is the unit factory-set to the NA/FCC region,** or must the region be commanded at every
-   boot? This changes the adapter's startup sequence, and it is the compliance story rather
-   than a detail.
+1. **RF connector: U.FL (I-PEX compatible)**, four of them, with switching on the board.
+   The coax reserve becomes a U.FL-to-antenna pigtail in LMR-195 or RG316 — **the RG8X/PL-259
+   line was wrong**, as the caution above already suspected in writing.
+2. **No power supply with the bare carrier board.** The DEVKIT bundles one at $741.40; the
+   `M7E-PICO-CB` at $345.00 does not. The module wants 3.3–5.5 VDC and under 2.5 W at +24 dBm,
+   which the powered USB hub already in the BOM can supply — so this costs a cable, not $12.
+3. **There is no USB connector, because there is no USB.** The module's only control interface
+   is `UART; 3.3V logic levels`, and the carrier board brings it out on a 15-pin Molex
+   532611571. **This is the bare-header case**, and it is the one line that was called out as
+   "a second part nobody budgeted" — correctly. Add a USB-UART bridge and a Molex 1.25 mm
+   cable, ~$15 together.
+4. **Single SKU for global use**, pre-configured for FCC (NA, SA) 902–928 MHz among seven other
+   regions. So the region is *selectable*, not factory-locked — and the adapter must set it
+   explicitly at startup rather than assume it. **Still open:** whether the selection survives
+   a power cycle.
+
+**Net effect on the $500 cap: roughly neutral, and the shipping plug still is not.** Question 2
+saves the $12 that was pencilled in; question 3 spends about $15. The coax line stays the same
+size and changes what it buys. None of that touches the real problem the caution above already
+names — four shippers at $25–45 against a $15.52 plug.
+
+**One answer reaches past the budget.** If the carrier board really does carry four switched
+U.FL ports, then row 5 of the support checklist — per-antenna identity — is not the structural
+impossibility [§ 2](#milestone-3s-checklist-scored-against-both) scores it as, and this phase
+could close seven of nine rather than six. That is deliberately not rewritten anywhere yet: the
+source is a distributor's forum rather than a datasheet, and only one antenna is live at a time,
+so two checkpoints on one module time-share the radio. See
+[the reader notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above).
+
+**Before ordering, archive the user guide.** `jadaktech.com`'s documentation links now redirect
+to `novanta.com` and the PDFs 404. The frame codec in `crates/splitforge-thingmagic/` rests on
+that document, and it is no longer where it was found.
 
 ## 4. Phase 1 — field unit, and finding the real BOM ($2,000)
 
@@ -286,7 +330,7 @@ parser against captures.
       had to be added to it — otherwise the document whose entire job is being the project's
       honest state would have contradicted the ADR beside it.
 
-### Step 1 — the adapter crate *(no hardware)*
+### Step 1 — the adapter crate *(no hardware)* — **done**
 
 New crate at `crates/splitforge-thingmagic/`, permitted to depend on `splitforge-domain` and
 `splitforge-reader` and nothing else — the boundary `splitforge-llrp` already declares.
@@ -305,7 +349,7 @@ serialport = { version = "4", default-features = false }
 `gcc-aarch64-linux-gnu`, so leaving defaults on breaks the Raspberry Pi build. MPL-2.0 is
 already in `deny.toml`'s allow list, so the licence check passes unchanged.
 
-### Step 2 — framing before semantics *(no hardware)*
+### Step 2 — framing before semantics *(no hardware)* — **done**
 
 Parse the ThingMagic serial framing — `0xFF` / length / opcode / payload / CRC-16 — as a pure
 function over `&[u8]` returning `Result<Frame, FrameError>`, with no I/O near it. ADR-0004's
