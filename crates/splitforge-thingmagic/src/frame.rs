@@ -179,9 +179,7 @@ pub enum FrameError {
     /// [`MAX_RESPONSE_DATA_LEN`], so anything above that is not a short frame — it is not
     /// a frame at all, and waiting for the rest of it would be waiting for bytes that
     /// cannot arrive in a valid one.
-    #[error(
-        "a response may declare at most {MAX_RESPONSE_DATA_LEN} data bytes, not {declared}"
-    )]
+    #[error("a response may declare at most {MAX_RESPONSE_DATA_LEN} data bytes, not {declared}")]
     DataTooLong {
         /// What the length byte said.
         declared: usize,

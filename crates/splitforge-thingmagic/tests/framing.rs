@@ -22,7 +22,10 @@ use splitforge_thingmagic::{
 
 /// Builds a well-formed response frame.
 fn response(opcode: u8, status: u16, data: &[u8]) -> Vec<u8> {
-    assert!(data.len() <= MAX_RESPONSE_DATA_LEN, "test frame is over-long");
+    assert!(
+        data.len() <= MAX_RESPONSE_DATA_LEN,
+        "test frame is over-long"
+    );
 
     let mut frame = Vec::with_capacity(RESPONSE_HEADER_LEN + data.len() + 2);
     frame.push(SOH);
