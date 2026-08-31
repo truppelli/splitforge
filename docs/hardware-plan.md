@@ -369,7 +369,10 @@ inaccuracy with a real downstream effect. Do it anyway, and record the anchor:
 - Map to `ReaderTimestamp::Uptime { micros }`, and capture a session anchor
   `(received_at_utc, module_relative_us)` at every connect — exactly the anchoring
   [clock-and-time-discipline.md § 6](clock-and-time-discipline.md#6-llrp-timestamp-specifics)
-  prescribes.
+  prescribes. **Anchor at every read command, not only at every connect:** user guide § 8.8.3
+  makes the module's zero the moment the read command was issued, and says outright that reads
+  from either side of one cannot be ordered against each other. One connect can contain several
+  read commands, and each is a new epoch.
 - Document the "since read-start, not since boot" semantic in the reader notes file. That
   sentence is the difference between an anchor someone can use later and a number nobody can
   interpret.
@@ -408,6 +411,20 @@ quantity, and it is also how read-count reconciliation gets measured.
 
 Health gains reader connection state — which the edge module docs already identify as the only
 thing that *can* report it, since it lives in the process and in no file.
+
+**Three constraints on this path come from the user guide, and none of them were known when the
+ordering above was written** ([vendor-documents.md](readers/vendor-documents.md#what-the-read-path-will-depend-on-quoted)):
+
+- **There is no flow control** (§ 5.1.4.1), and the host *"must have the capability to receive up
+  to 255 bytes of data at a time without overflowing."* The read loop cannot apply backpressure;
+  if it stalls, bytes are lost in the kernel rather than queued by the module.
+- **Streaming cannot be paused, and a broken cable cannot be detected** (§ 8.8.2). The module has
+  no control lines, so it goes on streaming into a disconnected host, and the host cannot ask it
+  to stop without stopping the reading. This is what puts
+  [M3a's exit criterion in doubt](roadmap.md#milestone-3a--one-serial-reader).
+- **The alternative is polling the tag buffer** (§ 8.8.1), a FIFO of roughly 52 96-bit EPCs. It
+  bounds and counts the loss that streaming cannot, at a throughput cost nobody has measured.
+  Which of the two the adapter uses is a decision this plan does not yet make.
 
 ### Step 5 — systemd and the device node
 

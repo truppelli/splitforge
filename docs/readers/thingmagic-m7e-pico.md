@@ -65,7 +65,10 @@ something an organizer can stake an event on.
 
 - The M7e reports a **relative millisecond** timestamp within a continuous-read session.
   It is **not** microseconds since boot, and it is **not** since power-on — it is since the
-  read session started. *Verify this first;* the whole mapping below rests on it.
+  read session started. **Verified**, against user guide § 8.8.3: *"the time the tag was read,
+  relative to the time the command to read was issued, in milliseconds."* The anchor is the read
+  command, which is more specific than "session" — and carries a consequence the last bullet
+  below picks up.
 - It maps onto `ReaderTimestamp::Uptime { micros }`. That is a small, deliberate inaccuracy:
   the variant is named for uptime and this is not uptime. The alternative — inventing a
   variant, or worse, letting a relative value reach `ReaderTimestamp::Utc` — is how an uptime
@@ -75,6 +78,12 @@ something an organizer can stake an event on.
 - Every connect captures a **session anchor** `(received_at_utc, module_relative_us)`. Without
   it the relative value is a number nobody can interpret later; with it, it is a
   high-resolution interval anchored to a known instant.
+- **And every read command starts a new epoch**, so one anchor per connect is not enough.
+  § 8.8.3 again: *"If the Tag Read Meta Data is not retrieved from the Tag Buffer between read
+  commands, there will be no way to distinguish order of tags read with different read command
+  invocations."* Two reads from either side of a read command are not comparable as intervals —
+  so an event wants as few read commands in it as it can be run with, and a fresh anchor at
+  every one of them.
 
 Through the existing `Ingest::normalize` that produces:
 
@@ -110,6 +119,14 @@ because they were never LLRP-specific:
   frame claiming 64 KB of payload is a test case, not a hypothetical.
 - The parser is a pure function over `&[u8]` with no I/O anywhere near it, so all of the
   above is testable before a module exists.
+
+**And framing is all the user guide documents.** § 7 is two diagrams and the CRC's covered
+range; there is no opcode table, no command list, and no tag-report layout in its 61 pages,
+because the vendor's position is that *"ThingMagic does not support bypassing the MercuryAPI to
+send commands to the ThingMagic module directly."* The framing above could be written from the
+document. Everything above the framing cannot, and has to come from the MercuryAPI SDK — code
+rather than a specification, with a licensing question attached
+([vendor-documents.md](vendor-documents.md#the-command-set-is-not-in-this-document)).
 
 ## Known unknowns
 
@@ -192,7 +209,8 @@ on there.
 - RSSI distribution, which is what calibrates `--selection-rule first-above-rssi:` instead of
   guessing the threshold.
 - Behavior on unplug mid-read, and whether module-reported counts reconcile with the journal.
-- Whether the relative timestamp resets, wraps, or drifts across a long session.
+- Whether the relative timestamp wraps or drifts across a long session. *Resets* is answered:
+  it restarts at every read command (§ 8.8.3). Wrap width and drift rate are not in the guide.
 
 ## Deployment notes
 
