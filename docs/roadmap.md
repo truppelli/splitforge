@@ -272,7 +272,7 @@ cannot close it — are laid out in
 [vendor-documents.md § 7](readers/vendor-documents.md#7-m3as-exit-criterion-may-not-be-reachable-on-this-interface),
 and none is chosen there or here.
 
-**Observed**, the frame codec. Thirty-four tests, none of which need hardware, and most of
+**Observed**, the frame codec. Thirty-nine tests, none of which need hardware, and most of
 which feed the parser input that is deliberately wrong. Three carry the claim:
 
 - **Every truncation of a valid frame** — all 12 of them for a 5-byte payload, and 2,000
@@ -298,16 +298,35 @@ And the
 decoder **allocates nothing**: the payload borrows from the caller's buffer, which a test
 checks by pointer rather than asserting in prose.
 
-**What none of that can tell you is whether these are the right bytes.** The layout and the
-CRC coverage come from vendor documentation, not from a capture. Both are written down as
-named assumptions in the crate — `crc_covered_range` is a public function for exactly that
-reason — so the first person holding a real capture knows the two places to look. A parser
-that is internally consistent and externally wrong passes all thirty-four.
+**What none of that could tell you was whether these are the right bytes** — and one of them
+was not. The layout and the CRC came from vendor documentation rather than from a capture, and
+both were written down as named assumptions in the crate so that the first person holding a
+real capture would know where to look. The warning was accurate: **the CRC was wrong.**
 
-The one test anchored outside the crate is the CRC's published check vector,
-`crc16(b"123456789") == 0x29B1`. Every other checksum assertion here is self-consistent and
-would still pass with the wrong polynomial, because the same wrong function computes both
-sides.
+`crc.rs` implemented CRC-16/CCITT-FALSE, which is what user guide § 7.3 calls the algorithm.
+The module computes something else — the same polynomial, with the data nibble shifted into the
+bottom of the register instead of folded into the table index, which MercuryAPI's own source
+calls a *"ThingMagic-mutated CRC […] notably, not a CCITT CRC-16, though it looks close."* The
+codec would have failed on the first frame it ever saw, in a field, with the parser being the
+last place anybody would look.
+
+It was caught by a captured frame — a real `0x22` response carrying the CRC a real module put
+on it. Over the bytes § 7.3 covers, the module says `0x561D`; the corrected function says
+`0x561D`; CCITT-FALSE says `0xF542`
+([vendor-documents.md § 8](readers/vendor-documents.md#8-the-crc-was-not-ccitt-false-and-the-codec-computed-the-wrong-checksum)).
+
+**The test that looked like the external anchor was the one that hid it.** `crc16(b"123456789")
+== 0x29B1` is a real published check vector, and it anchored the crate to the wrong function's
+catalogue entry — which is worse than no anchor, because it reads like verification. Every other
+checksum assertion in the crate is self-consistent: the frame tests build a frame with `crc16`
+and check it with `crc16`, so all thirty-four passed with the wrong algorithm and would again.
+The anchor is now the captured frame, and `0xF542` is pinned as a regression test because § 7.3
+still extends the same invitation to the next reader.
+
+**This is the ordering principle working rather than failing.** The parser was written from
+documentation before the hardware was bought, on the theory that a bug found at a desk is
+cheaper than one found in a field with cold hands. The parser was wrong, and it was found at a
+desk, before the order.
 
 `serialport` is deliberately **not** a dependency yet. ADR-0024 authorizes it onto the read
 path; the crate currently opens nothing, and a dependency that can lose a read is worth

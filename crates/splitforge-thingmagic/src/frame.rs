@@ -48,9 +48,10 @@
 //!    The header is not included in the CRC."* If a capture ever disagrees, it disagrees
 //!    here and only here: see [`crc_covered_range`].
 //!
-//! What the guide does **not** settle is the CRC variant. § 7.3 names only "CCITT CRC-16"
-//! and gives no polynomial or seed, so [`crate::crc`]'s `0x1021`/`0xFFFF` remains an
-//! assumption pending a capture.
+//! What the guide does **not** settle is the CRC variant, and calling it "CCITT CRC-16" in
+//! § 7.3 actively misleads: the module's checksum is not CCITT-FALSE, and implementing the
+//! name cost this crate a working codec until a captured frame caught it. [`crate::crc`] has
+//! the algorithm, the difference, and the anchor.
 //!
 //! # What this module promises
 //!
