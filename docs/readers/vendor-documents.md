@@ -54,6 +54,46 @@ sha256sum m7e-pico-deka-user-guide.pdf
 # b4659cfdf69f5bf1af0671214d2a519228bace7f1b0a68fcae56b30f07b58a4c
 ```
 
+### MercuryAPI — `serial_reader_l3.c`
+
+The vendor's own implementation of the protocol above, and the authority on everything § 7
+leaves out. Located after [the guide turned out to document no command set](#the-command-set-is-not-in-this-document).
+
+| | |
+|---|---|
+| Title | Mercury API — serial reader low level implementation |
+| Copyright | © 2009 ThingMagic, Inc. |
+| **License** | **MIT** — *"Permission is hereby granted, free of charge, to any person obtaining a copy of this software […] without restriction"* |
+| Source | `https://raw.githubusercontent.com/ppelleti/mercuryapi-corrections/master/serial_reader_l3.c` |
+| Retrieved | 2026-08-30, HTTP 200 |
+| Size | 208,039 bytes |
+| SHA-256 | `97b74cb184068bb1c9841f9f1e13ceedc1d9593fe1a88690787ea4f4e7d66d79` |
+| Depended on by | `crates/splitforge-thingmagic/src/crc.rs` |
+
+**The license answers the question the section below raised.** MIT is compatible with
+GPL-3.0-or-later, so this repository may read, adapt, and incorporate this code with attribution
+— which is what makes the command set reachable at all. The copy above is a third-party mirror
+rather than a vendor distribution; the license text is in the file's own header, and the hash is
+recorded so a vendor-supplied copy can be compared against the one the code was written against.
+
+### SparkFun Simultaneous RFID Tag Reader Library
+
+| | |
+|---|---|
+| Title | `SparkFun_UHF_RFID_Reader.cpp` |
+| License | MIT |
+| Source | `https://raw.githubusercontent.com/sparkfun/SparkFun_Simultaneous_RFID_Tag_Reader_Library/master/src/SparkFun_UHF_RFID_Reader.cpp` |
+| Retrieved | 2026-08-30, HTTP 200 |
+| Size | 31,398 bytes |
+| SHA-256 | `3269d53c3156abb7a7af3c9960a186eace8c4e2b0bfa41b2f39ba72a2d107f18` |
+| Depended on by | `crates/splitforge-thingmagic/src/crc.rs` — `CAPTURED_FRAME` |
+
+Not an independent implementation: its CRC is copied from `serial_reader_l3.c` and carries the
+same comment. What it adds is a **captured frame** — a real `0x22` response from a real module,
+annotated field by field, including the CRC that module computed. That frame is the only thing
+in `splitforge-thingmagic` anchored outside the crate, and it is what caught the defect in
+[finding 8](#8-the-crc-was-not-ccitt-false-and-the-codec-computed-the-wrong-checksum).
+
 ## Why the bytes are not here
 
 The user guide's own § 1 says so:
@@ -75,6 +115,14 @@ preserves the document without this project redistributing it.
 Short quotations of technical fact, as below, are ordinary citation. The facts themselves —
 that a length field is one byte, that a CRC covers four named fields — are not copyrightable
 at all, which is why the section that matters most to the code is reproduced in full.
+
+**The two source files above are a different case entirely.** Both are MIT, which permits
+copying and adaptation outright, so nothing forbids vendoring them. They are still not committed
+here, for a reason that is engineering rather than legal: this repository implements the
+protocol in Rust with its own tests, and a C file sitting beside it would be a second source of
+truth that nothing compiles or checks. What is taken from them is recorded where it is used —
+the algorithm in `crc.rs`, the captured frame in `CAPTURED_FRAME` — with attribution in the
+docstring rather than a copied file.
 
 ## What the code depends on, quoted
 
@@ -150,12 +198,15 @@ fields: *"see MercuryAPI for code details."*
 
 **What this does not mean.** The opcodes are neither secret nor unavailable — by § 4 the SDK
 ships source code, in C among others. What it means is that this file cannot go on being the only
-source, that the next source is *code* rather than a specification, and that reaching it runs
-through a release-notes document nobody has found yet. Code carries a question a PDF did not.
-[ADR-0007](../adr/0007-license-selection.md) makes this repository GPL-3.0-or-later, so what the
-SDK's license permits is a thing to establish before reading it into a design, not after.
-Archiving it is its own change, with its own row in [The documents](#the-documents), its own
-hash, and its own answer to [Why the bytes are not here](#why-the-bytes-are-not-here).
+source, and that the next source is *code* rather than a specification. Code carries a question a
+PDF did not: [ADR-0007](../adr/0007-license-selection.md) makes this repository
+GPL-3.0-or-later, so what the SDK's license permits had to be established before reading it into
+a design.
+
+**It is MIT** — established, not assumed, from the license header of the file now recorded under
+[The documents](#the-documents). MIT is GPL-3.0 compatible, so the command set is reachable with
+attribution. The first thing read out of it was not an opcode but the CRC, and that is
+[finding 8](#8-the-crc-was-not-ccitt-false-and-the-codec-computed-the-wrong-checksum).
 
 ## What the read path will depend on, quoted
 
@@ -231,10 +282,12 @@ other two are still open.
 everything between the `0xFF` and the CRC itself, excluding both."* § 7.3 says precisely that.
 `crc_covered_range` is correct and can stop being described as unverified.
 
-**Still unverified:** § 7.3 names the algorithm only as "CCITT CRC-16" and gives no polynomial
-or seed. `crc.rs` uses `POLYNOMIAL = 0x1021` and `INIT = 0xFFFF`, anchored on
-`crc16(b"123456789") == 0x29B1` — CRC-16/CCITT-FALSE. The user guide neither confirms nor
-contradicts that choice, so it stays an assumption pending a capture.
+**The other half of this finding has since been settled, and settled against the code.** § 7.3
+names the algorithm only as "CCITT CRC-16" and gives no polynomial, seed, or worked example.
+That name is wrong, `crc.rs` implemented it, and the codec computed a checksum no module would
+have accepted — see
+[finding 8](#8-the-crc-was-not-ccitt-false-and-the-codec-computed-the-wrong-checksum). The
+*coverage* confirmed above was never the part in doubt.
 
 ### 2. `MAX_DATA_LEN` was wider than the protocol — since fixed
 
@@ -387,6 +440,72 @@ What is not open is whether this was knowable. It was, from a document that had 
 archived and hashed, three findings deep into a file whose whole purpose is that the document
 stops being available. It was found by reading the sections the *next* step needs rather than the
 sections the current question pointed at.
+
+## What the SDK settled
+
+One finding, and it is the reason this file exists at all.
+
+### 8. The CRC was not CCITT-FALSE, and the codec computed the wrong checksum
+
+`crc.rs` implemented **CRC-16/CCITT-FALSE** — polynomial `0x1021`, seed `0xFFFF`, no reflection,
+anchored on the catalogue's published check vector `crc16(b"123456789") == 0x29B1`. That is a
+real, correct, well-known checksum. It is not the one this protocol uses.
+
+MercuryAPI's `serial_reader_l3.c` says so in a comment above the function:
+
+> ThingMagic-mutated CRC used for messages. Notably, not a CCITT CRC-16, though it looks close.
+
+The difference is one term. Both feed the register four bits at a time through the same table,
+`T[i] = i * 0x1021`; the standard folds the data nibble into the *table index*, and ThingMagic
+shifts it into the *bottom of the register* instead:
+
+```text
+CCITT-FALSE  crc = (crc << 4) ^ T[(crc >> 12) ^ nibble]  =  (crc << 4) ^ T[crc >> 12] ^ T[nibble]
+ThingMagic   crc = ((crc << 4) | nibble) ^ T[crc >> 12]  =  (crc << 4) ^ T[crc >> 12] ^ nibble
+```
+
+`T[nibble]` against `nibble`. The two functions agree on no input longer than nothing.
+
+**Proved against real hardware, not against the source.** SparkFun's library documents a captured
+`0x22` response, field by field, including the CRC the module put on it:
+
+```text
+FF 28 22 00 00 10 00 1B 01 FF 01 01 C4 11 0E 16 40 00 00 01 27 00 00 05 ...
+                                                            ... 15 45 E9 4A 56 1D
+                                                                          ^^^^^ message CRC
+```
+
+Over the 44 bytes § 7.3 says the CRC covers — length, opcode, status, data — the module's answer
+is `0x561D`. ThingMagic's algorithm computes `0x561D`. CCITT-FALSE computes `0xF542`.
+
+So the codec would have failed on the first frame it ever saw. Every command it sent would have
+been rejected, and every response it received would have looked corrupt — on a $345 board, in a
+field, with the frame parser being the last place anybody would look, because it had
+thirty-four passing tests.
+
+**Nothing in the crate could have caught it, and the crate said so.** `crc.rs` opened with the
+warning that this was *"the part most likely to be wrong in a way no test here can detect"*, and
+`lib.rs` with *"a parser that is internally consistent and externally wrong passes every test in
+this crate."* Both were exactly right. The frame tests build a frame with `crc16` and then check
+it with `crc16`; they pass identically with either function, and they did. The one test that
+looked like an external anchor — the `0x29B1` check vector — anchored the crate to the wrong
+function's catalogue entry, which is worse than no anchor, because it reads like verification.
+
+**Fixed**, with the algorithm derived from the polynomial rather than copied as a table, and
+anchored on the captured frame above. `0xF542` is now pinned as a regression test under a name
+that says why: § 7.3 still calls this "CCITT CRC-16", so the next person has the same invitation
+to implement the wrong thing.
+
+Three things worth keeping from this:
+
+- **The captured frame is an M6e response, not an M7e-Pico one.** The modules differ; § 7.1–7.3's
+  framing does not, and this crate's decoder parses it. That is evidence about the protocol, and
+  it is recorded in `CAPTURED_FRAME`'s docstring as exactly that rather than as a Pico capture.
+- **A vendor's name for an algorithm is not a specification.** "CCITT CRC-16" is a description of
+  what it resembles. The polynomial is shared, which is why it resembles it; nothing else is.
+- **This is the argument for the whole approach, tested.** The plan was to write the parser from
+  documentation before buying hardware, on the theory that a bug found at a desk is cheaper than
+  one found in a field. The parser was wrong, and it was found at a desk, before the order.
 
 ## Adding a document here
 

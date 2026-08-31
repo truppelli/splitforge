@@ -40,11 +40,17 @@
 //! full, before anybody spends $345 — truncated frames, bad checksums, and a `0xFF` in the
 //! middle of a payload are all reachable from a byte-slice literal.
 //!
-//! **What no test here can tell you** is whether these are the *right* bytes. The layout
-//! and the CRC coverage come from vendor documentation, not from a capture, and both are
-//! written down as assumptions in [`frame`] so that the first person with a real module
-//! knows which two things to check. A parser that is internally consistent and externally
-//! wrong passes every test in this crate.
+//! **One of those assumptions was wrong, and finding it is what this warning was for.** The
+//! CRC was implemented as CRC-16/CCITT-FALSE, which is what user guide § 7.3 names it; the
+//! module computes something else, and every test in this crate passed anyway because they all
+//! built frames with the same function they checked them with. It is corrected in [`crc`] and
+//! anchored to a frame a real module produced.
+//!
+//! **What no test here can still tell you** is whether the rest of the layout is right. It
+//! comes from vendor documentation rather than from a capture, and it is written down as an
+//! assumption in [`frame`] so the first person with a real module knows where to look. A parser
+//! that is internally consistent and externally wrong passes every test in this crate — which
+//! is not a hypothetical any more.
 
 // No panicking on any path reachable during an event: a corrupt frame, a missing
 // field, or an out-of-range value must become an error the caller can act on, never a
