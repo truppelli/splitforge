@@ -12,8 +12,14 @@
 //! `response()` below constructs frames independently of `frame::decode`, so the layout is
 //! asserted by two pieces of code that were written to the same specification rather than
 //! by one piece of code agreeing with itself. It does share `crc16`, deliberately: the CRC
-//! algorithm has its own check-vector test in the crate, and duplicating a CRC by hand in
+//! algorithm is anchored to a captured frame in the crate, and duplicating a CRC by hand in
 //! a test file would test the copy.
+//!
+//! **Sharing it is also this file's blind spot**, and it is worth naming. Every frame here is
+//! built with `crc16` and then checked with `crc16`, so these tests pass whatever that
+//! function computes — they did pass while it computed CRC-16/CCITT-FALSE, which is not the
+//! checksum the module uses. Only `crc::tests` can catch that, and only because it holds bytes
+//! a module produced.
 
 use splitforge_thingmagic::{
     Decoded, EncodeError, FrameError, MAX_COMMAND_DATA_LEN, MAX_FRAME_LEN, MAX_RESPONSE_DATA_LEN,
@@ -232,9 +238,10 @@ fn a_corrupted_crc_is_caught() {
 
 #[test]
 fn any_single_bit_flipped_in_the_covered_bytes_is_caught() {
-    // CRC-16/CCITT detects every single-bit error, so this is a total claim rather than a
-    // statistical one — and it fails loudly if the CRC's coverage is ever narrowed to
-    // exclude a field somebody thought was unimportant.
+    // A total claim rather than a statistical one, and it fails loudly if the CRC's coverage
+    // is ever narrowed to exclude a field somebody thought was unimportant. The property is
+    // checked exhaustively over every bit here and in `crc::tests` rather than borrowed from a
+    // catalogue: this protocol's checksum is not CCITT-FALSE and has no published guarantee.
     //
     // The length byte is excluded deliberately: changing it moves the frame's boundaries,
     // so the outcome is legitimately "incomplete" or "bad CRC" depending on direction.
