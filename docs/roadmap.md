@@ -232,7 +232,12 @@ captures.
       than hypotheticals. This is the highest-risk code in the project and it was fully
       testable before a module existed
 - [ ] Implement `ReaderProvider` on top of the codec. The crate does **not** yet — framing is
-      there and nothing above it, which is why `serialport` is not a dependency yet either
+      there and nothing above it, which is why `serialport` is not a dependency yet either.
+      **This step has a prerequisite the plan did not have.** The user guide cannot supply the
+      command set — § 7 is two framing diagrams and the CRC's covered range, and stops — so the
+      opcodes have to come from the MercuryAPI SDK, which is code rather than a specification
+      and needs its own archival and its own licensing read first
+      ([vendor-documents.md](readers/vendor-documents.md#the-command-set-is-not-in-this-document))
 - [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
       ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps))
@@ -255,6 +260,17 @@ captures.
 **Exit criterion:** a serial module runs for several hours while every read is preserved
 through deliberately induced disconnections and service restarts, and the count of reads the
 module believes it sent matches the count in the journal.
+
+**This criterion is now in doubt, and the doubt is recorded rather than resolved.** The user
+guide says the module cannot detect a broken serial connection and goes on streaming into it,
+and that the interface has no flow control — so reads emitted during an induced disconnection
+are simply gone, and no count can reconcile what the module sent against what arrived. The
+criterion quietly assumed a transport that knows what it delivered, and of the two adapters only
+M3b has one. **M3b's identical wording is unaffected**, because LLRP runs over TCP. The three
+ways out — reword the criterion, poll the tag buffer instead of streaming, or accept that M3a
+cannot close it — are laid out in
+[vendor-documents.md § 7](readers/vendor-documents.md#7-m3as-exit-criterion-may-not-be-reachable-on-this-interface),
+and none is chosen there or here.
 
 **Observed**, the frame codec. Thirty-four tests, none of which need hardware, and most of
 which feed the parser input that is deliberately wrong. Three carry the claim:

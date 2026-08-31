@@ -122,6 +122,103 @@ Header    Data Length    Command    Status Word    Data              CRC-16 Chec
 0.25 W is +24 dBm, which is the figure [hardware-plan.md](../hardware-plan.md) uses
 throughout.
 
+## The command set is not in this document
+
+§ 7, *Serial Communication Protocol*, is three subsections long: § 7.1 and § 7.2 are the two
+framing diagrams quoted above, and § 7.3 is the CRC's covered range. There is no opcode table,
+no command list, and no tag-report layout anywhere in the guide's 61 pages. The only opcodes in
+it are fault names in Appendix A — `FAULT_INVALID_OPCODE` and its neighbours — which name the
+error without naming the values that provoke it. The whole document contains four hexadecimal
+numbers, and all four are error codes.
+
+That is why `frame.rs` could be written from this document and why its successor cannot. Framing
+is the whole of what § 7 describes, and framing is the whole of what the crate currently does.
+
+**It is a position rather than an omission**, and § 7's opening paragraph states it:
+
+> ThingMagic does not support bypassing the MercuryAPI to send commands to the ThingMagic module
+> directly, but some information about this interface is useful when troubleshooting and
+> debugging applications which interface with the MercuryAPI.
+
+The framing is documented for people debugging MercuryAPI's traffic, not for people replacing
+MercuryAPI — which is what a `ReaderProvider` in this repository would be doing. Above the frame,
+the guide defers: § 4 says applications *"can be written using the high level MercuryAPI"*, that
+the SDK *"contains sample applications and source code"*, and that it is the **release notes** —
+a third document, not archived here and not yet located — which *"contain links to Mercury API
+Programmers Guide and the Mercury API SDK."* § 8.8.3 defers the same way for the tag-report
+fields: *"see MercuryAPI for code details."*
+
+**What this does not mean.** The opcodes are neither secret nor unavailable — by § 4 the SDK
+ships source code, in C among others. What it means is that this file cannot go on being the only
+source, that the next source is *code* rather than a specification, and that reaching it runs
+through a release-notes document nobody has found yet. Code carries a question a PDF did not.
+[ADR-0007](../adr/0007-license-selection.md) makes this repository GPL-3.0-or-later, so what the
+SDK's license permits is a thing to establish before reading it into a design, not after.
+Archiving it is its own change, with its own row in [The documents](#the-documents), its own
+hash, and its own answer to [Why the bytes are not here](#why-the-bytes-are-not-here).
+
+## What the read path will depend on, quoted
+
+Nothing in this section backs code that exists today. These are the statements a
+`ReaderProvider` will rest on, recorded while the document is open, because three of them
+constrain the design before a line of it is written.
+
+### The serial link — User Guide § 5.1.4, § 5.1.4.1
+
+> The module communicates to a host processor via a TTL logic level UART serial port, accessed
+> on the edge "vias."
+
+> Only three pins are required for serial communication (TX, RX, and GND). Hardware handshaking
+> is not supported.
+
+> The connected host processor's receiver must have the capability to receive up to 255 bytes of
+> data at a time without overflowing. Flow control is not supported.
+
+Default baud is 115200 (§ 5.1.4.2), one of eight from 9600 to 921600. A changed rate survives a
+power cycle only *"if that baud rate is changed and saved in the application mode"*, with the
+guide's own caveat to *"check the firmware release notes to confirm that saving of settings is
+supported."* That is the same persistence mechanism, and the same uncertainty, that
+[question 4](thingmagic-m7e-pico.md#the-four-pre-order-questions--answered-from-documentation)
+leaves open about the region setting.
+
+### Command and response discipline — User Guide § 7
+
+> The serial communication between MercuryAPI and the ThingMagic module is based on a
+> synchronized command-response/master-slave mechanism. Whenever the host sends a message to the
+> reader, it cannot send another message until after it receives a response. The reader never
+> initiates a communication session; only the host initiates a communication session.
+
+### Streaming — User Guide § 8.8.2
+
+The exception to *"the reader never initiates"*, and the mode a timing system would run in:
+
+> When reading tags during asynchronous inventory operations (MercuryAPI `Reader.StartReading()`),
+> the module "streams" the tag results back to the host processor. This means that tags are
+> pushed out of the buffer as soon as they are put into the buffer by the tag reading process.
+> The buffer is put into a circular mode that keeps the buffer from filling.
+
+> NOTE: The TTL Level UART Interface does not support control lines, so it is not possible for
+> the module to detect a broken communications interface connection and stop streaming the tag
+> results. Nor can the host signal that it wishes tag streaming to stop temporarily without
+> stopping the reading of tags.
+
+The alternative is the tag buffer of § 8.8.1, which the host polls — a FIFO holding, *"as a rule
+of thumb […] a maximum of 52 96-bit EPC tags"*, in which *"duplicate tag reads do not result in
+additional entries."*
+
+### Tag read metadata — User Guide § 8.8.3
+
+Four of the twelve fields, being the four a timing system needs. This table's columns interleave
+under ordinary text extraction, so the pairings below were confirmed against the page in
+`pdftotext -table` mode rather than read off a reflowed column:
+
+| Field | User Guide § 8.8.3 |
+|---|---|
+| Antenna ID | *"The antenna on which the tag was read. When Using a Multiplexer, if appropriately configured, the Antenna ID entry will contain the logical antenna port of the tag read. If the same tag is read on more than one antenna there will be a tag buffer entry for each antenna on which the tag was read."* |
+| Read Count | *"The number of times the same tag was read on the same antenna (and, optionally, with the same embedded data value)."* |
+| Timestamp | *"The time the tag was read, relative to the time the command to read was issued, in milliseconds. If the Tag Read Meta Data is not retrieved from the Tag Buffer between read commands, there will be no way to distinguish order of tags read with different read command invocations."* |
+| RSSI | *"The receive signal strength of the tag response in dBm. For duplicate entries, the user can decide if the meta data represents the first time the tag was seen or reflects the meta data for the highest RSSI seen."* |
+
 ## What retrieving these already settled
 
 Three things, none of which needed the module. Each was recorded here first, because each
@@ -186,6 +283,110 @@ are why this is recorded rather than rescored here:
 
 **Row 4 is untouched.** There is no reader clock, nothing in either document suggests one, and
 no wiring changes that.
+
+## What a second reading settled
+
+The three findings above came from checking the codec's assumptions against the guide. These
+four came from asking a different question of the same document — what the layer *above* the
+codec needs — and the numbering continues because the cross-references do. Still no module
+involved.
+
+### 4. The 255-byte ceiling is confirmed from the hardware's side
+
+[#25](https://github.com/truppelli/splitforge/pull/25) derived `MAX_FRAME_LEN` = 255 by adding up
+§ 7.1 and § 7.2 — `3 + 250 + 2` and `5 + 248 + 2` — and observed that the two directions agreeing
+*"reads like the protocol's design intent rather than a coincidence."*
+
+§ 5.1.4.1 says it outright, and says it about the wire rather than the format: *"The connected
+host processor's receiver must have the capability to receive up to 255 bytes of data at a time
+without overflowing."* So the compile-time assertion that `MAX_FRAME_LEN == 255` is not only
+arithmetic over two data-length caps; it is a stated hardware requirement on the host. Nothing in
+the code changes. It is recorded because a confirmation costs nothing to write down and the next
+person would otherwise re-derive it.
+
+### 5. The timestamp semantic the notes said to verify first is confirmed
+
+[The reader notes](thingmagic-m7e-pico.md#timestamps) describe the module's timestamp as *"a
+relative millisecond timestamp within a continuous-read session […] not since power-on — it is
+since the read session started"*, and flag it: *"Verify this first; the whole mapping below rests
+on it."*
+
+§ 8.8.3 verifies it, and sharpens *"session"* to something more specific: *"The time the tag was
+read, relative to the time the command to read was issued, in milliseconds."* The anchor is the
+read command. Mapping onto `ReaderTimestamp::Uptime { micros }` is unaffected — the field's unit
+was always a conversion, not a claim about the module's resolution.
+
+The sentence that follows it is new, and it is the sharper half:
+
+> If the Tag Read Meta Data is not retrieved from the Tag Buffer between read commands, there
+> will be no way to distinguish order of tags read with different read command invocations.
+
+**Every read command starts a new epoch.** Two reads from either side of one are not comparable
+as intervals, which is an argument for the session anchor
+[hardware-plan step 3](../hardware-plan.md#step-3--the-timestamp-decision) already prescribes —
+and a new argument for running an event on as few read commands as possible, which nothing had
+said.
+
+### 6. Antenna identity survives into the tag report, and costs a permissive change
+
+Finding 3 left a caveat open: *"Whether per-antenna identity survives into the tag-report stream
+in a form the adapter can map to a checkpoint is a measurement."* § 8.8.3 answers it on paper —
+*"the Antenna ID entry will contain the logical antenna port of the tag read"* — and adds that a
+tag seen on two antennas produces one buffer entry per antenna, which is the shape a checkpoint
+mapping needs.
+
+Still not free. § 8.7.2 names a cost nothing in this repository had priced:
+
+> NOTE: Using an antenna multiplexer will require a Class 2 Permissive Change as trace routes to
+> support antenna multiplexing are not covered under the existing regulatory certificates.
+
+That lands on [hardware-plan § 6](../hardware-plan.md#6-phase-2--certification-and-manufacture)
+rather than on M3a — a bench experiment is not a finished product seeking a grant — but the
+multiplexer path is now a certification line item and not only a parts line item.
+
+### 7. M3a's exit criterion may not be reachable on this interface
+
+Recorded rather than acted on, and it is the finding here that matters most.
+
+[M3a's exit criterion](../roadmap.md#milestone-3a--one-serial-reader) reads:
+
+> a serial module runs for several hours while every read is preserved through deliberately
+> induced disconnections and service restarts, and the count of reads the module believes it
+> sent matches the count in the journal.
+
+§ 8.8.2 says the module cannot *"detect a broken communications interface connection and stop
+streaming the tag results"*, and § 5.1.4.1 says *"Flow control is not supported."* Put together:
+during a deliberately induced disconnection the module goes on streaming into a cable that is not
+there, and those reads are gone. Not delayed and not buffered — during streaming the buffer is
+explicitly circular, and there are no control lines for either end to notice.
+
+So the second clause cannot be satisfied by counting. Whatever the module believes it sent
+includes the reads the disconnection ate, and the journal cannot contain them; the first clause
+fails over the same window.
+
+**This is a real difference between M3a and M3b**, and
+[ADR-0024](../adr/0024-serial-reader-adapter-before-llrp.md) did not anticipate it. M3b's
+identical wording is satisfiable because LLRP runs over TCP: the transport knows what it
+delivered, the reader buffers while it cannot deliver, and *"the count the reader believes it
+sent"* is a question with an answer. Over three wires with no flow control it is not — the
+criterion quietly assumed a transport, and only one of the two adapters has it.
+
+Three things could be true instead. Choosing between them is a separate review, not an edit here:
+
+- **The criterion measures the wrong property for this interface**, and M3a should be asked for
+  what a serial link can actually prove: no loss while connected, a loss across a disconnection
+  that is bounded and *observed* rather than assumed, and a journal that never disagrees with
+  what arrived.
+- **The adapter should poll the tag buffer (§ 8.8.1) rather than stream**, which bounds the loss
+  to a 52-entry FIFO and makes it countable, at a throughput cost nobody has measured — and
+  against § 7's *"the reader never initiates"* discipline, which is what polling is for.
+- **The criterion stands and M3a cannot close it**, the way two support-checklist rows already
+  cannot.
+
+What is not open is whether this was knowable. It was, from a document that had already been
+archived and hashed, three findings deep into a file whose whole purpose is that the document
+stops being available. It was found by reading the sections the *next* step needs rather than the
+sections the current question pointed at.
 
 ## Adding a document here
 
