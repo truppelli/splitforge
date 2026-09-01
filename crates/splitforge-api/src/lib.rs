@@ -105,10 +105,74 @@ pub struct Health {
     /// Cumulative for the life of the database, not for the life of this process: a step
     /// observed before the last restart still moved every timestamp written around it.
     pub clock_steps: u64,
-    // Deliberately no reader connection state. No reader protocol exists until Milestone 3,
-    // and a `"reader": "connected"` field that is always true because nothing ever connects
-    // would be the most dangerous kind of health check: one that reports the absence of
-    // monitoring as the absence of a problem. See `docs/hardware-support.md`.
+    /// The reader this process was given, and what it has produced.
+    ///
+    /// This field spent Milestones 0–2 as a comment refusing to exist, on the grounds that
+    /// *"a `\"reader\": \"connected\"` field that is always true because nothing ever
+    /// connects would be the most dangerous kind of health check: one that reports the
+    /// absence of monitoring as the absence of a problem."*
+    ///
+    /// That warning is the specification for the shape it finally took. [`ReaderKind::None`]
+    /// is a distinct value from any connection state, and [`ReaderHealth::state`] is `None`
+    /// alongside it — so "this device was never given a reader" cannot be read as "this
+    /// device has a working reader", which is the exact confusion the comment forbade.
+    pub reader: ReaderHealth,
+}
+
+/// Which reader the service was composed with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderKind {
+    /// None was configured. **Not a fault** — it is the whole of what this service did
+    /// before Milestone 3a, and a device being prepared has no reader yet either.
+    None,
+    /// A simulated reader. Its reads are synthetic and they enter the journal as evidence
+    /// like any other, which is why this is reported rather than hidden.
+    Simulated,
+}
+
+/// Whether a configured reader is producing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderState {
+    /// Producing, or waiting for the next read.
+    Connected,
+    /// Finished or given up. A simulated reader reaching the end of its script is the
+    /// ordinary case; a read path that stopped because a write failed is not, and that one
+    /// also degrades the status with a reason.
+    Stopped,
+}
+
+/// The reader half of a health report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderHealth {
+    /// Which reader, if any.
+    pub kind: ReaderKind,
+    /// Its state, or `None` when [`Self::kind`] is [`ReaderKind::None`] and there is
+    /// nothing whose state could be described.
+    pub state: Option<ReaderState>,
+    /// Messages taken off the reader's channel.
+    pub reads_received: u64,
+    /// Reads the journal has accepted and made durable.
+    ///
+    /// Deliberately a second number. `docs/architecture.md` § 4: *"Any metric that says
+    /// 'reads received' and any metric that says 'reads persisted' are different numbers,
+    /// and the gap between them is a monitored quantity."* A single counter incremented
+    /// before the write would report reads that a power cut took.
+    pub reads_persisted: u64,
+}
+
+impl ReaderHealth {
+    /// A device with no reader composed.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            kind: ReaderKind::None,
+            state: None,
+            reads_received: 0,
+            reads_persisted: 0,
+        }
+    }
 }
 
 impl Health {
@@ -134,6 +198,7 @@ impl Health {
             min_free_mb,
             above_floor: None,
             clock_steps: 0,
+            reader: ReaderHealth::none(),
         }
     }
 
@@ -177,9 +242,9 @@ where
 
 /// The API's routes.
 ///
-/// One endpoint. It will grow at Milestone 3, when reader connection state exists and lives
-/// in this process rather than in the database — which is the thing a health endpoint can
-/// report and a one-shot CLI command cannot.
+/// One endpoint. It grew at Milestone 3a, when reader connection state started existing in
+/// this process and in no file — which is the thing a health endpoint can report and a
+/// one-shot CLI command structurally cannot.
 pub fn router(source: Arc<dyn HealthSource>) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -233,13 +298,44 @@ mod tests {
 
     #[test]
     fn health_never_claims_a_reader_is_connected() {
-        // No reader protocol exists until Milestone 3. A field that is always "connected"
-        // because nothing ever connects reports the absence of monitoring as the absence of
-        // a problem, which is worse than reporting nothing.
+        // This test used to assert that no `reader` field existed at all, because none could
+        // be honest before Milestone 3a: a field that is always "connected" because nothing
+        // ever connects reports the absence of monitoring as the absence of a problem.
+        //
+        // The field exists now, and the claim it guards is unchanged — a device with no
+        // reader must never look like a device with a working one. What it asserts is the
+        // *shape* that makes that impossible, rather than the absence that used to.
         let json = serde_json::to_value(sample()).expect("serialize");
-        assert!(json.get("reader").is_none(), "got: {json}");
-        assert!(json.get("readers").is_none(), "got: {json}");
-        assert!(json.get("connected").is_none(), "got: {json}");
+
+        assert_eq!(json["reader"]["kind"], "none", "got: {json}");
+        assert!(
+            json["reader"]["state"].is_null(),
+            "a device with no reader has no state to report: {json}"
+        );
+        // The two counters are the other half. Zero here is a fact about a device that has
+        // taken no reads, not a placeholder standing in for an unanswered question.
+        assert_eq!(json["reader"]["reads_received"], 0);
+        assert_eq!(json["reader"]["reads_persisted"], 0);
+    }
+
+    #[test]
+    fn a_reader_that_stopped_is_not_a_reader_that_was_never_configured() {
+        // The distinction the whole shape exists for. Both of these are "not producing
+        // reads", and an operator's response to them is opposite: one device needs a reader
+        // attached, the other needs someone to find out why its reader quit.
+        let mut never = sample();
+        never.reader = ReaderHealth::none();
+
+        let mut stopped = sample();
+        stopped.reader = ReaderHealth {
+            kind: ReaderKind::Simulated,
+            state: Some(ReaderState::Stopped),
+            reads_received: 638,
+            reads_persisted: 638,
+        };
+
+        assert_ne!(never.reader.kind, stopped.reader.kind);
+        assert_ne!(never.reader.state, stopped.reader.state);
     }
 
     #[test]
