@@ -375,13 +375,25 @@ async fn every_read_the_service_wrote_is_in_the_journal_after_it_exits() {
         assert_eq!(read.seq, expected, "journal sequence is not contiguous");
     }
 
-    // Every read carries the state the device measured, not one the read path invented.
-    // Whatever chrony said on this machine, it must be the same answer for every row.
+    // Every read carries the state the device measured, and the same one, because the clock
+    // was sampled before the read path started.
+    //
+    // This caught a real defect on its first run: the service used to start reading while
+    // its first sample was still in flight, so the opening reads were stamped `Unsynced` —
+    // not because the clock was bad but because nothing had asked yet. `is_trustworthy` is
+    // false for `Unsynced` and gates publication, and on a real event the mislabelled band
+    // falls across the gun. Whatever chrony says on the machine running this, it must be the
+    // same answer for every row of one short run.
     let states: std::collections::BTreeSet<_> = reads
         .iter()
         .map(|read| read.read.device_clock_state)
         .collect();
-    assert_eq!(states.len(), 1, "one run, one clock state: {states:?}");
+    assert_eq!(
+        states.len(),
+        1,
+        "one run, one clock state — a split here means reads were written before the time \
+         source was sampled: {states:?}"
+    );
 
     // Both directions, which is the reconciliation `doctor` performs: the sidecar holding a
     // read the database lost is the recoverable case, and the database holding one the

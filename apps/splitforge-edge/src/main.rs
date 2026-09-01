@@ -479,22 +479,39 @@ async fn watch_the_time_source(device: Arc<Device>) {
         tokio::time::interval(std::time::Duration::from_secs(CLOCK_SOURCE_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    loop {
-        // The first tick completes immediately, so the first sample is taken at startup and
-        // `/health` does not report an unknown time source for the first minute of an event.
-        interval.tick().await;
+    // The first tick completes immediately, and `main` has already taken that sample before
+    // starting the read path. Consuming it here keeps startup from asking twice.
+    interval.tick().await;
 
-        match tokio::task::spawn_blocking(splitforge_timesource::read_tracking).await {
-            Ok(reading) => match device.clock.write() {
-                Ok(mut slot) => *slot = Some(reading),
-                Err(_) => eprintln!(
-                    "splitforge-edge: the time source could not be recorded; it is unreadable \
-                     after an earlier failure"
-                ),
-            },
-            Err(error) => {
-                eprintln!("splitforge-edge: the time source could not be sampled: {error}");
-            }
+    loop {
+        interval.tick().await;
+        sample_the_time_source(&device).await;
+    }
+}
+
+/// Asks the daemon once and stores the answer.
+///
+/// **Called once before the read path starts, and on an interval after that.** The ordering
+/// is not incidental: `state_for_evidence` answers `Unsynced` while nothing has been
+/// sampled, so a service that started reading before its first sample would stamp `Unsynced`
+/// on the opening reads of an event — on a device whose clock was fine, for no reason but
+/// the order two startup tasks happened to run in. `is_trustworthy` is false for `Unsynced`
+/// and gates publication, and the reads this would mislabel are the ones around the gun.
+///
+/// The subprocess runs on a blocking thread: `read_tracking` shells out to `chronyc`, which
+/// blocks for as long as it takes to give up on a daemon that is not answering.
+async fn sample_the_time_source(device: &Device) {
+    match tokio::task::spawn_blocking(splitforge_timesource::read_tracking).await {
+        Ok(reading) => match device.clock.write() {
+            // A failed sample leaves the previous answer in place rather than clearing it.
+            Ok(mut slot) => *slot = Some(reading),
+            Err(_) => eprintln!(
+                "splitforge-edge: the time source could not be recorded; it is unreadable \
+                 after an earlier failure"
+            ),
+        },
+        Err(error) => {
+            eprintln!("splitforge-edge: the time source could not be sampled: {error}");
         }
     }
 }
@@ -547,6 +564,11 @@ async fn main() -> Result<()> {
     // service that refused to serve health because its clock watcher fell over would have
     // traded the smaller problem for the larger one. It ends when the process does.
     tokio::spawn(watch_the_clock(Arc::clone(&device)));
+
+    // Before the read path, deliberately. Every read carries a `DeviceClockState`, and one
+    // stamped `Unsynced` because nothing had asked yet is a worse answer than waiting the
+    // one subprocess call it takes to have a real one.
+    sample_the_time_source(&device).await;
     tokio::spawn(watch_the_time_source(Arc::clone(&device)));
 
     if let Some(scenario) = args.simulate.as_deref() {
