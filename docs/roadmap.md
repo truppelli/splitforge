@@ -250,13 +250,18 @@ captures.
       both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
       and an open gap degrades health. The gap table and the watchdog are testable against the
       simulator; only *inducing* a real disconnection needs the module
+- [x] **`splitforge-edge` has a read path**, in the ordering
+      [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
+      first, always, then the journal append, then notify — `reads_persisted` moves only after
+      `append` returns, which is what makes it a different number from `reads_received`.
+      Health gained reader state, and the service measures its own `DeviceClockState` rather
+      than assuming one, because every read it writes carries one as permanent evidence.
+      **This bullet was filed under *needs the module* and did not belong there.** The loop is
+      written against `ReaderProvider`, so the module changes which provider is composed and
+      nothing else; what needs hardware is the serial adapter, which is the bullet above it
 
 **Needs the module:**
 
-- [ ] Give `splitforge-edge` a read path, in the ordering
-      [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
-      first, always, then the journal append, then notify. Health gains reader connection
-      state
 - [ ] `PrivateDevices=no` / `DevicePolicy=closed` / `DeviceAllow=char-ttyUSB rw` in the unit,
       plus a udev rule for a stable device name. `RestrictAddressFamilies=AF_UNIX` **stays** —
       a serial adapter opens a file, not a socket

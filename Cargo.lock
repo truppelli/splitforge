@@ -866,6 +866,7 @@ dependencies = [
  "splitforge-api",
  "splitforge-cli",
  "splitforge-domain",
+ "splitforge-reader",
  "splitforge-storage",
  "splitforge-timesource",
  "tempfile",
