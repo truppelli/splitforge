@@ -2,9 +2,9 @@
 //!
 //! ThingMagic serial reader adapter: frame parsing, connection lifecycle, and reconnect.
 //!
-//! **Status:** the frame codec only. There is no connection lifecycle here yet and no
-//! [`ReaderProvider`] implementation — see `docs/roadmap.md`, Milestone 3a, for what lands
-//! here and in what order.
+//! **Status:** the frame codec and the command set. There is no connection lifecycle here yet
+//! and no [`ReaderProvider`] implementation — see `docs/roadmap.md`, Milestone 3a, for what
+//! lands here and in what order.
 //!
 //! ## Boundaries
 //!
@@ -58,9 +58,11 @@
 // the point. See CONTRIBUTING.md, "Code standards".
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod command;
 pub mod crc;
 pub mod frame;
 
+pub use command::{OpCode, antenna_ports, search_flag};
 pub use crc::crc16;
 pub use frame::{
     COMMAND_HEADER_LEN, CRC_LEN, Decoded, EncodeError, FrameError, MAX_COMMAND_DATA_LEN,

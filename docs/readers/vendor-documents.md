@@ -76,6 +76,40 @@ GPL-3.0-or-later, so this repository may read, adapt, and incorporate this code 
 rather than a vendor distribution; the license text is in the file's own header, and the hash is
 recorded so a vendor-supplied copy can be compared against the one the code was written against.
 
+### MercuryAPI — `serial_reader_imp.h`
+
+Where the opcode *values* live. `serial_reader_l3.c` references 53 distinct
+`TMR_SR_OPCODE_*` symbols 123 times and defines none of them — see
+[finding 9](#9-the-command-set-is-spread-across-three-files-and-one-was-archived).
+
+| | |
+|---|---|
+| Title | Mercury API — serial reader internal implementation header |
+| Copyright | © 2009 ThingMagic, Inc. |
+| **License** | **MIT** — same grant as `serial_reader_l3.c`, verified in the file's own header |
+| Source | `https://raw.githubusercontent.com/ppelleti/mercuryapi-corrections/master/serial_reader_imp.h` |
+| Retrieved | 2026-08-31, HTTP 200 |
+| Size | 53,830 bytes |
+| SHA-256 | `5bc6a7dd91947ae5c0aef1bdc8fdaeb87ba3e0d17d2670324ff6b5b5696365c0` |
+| Depended on by | [The command set, from the SDK](#the-command-set-from-the-sdk) |
+
+### MercuryAPI — `tmr_utils.h`
+
+The accessor macros the tag-report layout is expressed in, and therefore the authority on
+**byte order**: `GETU16AT`, `GETU24AT`, and `GETU32AT` all shift the first byte highest, so
+every multi-byte field in a response is big-endian.
+
+| | |
+|---|---|
+| Title | Mercury API — utility macros |
+| Copyright | © 2009 ThingMagic, Inc. |
+| **License** | **MIT**, verified in the file's own header |
+| Source | `https://raw.githubusercontent.com/ppelleti/mercuryapi-corrections/master/tmr_utils.h` |
+| Retrieved | 2026-08-31, HTTP 200 |
+| Size | 5,188 bytes |
+| SHA-256 | `0f423f6b5219e23596c308d438324df9b217e8a9a8d6a5b9d513212f22cd6d37` |
+| Depended on by | [The command set, from the SDK](#the-command-set-from-the-sdk) |
+
 ### SparkFun Simultaneous RFID Tag Reader Library
 
 | | |
@@ -207,6 +241,95 @@ a design.
 [The documents](#the-documents). MIT is GPL-3.0 compatible, so the command set is reachable with
 attribution. The first thing read out of it was not an opcode but the CRC, and that is
 [finding 8](#8-the-crc-was-not-ccitt-false-and-the-codec-computed-the-wrong-checksum).
+
+## The command set, from the SDK
+
+What the user guide leaves out, recovered from the three MIT-licensed files recorded above.
+These are **facts about a wire protocol** — that opcode `0x22` means "read tag ID multiple" —
+which are not copyrightable, and they are reproduced here rather than vendored for the reason
+[Why the bytes are not here](#why-the-bytes-are-not-here) already gives: a C file beside the
+Rust would be a second source of truth that nothing compiles.
+
+### Opcodes — `serial_reader_imp.h`, `enum TMR_SR_OpCode`
+
+Transcribed complete rather than filtered to the ones the read path needs, because the value of
+an exhaustive table is that the next person can tell an unknown opcode from an unlisted one.
+
+| Op | Name | Op | Name |
+|---|---|---|---|
+| `0x01` | `WRITE_FLASH` | `0x2A` | `CLEAR_TAG_ID_BUFFER` |
+| `0x02` | `READ_FLASH` | `0x2D` | `WRITE_TAG_SPECIFIC` |
+| `0x03` | `VERSION` | `0x2E` | `ERASE_BLOCK_TAG_SPECIFIC` |
+| `0x04` | `BOOT_FIRMWARE` | `0x2F` | `MULTI_PROTOCOL_TAG_OP` |
+| `0x06` | `SET_BAUD_RATE` | `0x61` | `GET_ANTENNA_PORT` |
+| `0x07` | `ERASE_FLASH` | `0x62` | `GET_READ_TX_POWER` |
+| `0x08` | `VERIFY_IMAGE_CRC` | `0x63` | `GET_TAG_PROTOCOL` |
+| `0x09` | `BOOT_BOOTLOADER` | `0x64` | `GET_WRITE_TX_POWER` |
+| `0x0A` | `MODIFY_FLASH` | `0x65` | `GET_FREQ_HOP_TABLE` |
+| `0x0B` | `GET_DSP_SILICON_ID` | `0x66` | `GET_USER_GPIO_INPUTS` |
+| `0x0C` | `GET_CURRENT_PROGRAM` | `0x67` | `GET_REGION` |
+| `0x0D` | `WRITE_FLASH_SECTOR` | `0x68` | `GET_POWER_MODE` |
+| `0x0E` | `GET_SECTOR_SIZE` | `0x69` | `GET_USER_MODE` |
+| `0x0F` | `MODIFY_FLASH_SECTOR` | `0x6A` | `GET_READER_OPTIONAL_PARAMS` |
+| `0x10` | `HW_VERSION` | `0x6B` | `GET_PROTOCOL_PARAM` |
+| `0x21` | `READ_TAG_ID_SINGLE` | `0x6C` | `GET_READER_STATS` |
+| `0x22` | `READ_TAG_ID_MULTIPLE` | `0x6D` | `GET_USER_PROFILE` |
+| `0x23` | `WRITE_TAG_ID` | `0x70` | `GET_AVAILABLE_PROTOCOLS` |
+| `0x24` | `WRITE_TAG_DATA` | `0x71` | `GET_AVAILABLE_REGIONS` |
+| `0x25` | `LOCK_TAG` | `0x72` | `GET_TEMPERATURE` |
+| `0x26` | `KILL_TAG` | `0x91` | `SET_ANTENNA_PORT` |
+| `0x28` | `READ_TAG_DATA` | `0x92` | `SET_READ_TX_POWER` |
+| `0x29` | `GET_TAG_ID_BUFFER` | `0x93` | `SET_TAG_PROTOCOL` |
+| `0x94` | `SET_WRITE_TX_POWER` | `0x99` | `SET_USER_MODE` |
+| `0x95` | `SET_FREQ_HOP_TABLE` | `0x9A` | `SET_READER_OPTIONAL_PARAMS` |
+| `0x96` | `SET_USER_GPIO_OUTPUTS` | `0x9B` | `SET_PROTOCOL_PARAM` |
+| `0x97` | `SET_REGION` | `0x9D` | `SET_USER_PROFILE` |
+| `0x98` | `SET_POWER_MODE` | `0x9E` | `SET_PROTOCOL_LICENSEKEY` |
+| `0xC1` | `SET_OPERATING_FREQ` | `0xC3` | `TX_CW_SIGNAL` |
+
+Names are shortened from `TMR_SR_OPCODE_*`. **`0x22` is the read path**, and it is also the
+opcode of the captured frame already anchoring `crc.rs` — which cross-checks this table against
+something that was in the repository before it.
+
+### Search flags — `serial_reader_imp.h`, `enum TMR_SR_SearchFlag`
+
+The second argument to `0x22`, and what turns a one-shot inventory into a stream:
+
+| Value | Name | Why it matters here |
+|---|---|---|
+| `0x0000` | `CONFIGURED_ANTENNA` | |
+| `0x0003` | `ANTENNA_MASK` | Low two bits select the antenna scheme |
+| `0x0004` | `EMBEDDED_COMMAND` | |
+| `0x0008` | `TAG_STREAMING` | **The streaming mode** [ADR-0025](../adr/0025-m3a-proves-durability-above-the-transport.md) chose |
+| `0x0010` | `LARGE_TAG_POPULATION_SUPPORT` | Set unconditionally by the SDK |
+| `0x0020` | `STATUS_REPORT_STREAMING` | See [finding 12](#12-a-liveness-signal-may-exist-after-all-and-adr-0025-assumed-it-did-not) |
+| `0x0040` | `RETURN_ON_N_TAGS` | Sync read only — the SDK refuses it while streaming |
+| `0x0080` | `READ_MULTIPLE_FAST_SEARCH` | |
+| `0x0100` | `STATS_REPORT_STREAMING` | Mutually exclusive with `STATUS_REPORT_STREAMING` |
+| `0x0200` | `GPI_TRIGGER_READ` | |
+| `0x0400` | `DUTY_CYCLE_CONTROL` | |
+
+### Tag-report layout — `serial_reader_l3.c`, `TMR_SR_parseMetadataFromMessage`
+
+The layout § 8.8.3 deferred on. A **flags word selects which fields are present**, and the
+present ones appear in exactly this order — so the parser is a sequence of conditional reads,
+not a fixed struct. Multi-byte fields are big-endian, per `tmr_utils.h`.
+
+| Order | Field | Width | Notes |
+|---|---|---|---|
+| 1 | read count | `u8` | |
+| 2 | RSSI | `i8` | Signed — read as `(int8_t)`, and dBm is negative |
+| 3 | antenna ID | `u8` | **Not an antenna number** — see [finding 10](#10-the-antenna-byte-is-a-packed-txrx-nibble-pair-not-an-antenna-number) |
+| 4 | frequency | `u24` | |
+| 5 | timestamp | `u32` | Relative to the read command; see [finding 11](#11-mercuryapi-anchors-the-relative-timestamp-exactly-as-adr-0024-prescribes) |
+| 6 | phase | `u16` | |
+| 7 | protocol | `u8` | |
+| 8 | data | `u16` bit-count, then bytes | Length is in **bits**, converted by `tm_u8s_per_bits` |
+| 9 | GPIO status | `u8` | Bit per pin |
+| — | EPC | `u16` bit-count, then bytes | Always present, after the flagged fields |
+
+The EPC length is also a **bit** count, and for Gen2 the EPC is followed by a two-byte PC word
+and then a CRC — with a third PC byte when `pc[0] & 0x02` is set.
 
 ## What the read path will depend on, quoted
 
@@ -382,6 +505,11 @@ said.
 
 ### 6. Antenna identity survives into the tag report, and costs a permissive change
 
+> **Corrected in part by [finding 10](#10-the-antenna-byte-is-a-packed-txrx-nibble-pair-not-an-antenna-number).**
+> The conclusion below holds — antenna identity does survive into the report — but *"in a form
+> the adapter can map to a checkpoint"* is doing more work than it looks. The byte is a packed
+> tx/rx nibble pair, not the logical port § 8.8.3 describes.
+
 Finding 3 left a caveat open: *"Whether per-antenna identity survives into the tag-report stream
 in a form the adapter can map to a checkpoint is a measurement."* § 8.8.3 answers it on paper —
 *"the Antenna ID entry will contain the logical antenna port of the tag read"* — and adds that a
@@ -435,6 +563,18 @@ Three things could be true instead. Choosing between them is a separate review, 
   against § 7's *"the reader never initiates"* discipline, which is what polling is for.
 - **The criterion stands and M3a cannot close it**, the way two support-checklist rows already
   cannot.
+
+**Decided by [ADR-0025](../adr/0025-m3a-proves-durability-above-the-transport.md): the first,
+with the third applied to the unreachable clause alone.** The criterion is restated around what
+a serial link can prove — no loss above the transport, a journal that never disagrees with what
+arrived, and every disconnection detected and recorded as a bounded gap — while *"the count of
+reads the module believes it sent"* is named structurally unclosable here and kept verbatim in
+M3b. The review also **rejected the second**, and on a cost this section had underpriced: § 8.8.1
+deduplicates in hardware, so polling does not merely cost throughput, it removes the burst every
+`SelectionRule` selects from and makes Milestone 1's exit criterion unobservable on this adapter.
+The 52-entry ceiling bounds distinct tags rather than duplicates, which is the worse thing to
+lose. What polling would have bought — a command-response round trip is a free liveness check —
+is what the new third clause now has to build by hand.
 
 What is not open is whether this was knowable. It was, from a document that had already been
 archived and hashed, three findings deep into a file whose whole purpose is that the document
@@ -506,6 +646,117 @@ Three things worth keeping from this:
 - **This is the argument for the whole approach, tested.** The plan was to write the parser from
   documentation before buying hardware, on the theory that a bug found at a desk is cheaper than
   one found in a field. The parser was wrong, and it was found at a desk, before the order.
+
+## What reading the command set settled
+
+Four findings from the pass that went after the opcodes rather than the CRC. Two of them correct
+things this repository had already written down.
+
+### 9. The command set is spread across three files, and one was archived
+
+`serial_reader_l3.c` was recorded here as *"the authority on everything § 7 leaves out."* It is
+the authority on the **protocol's behavior** and not on its **constants**. It references 53
+distinct `TMR_SR_OPCODE_*` symbols, 123 times, and defines none of them — they live in
+`serial_reader_imp.h`, and the accessor macros that fix byte order live in `tmr_utils.h`. Both
+are now recorded above with hashes.
+
+**The mirror is not internally consistent, either.** The same repository's `tm_reader.h` is a
+2009 file that contains **zero** of the modern symbols `serial_reader_l3.c` depends on —
+`TMR_SR_STATUS_*`, `TMR_TRD_METADATA_FLAG_*`, `dspMicros`. So the C file is a late version and at
+least one of its headers is an early one. That is not a problem for the facts taken above, all of
+which came from files that agree with each other, and it **is** a problem for anything taken from
+`tm_reader.h`, which is why nothing was and why it is not recorded as a document.
+
+**What is still missing**, and named so the next reader does not assume it was checked: the
+numeric values of `TMR_TRD_METADATA_FLAG_*` and `TMR_SR_STATUS_*`. The tag-report field *order* is
+established, from the parser itself; which bit selects which field is not.
+
+### 10. The antenna byte is a packed tx/rx nibble pair, not an antenna number
+
+§ 8.8.3 says *"the Antenna ID entry will contain the logical antenna port of the tag read"*, and
+[finding 6](#6-antenna-identity-survives-into-the-tag-report-and-costs-a-permissive-change) took
+that at face value. The parser reads the field as a plain `u8` — and then
+`TMR_SR_postprocessReaderSpecificMetadata` immediately takes it apart:
+
+```c
+tx = (read->antenna >> 4) & 0xF;
+rx = (read->antenna >> 0) & 0xF;
+
+// Due to limited space, Antenna 16 wraps around to 0
+if (0 == tx) { tx = 16; }
+if (0 == rx) { rx = 16; }
+```
+
+The byte is **two nibbles**, a transmit port and a receive port, which are then looked up in the
+reader's `txRxMap` to produce the logical antenna the operator configured. A `0` nibble means
+16, not 0.
+
+**This is finding 8's shape exactly**: a field whose documented description is true of the value
+you end up with and false of the bytes on the wire. An adapter that mapped this byte straight to
+`ReaderMessage::antenna` would produce antenna `17` for a tag read on tx 1 / rx 1, and it would do
+so consistently enough to look like a working mapping. Per-antenna identity is still reachable —
+finding 6 stands — but it costs a nibble split and a map, not a cast.
+
+### 11. MercuryAPI anchors the relative timestamp exactly as ADR-0024 prescribes
+
+[ADR-0024](../adr/0024-serial-reader-adapter-before-llrp.md) decided that *"every connect
+captures a session anchor `(received_at_utc, module_relative_us)`"*, and
+[finding 5](#5-the-timestamp-semantic-the-notes-said-to-verify-first-is-confirmed) established
+that the module's value is relative to the read command. The SDK does the same thing, and it is
+worth recording that the design was arrived at independently and agrees:
+
+```c
+/* Cache the read time so it can be put in tag read data later */
+tm_gettime_consistent(&starttimeHigh, &starttimeLow);
+reader->u.serialReader.readTimeHigh = starttimeHigh;
+reader->u.serialReader.readTimeLow  = starttimeLow;
+```
+
+…and then, per tag, `timestampLow = sr->readTimeLow + read->dspMicros`. The host's clock at
+command time, plus the module's relative offset. That is the anchor, in the vendor's own
+implementation.
+
+**One thing it does *not* settle, and the name is a trap.** The field is called `dspMicros`, and
+§ 8.8.3 says the timestamp is *"in milliseconds."* They cannot both be right, and the addition
+above is only dimensionally correct if `dspMicros` shares the unit of `tmr_gettime_low()` —
+which is in a platform file that is **not** in the mirror and has not been read. The evidence
+points at milliseconds: the vendor's own prose says so, and MercuryAPI's tag timestamps are
+milliseconds since the epoch. That is an inference, not a reading, and it is recorded as a named
+assumption for the same reason the CRC was: **a 1000× error here would look exactly like a
+working timestamp** on a bench and fail only on the arithmetic. Confirm it against a capture, or
+against `osdep`, before trusting `ReaderTimestamp::Uptime { micros }`'s conversion.
+
+### 12. A liveness signal may exist after all, and ADR-0025 assumed it did not
+
+[ADR-0025](../adr/0025-m3a-proves-durability-above-the-transport.md) accepts, as a stated cost of
+choosing to stream, that *"streaming has no liveness signal, and a quiet stream is
+indistinguishable from a quiet checkpoint."* That was the right reading of the **user guide**,
+which describes streaming only as tags being *"pushed out of the buffer as soon as they are put
+into the buffer."*
+
+The SDK has two more search flags:
+
+```c
+TMR_SR_SEARCH_FLAG_STATUS_REPORT_STREAMING = 32,
+TMR_SR_SEARCH_FLAG_STATS_REPORT_STREAMING  = 256,
+```
+
+…and `serial_reader_l3.c` has a branch, inside the continuous-read receive path, for *"a status
+stream response"* — a frame that arrives during streaming and carries reader statistics rather
+than a tag. The SDK sets one of the two whenever the caller has asked for stats, and the two are
+mutually exclusive.
+
+**This does not close [Q14](../open-questions.md#q14-reader-silence-threshold), and it changes
+what Q14 is asking.** What is established is that a non-tag frame *can* arrive during a stream.
+What is not established is whether it arrives **periodically**, on what interval, and whether it
+arrives at all when no tags are in the field — which is the only property that makes it a
+keepalive. The `TMR_SR_STATUS_*` content flags that would say are in the header the mirror does
+not carry a current copy of ([finding 9](#9-the-command-set-is-spread-across-three-files-and-one-was-archived)).
+
+So ADR-0025's accepted cost is **stated too absolutely** and is corrected in place — it is
+Proposed, not Accepted, so the ADR process permits it. The honest form is that no liveness signal
+is *known* to be available, and there is a named candidate whose periodicity nobody has
+established.
 
 ## Adding a document here
 

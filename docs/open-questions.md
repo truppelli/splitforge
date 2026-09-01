@@ -14,6 +14,7 @@ is in the timing model.
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | M5 | — |
 | [Q12](#q12-leap-second-handling) | Leap-second policy | M5 | — |
+| [Q14](#q14-reader-silence-threshold) | How long may a streaming reader be silent before it is presumed gone? | M3a | — |
 
 ---
 
@@ -152,6 +153,49 @@ are not. So "rely on smearing" is a defensible answer for a 5K and an undefensib
 Nothing was deferred to dodge this. M4 computes the difference it is given; making the
 inputs trustworthy is [Q10](#q10-gps-pps-time-reference)'s and
 [Q11](#q11-clock-error-budget-enforcement)'s territory, and this belongs beside them.
+
+### Q14: Reader silence threshold
+
+**Raised in:** [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md), which makes
+detecting a disconnection a deliverable of M3a and then declines to choose the number that
+detection turns on.
+
+A streaming ThingMagic module has no liveness signal. User Guide § 5.1.4.1 says *"flow control
+is not supported"* and § 8.8.2 says the module cannot *"detect a broken communications interface
+connection and stop streaming the tag results"* — so **a stream that has gone quiet is
+indistinguishable from a checkpoint with nobody crossing it.** The adapter has to presume the
+reader gone after some interval of silence, and the interval is a guess:
+
+- Too short, and the tail end of a 10K manufactures gaps in evidence that is perfectly intact.
+- Too long, and a module that died at the gun goes unnoticed for that long.
+
+**The prerequisite is not a measurement.** It is whether the module emits *anything* during a
+continuous read with no tags in the field — a keepalive, a periodic status frame, an empty tag
+report. The user guide does not say, in either direction. If the module does speak into a quiet
+field, the threshold can be a small multiple of that period and the ambiguity mostly disappears;
+if it does not, the threshold is a race policy rather than a protocol constant, and probably
+belongs per checkpoint — a finish line goes quiet differently from a start.
+
+**Half-answered by reading the SDK, 2026-08-31.** There is a mechanism: two search flags the
+user guide never mentions, `TMR_SR_SEARCH_FLAG_STATUS_REPORT_STREAMING` (32) and
+`TMR_SR_SEARCH_FLAG_STATS_REPORT_STREAMING` (256), and a branch in MercuryAPI's continuous-read
+receive path for *"a status stream response"* — a non-tag frame that arrives mid-stream. So the
+answer to *"can anything arrive but tags?"* is **yes**.
+
+That is not yet the answer to this question, which needs **periodicity**: on what interval such
+a frame arrives, and whether it arrives when the field is empty. The `TMR_SR_STATUS_*` content
+flags that would say are in a header the archived mirror does not carry a current copy of —
+see [finding 9](readers/vendor-documents.md#9-the-command-set-is-spread-across-three-files-and-one-was-archived)
+and [finding 12](readers/vendor-documents.md#12-a-liveness-signal-may-exist-after-all-and-adr-0025-assumed-it-did-not).
+Two routes to the rest: a current `tm_reader.h` from a vendor SDK distribution, or a module on
+a bench with nothing in front of it and a terminal capturing the port for a minute.
+
+**What is already decided** and not in scope here: that a silence-derived gap is recorded as
+*suspected* rather than confirmed, and that erring toward a false gap is the safe direction.
+This question is only the number.
+
+*Leaning:* configurable per checkpoint, with a conservative default and no accuracy claim
+attached to it, until a module and the SDK together say which of the two situations this is.
 
 ---
 
