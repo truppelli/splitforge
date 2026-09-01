@@ -38,14 +38,15 @@
 //! not running across.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use splitforge_api::{Health, HealthSource};
+use splitforge_api::{ClockSource, Health, HealthSource};
 use splitforge_domain::{ClockStep, RawReadJournal, SAMPLE_INTERVAL_MS};
 use splitforge_storage::{ConfigStore, SqliteJournal};
+use splitforge_timesource::ClockReading;
 
 /// The SplitForge edge service.
 #[derive(Debug, Parser)]
@@ -79,6 +80,15 @@ struct Device {
     database: PathBuf,
     started: Instant,
     stores: Mutex<Stores>,
+    /// What the time daemon last said, or `None` before the first sample.
+    ///
+    /// Deliberately **not** behind [`Self::stores`]. The health handler must be able to
+    /// report the clock source while a read is being written, and folding it in behind the
+    /// journal's lock would make the cheapest field on the report wait for the most
+    /// expensive one. An `RwLock` because every reader here only reads: the sampler swaps a
+    /// small value once a minute, and the blocking subprocess that produced it ran outside
+    /// the lock entirely.
+    clock: RwLock<Option<ClockReading>>,
 }
 
 struct Stores {
@@ -101,6 +111,24 @@ impl HealthSource for Device {
             0,
             0,
         );
+
+        // Read before the journal lock, so the answer survives a poisoned `stores` — the
+        // clock source is exactly the sort of thing somebody wants to know about a device
+        // that has already had one failure.
+        match self.clock.read() {
+            Ok(sampled) => {
+                // `device_clock_state` rather than `state_for_evidence`: the endpoint keeps
+                // the distinction a read cannot. `None` here means nobody has asked yet, and
+                // it must not arrive as a measurement saying the clock is bad.
+                health.clock_source = sampled.as_ref().map(|reading| ClockSource {
+                    measurement: reading.measurement().to_owned(),
+                    state: reading.device_clock_state(),
+                });
+            }
+            Err(_) => {
+                health.degrade("the device's time source is unreadable after an earlier failure")
+            }
+        }
 
         // A poisoned mutex means a previous call panicked while holding it. Reporting that
         // as a degradation is strictly better than panicking again: the endpoint keeps
@@ -236,6 +264,53 @@ fn sample() -> (time::OffsetDateTime, Instant) {
     (time::OffsetDateTime::now_utc(), Instant::now())
 }
 
+/// How often the service asks the time daemon what it believes.
+///
+/// A minute, because what it measures moves on the order of minutes: chrony reaching a
+/// source, losing one, or a PPS refclock coming up. Sampling faster would spend a subprocess
+/// to re-learn the same answer, and sampling per request would put `chronyc`'s retry timeout
+/// in the path of a watchdog whose whole job is to notice quickly.
+const CLOCK_SOURCE_INTERVAL_SECS: u64 = 60;
+
+/// Asks the time daemon what it believes, forever, and caches the answer.
+///
+/// Every read this service writes carries a `DeviceClockState`, and that is permanent
+/// evidence — so it has to come from a measurement rather than an assumption. The same
+/// sample answers `/health`, which is why it is taken here once rather than by each caller.
+///
+/// **The subprocess runs on a blocking thread.** `read_tracking` shells out to `chronyc`,
+/// which blocks for as long as it takes to give up on a daemon that is not answering; run on
+/// the reactor it would stall every task in the process, including the health endpoint that
+/// exists to report trouble.
+///
+/// A failed sample leaves the previous answer in place rather than clearing it. Losing one
+/// reading is a gap in freshness; replacing a good reading with nothing would tell the
+/// operator their clock is unmeasured when it was measured a minute ago.
+async fn watch_the_time_source(device: Arc<Device>) {
+    let mut interval =
+        tokio::time::interval(std::time::Duration::from_secs(CLOCK_SOURCE_INTERVAL_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        // The first tick completes immediately, so the first sample is taken at startup and
+        // `/health` does not report an unknown time source for the first minute of an event.
+        interval.tick().await;
+
+        match tokio::task::spawn_blocking(splitforge_timesource::read_tracking).await {
+            Ok(reading) => match device.clock.write() {
+                Ok(mut slot) => *slot = Some(reading),
+                Err(_) => eprintln!(
+                    "splitforge-edge: the time source could not be recorded; it is unreadable \
+                     after an earlier failure"
+                ),
+            },
+            Err(error) => {
+                eprintln!("splitforge-edge: the time source could not be sampled: {error}");
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -270,6 +345,7 @@ async fn main() -> Result<()> {
         database: args.database.clone(),
         started: Instant::now(),
         stores: Mutex::new(Stores { journal, config }),
+        clock: RwLock::new(None),
     });
 
     eprintln!(
@@ -282,6 +358,7 @@ async fn main() -> Result<()> {
     // service that refused to serve health because its clock watcher fell over would have
     // traded the smaller problem for the larger one. It ends when the process does.
     tokio::spawn(watch_the_clock(Arc::clone(&device)));
+    tokio::spawn(watch_the_time_source(Arc::clone(&device)));
 
     serve(&args.socket, device).await
 }

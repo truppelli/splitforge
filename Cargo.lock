@@ -867,6 +867,7 @@ dependencies = [
  "splitforge-cli",
  "splitforge-domain",
  "splitforge-storage",
+ "splitforge-timesource",
  "tempfile",
  "time",
  "tokio",

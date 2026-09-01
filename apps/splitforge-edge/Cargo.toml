@@ -16,6 +16,10 @@ clap.workspace = true
 splitforge-api.workspace = true
 splitforge-domain.workspace = true
 splitforge-storage.workspace = true
+# The service needs a `DeviceClockState` for every read it writes, which is permanent
+# evidence — so it asks the time daemon rather than assuming. Sampled on an interval off the
+# reactor, because `chronyc` blocks while it retries a daemon that is not answering.
+splitforge-timesource.workspace = true
 # ADR-0010: `time` is the project's timestamp crate. The clock monitor needs one directly,
 # because the discontinuity it looks for is between this crate and `std`'s monotonic clock.
 time.workspace = true

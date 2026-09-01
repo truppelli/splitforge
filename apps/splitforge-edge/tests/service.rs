@@ -100,6 +100,25 @@ impl Service {
         (status, json)
     }
 
+    /// Polls `/health` until `ready` accepts the body, or gives up after ten seconds.
+    ///
+    /// Background tasks land after the socket does — the service binds and starts answering
+    /// while its first time-source sample is still running in a subprocess. Polling is the
+    /// difference between asserting that something happened and racing it.
+    async fn poll_until(
+        &self,
+        ready: impl Fn(&serde_json::Value) -> bool,
+    ) -> Option<serde_json::Value> {
+        for _ in 0..200 {
+            let (_status, health) = self.get("/health").await;
+            if ready(&health) {
+                return Some(health);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
     /// Sends SIGTERM, which is what systemd sends on `stop` and `restart`.
     async fn terminate(mut self) -> std::process::ExitStatus {
         let killed = sigterm(self.child.id().expect("a pid")).await;
@@ -185,6 +204,43 @@ async fn the_service_reports_the_database_it_was_pointed_at() {
     assert_eq!(health["min_free_mb"], 256, "the documented default floor");
     assert_eq!(health["above_floor"], true);
     assert!(health["free_mb"].as_u64().is_some(), "got: {health}");
+
+    service.terminate().await;
+}
+
+#[tokio::test]
+async fn the_service_measures_its_time_source_rather_than_assuming_one() {
+    // Every read this service writes carries a `DeviceClockState`, and that is permanent
+    // evidence. This asserts the measurement happened at all — the four tokens are the whole
+    // vocabulary, and which one arrives depends on what the machine running the test has
+    // installed, so the token is checked for membership rather than for a value.
+    let service = Service::start().await;
+
+    let health = service
+        .poll_until(|health| !health["clock_source"].is_null())
+        .await
+        .expect("the service never sampled its time source");
+
+    let source = &health["clock_source"];
+    let measurement = source["measurement"].as_str().expect("a token");
+    assert!(
+        matches!(
+            measurement,
+            "measured" | "no_daemon_tool" | "daemon_unreachable" | "unreadable"
+        ),
+        "unknown measurement token {measurement:?}: {health}"
+    );
+
+    // The distinction the field exists for. "Nobody could ask" must never arrive looking
+    // like "we asked, and the clock is bad" — only a real measurement carries a state.
+    if measurement == "measured" {
+        assert!(source["state"].is_string(), "got: {health}");
+    } else {
+        assert!(
+            source["state"].is_null(),
+            "an unmeasured clock has no state to report: {health}"
+        );
+    }
 
     service.terminate().await;
 }
