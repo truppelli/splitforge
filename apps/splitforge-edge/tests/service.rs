@@ -129,14 +129,34 @@ impl Service {
     }
 
     /// Sends SIGTERM, which is what systemd sends on `stop` and `restart`.
-    async fn terminate(mut self) -> std::process::ExitStatus {
-        let killed = sigterm(self.child.id().expect("a pid")).await;
+    ///
+    /// Takes the whole handle, so the temporary directory goes with it — which is what a
+    /// test that is finished with the service wants, and what a test that still needs to
+    /// look at the files must not do. That one calls [`Self::stop`].
+    async fn terminate(self) -> std::process::ExitStatus {
+        self.stop().await.0
+    }
+
+    /// Stops the service and hands back its directory, still alive.
+    ///
+    /// A `TempDir` deletes its contents when it drops, so inspecting a database *after* the
+    /// service has exited means keeping the handle for as long as the files are wanted.
+    async fn stop(self) -> (std::process::ExitStatus, tempfile::TempDir) {
+        let Self {
+            _directory,
+            socket: _,
+            mut child,
+        } = self;
+
+        let killed = sigterm(child.id().expect("a pid")).await;
         assert!(killed, "kill -TERM failed");
 
-        tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
             .await
             .expect("the service did not exit within 10s of SIGTERM")
-            .expect("wait")
+            .expect("wait");
+
+        (status, _directory)
     }
 }
 
@@ -340,7 +360,9 @@ async fn every_read_the_service_wrote_is_in_the_journal_after_it_exits() {
         .expect("the service never persisted the whole scenario");
 
     let database = service.database();
-    service.terminate().await;
+    // `stop` rather than `terminate`: the directory has to outlive the service, because the
+    // whole claim below is about what it left on disk.
+    let (_status, _directory) = service.stop().await;
 
     let journal = SqliteJournal::open(&database).expect("reopen the journal");
     let reads = journal.read_all().expect("read the journal");
