@@ -13,6 +13,9 @@ publish.workspace = true
 [dependencies]
 axum.workspace = true
 serde.workspace = true
+# The shape of the answer uses the project's vocabulary for a clock state rather than a
+# second spelling of it. Types only — this crate still opens nothing.
+splitforge-domain.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

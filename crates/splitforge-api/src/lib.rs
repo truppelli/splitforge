@@ -42,6 +42,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
+use splitforge_domain::DeviceClockState;
 
 #[cfg(unix)]
 mod socket;
@@ -117,6 +118,12 @@ pub struct Health {
     /// alongside it — so "this device was never given a reader" cannot be read as "this
     /// device has a working reader", which is the exact confusion the comment forbade.
     pub reader: ReaderHealth,
+    /// What the time daemon last said, or `None` before the first sample.
+    ///
+    /// Sampled on an interval and cached rather than measured per request: `chronyc` blocks
+    /// while it retries an unresponsive daemon, and a watchdog polling every few seconds
+    /// must never be the thing that waits for it.
+    pub clock_source: Option<ClockSource>,
 }
 
 /// Which reader the service was composed with.
@@ -175,6 +182,25 @@ impl ReaderHealth {
     }
 }
 
+/// What the system's time daemon last reported.
+///
+/// Two fields because *"not measured"* and *"measured, and the clock is bad"* are different
+/// facts that call for opposite reactions, and a report that collapsed them would tell an
+/// operator their clock was broken because nobody asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockSource {
+    /// Which kind of answer this is, as a fixed token: `measured`, `no_daemon_tool`,
+    /// `daemon_unreachable`, or `unreadable`. A watchdog branches on this and never on
+    /// prose.
+    pub measurement: String,
+    /// The determined state, or `None` when nothing could be measured.
+    ///
+    /// Note this is **not** the state stamped on reads. A read's column is not nullable, so
+    /// an unmeasured clock is recorded there as `Unsynced`; here the distinction survives,
+    /// because an operator can act on it.
+    pub state: Option<DeviceClockState>,
+}
+
 impl Health {
     /// A report with nothing wrong.
     #[must_use]
@@ -199,6 +225,7 @@ impl Health {
             above_floor: None,
             clock_steps: 0,
             reader: ReaderHealth::none(),
+            clock_source: None,
         }
     }
 
@@ -336,6 +363,25 @@ mod tests {
 
         assert_ne!(never.reader.kind, stopped.reader.kind);
         assert_ne!(never.reader.state, stopped.reader.state);
+    }
+
+    #[test]
+    fn a_clock_that_was_never_sampled_is_not_a_clock_that_is_broken() {
+        // The same rule as the reader field, applied to the time source: `None` means
+        // nobody asked, and it must not serialize into anything a watchdog could read as a
+        // measurement. `state` inside a reading carries the same distinction one level down.
+        let unsampled = serde_json::to_value(sample()).expect("serialize");
+        assert!(unsampled["clock_source"].is_null(), "got: {unsampled}");
+
+        let mut asked = sample();
+        asked.clock_source = Some(ClockSource {
+            measurement: "no_daemon_tool".to_owned(),
+            state: None,
+        });
+        let asked = serde_json::to_value(asked).expect("serialize");
+
+        assert_eq!(asked["clock_source"]["measurement"], "no_daemon_tool");
+        assert!(asked["clock_source"]["state"].is_null());
     }
 
     #[test]

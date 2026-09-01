@@ -30,6 +30,7 @@ splitforge-simulator = { version = "0.0.0", path = "apps/splitforge-simulator" }
 splitforge-storage = { version = "0.0.0", path = "crates/splitforge-storage" }
 splitforge-testkit = { version = "0.0.0", path = "crates/splitforge-testkit" }
 splitforge-thingmagic = { version = "0.0.0", path = "crates/splitforge-thingmagic" }
+splitforge-timesource = { version = "0.0.0", path = "crates/splitforge-timesource" }
 
 anyhow = "1.0.100"
 # The local API, which listens on a Unix socket and never binds a port (ADR-0021).

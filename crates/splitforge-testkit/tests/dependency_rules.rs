@@ -38,6 +38,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
         &["splitforge-domain", "splitforge-reader"],
     ),
     ("splitforge-storage", &["splitforge-domain"]),
+    // Runs `chronyc` and classifies its answer, so it is an adapter by the § 2 rule that
+    // I/O lives in one. Two callers on opposite sides of the workspace need it: `doctor`
+    // reports the clock once, and the service stamps a state on every read it writes.
+    ("splitforge-timesource", &["splitforge-domain"]),
     ("splitforge-engine", &["splitforge-domain"]),
     ("splitforge-results", &["splitforge-domain"]),
     (
@@ -86,6 +90,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "splitforge-storage",
             "splitforge-sync",
             "splitforge-testkit",
+            "splitforge-timesource",
         ],
     ),
     // The composition root: the only crate that is allowed to know every concrete
@@ -106,6 +111,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "splitforge-sync",
             "splitforge-testkit",
             "splitforge-thingmagic",
+            "splitforge-timesource",
         ],
     ),
 ];
