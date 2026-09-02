@@ -98,6 +98,21 @@ impl Reassembler {
         let mut cursor = 0_usize;
         let mut stats = Stats::default();
 
+        // Where to fall back to if nothing better turns up.
+        //
+        // `Incomplete` means two different things depending on how the cursor arrived. At a
+        // boundary reached by consuming whole frames it means exactly what it says: the rest
+        // of this frame has not been read yet, and waiting is correct. At a position reached
+        // by *resynchronizing* it is a guess — and a guess that waits is how one corrupt
+        // header swallows every frame behind it, because the bytes that would prove it wrong
+        // are the ones sitting unread behind the guess.
+        //
+        // So an incomplete candidate is remembered rather than waited on, and the scan goes
+        // on to the next one. If a later candidate turns out to be a real CRC-verified frame,
+        // the guess was wrong and its bytes were never a frame. If none does, the cursor
+        // comes back here and the bytes are held after all.
+        let mut held: Option<usize> = None;
+
         loop {
             let remaining = &self.buffer[cursor..];
             if remaining.is_empty() {
@@ -106,11 +121,27 @@ impl Reassembler {
 
             match frame::decode(remaining) {
                 Ok(Decoded::Frame { response, consumed }) => {
+                    // A frame that passed its CRC settles everything skipped to reach it:
+                    // whatever those bytes looked like, they were not a frame.
+                    if let Some(start) = held.take() {
+                        stats.discarded_bytes += (cursor - start) as u64;
+                    }
                     stats.frames += 1;
                     on_frame(&response);
                     cursor += consumed;
                 }
-                Ok(Decoded::Incomplete { .. }) => break,
+                Ok(Decoded::Incomplete { .. }) => {
+                    // The *first* incomplete candidate is the one worth keeping: it is the
+                    // earliest place the rest of a frame could still arrive for.
+                    let start = *held.get_or_insert(cursor);
+                    match frame::resynchronize(remaining) {
+                        Some(skip) => cursor += skip,
+                        None => {
+                            cursor = start;
+                            break;
+                        }
+                    }
+                }
                 Err(error) => {
                     match error {
                         FrameError::NotSynchronized { .. } => stats.not_synchronized += 1,
@@ -124,10 +155,21 @@ impl Reassembler {
                     // nothing at all means the rest of the buffer holds no candidate and
                     // can go.
                     let skip = frame::resynchronize(remaining).unwrap_or(remaining.len());
-                    stats.discarded_bytes += skip as u64;
+                    // Only bytes the cursor actually leaves behind are discarded. While a
+                    // candidate is held these may yet be retained, so they are counted when
+                    // a frame proves them dead rather than optimistically here.
+                    if held.is_none() {
+                        stats.discarded_bytes += skip as u64;
+                    }
                     cursor += skip;
                 }
             }
+        }
+
+        // A scan that ran off the end with a candidate still outstanding keeps it, which is
+        // the property that makes a frame split across two reads survive the split.
+        if let Some(start) = held {
+            cursor = cursor.min(start);
         }
 
         self.buffer.drain(..cursor);
@@ -190,7 +232,10 @@ mod tests {
         for index in 0..bytes.len() - 1 {
             assert!(feed(&mut reassembler, &bytes[index..=index]).is_empty());
         }
-        assert_eq!(feed(&mut reassembler, &bytes[bytes.len() - 1..]), vec![0x22]);
+        assert_eq!(
+            feed(&mut reassembler, &bytes[bytes.len() - 1..]),
+            vec![0x22]
+        );
     }
 
     #[test]

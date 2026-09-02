@@ -96,8 +96,7 @@ mod tests {
 
     #[test]
     fn a_factory_may_refuse_to_open() {
-        let mut factory =
-            || -> io::Result<Port> { Err(io::Error::from(io::ErrorKind::NotFound)) };
+        let mut factory = || -> io::Result<Port> { Err(io::Error::from(io::ErrorKind::NotFound)) };
         assert!(factory.open().is_err());
     }
 

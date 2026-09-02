@@ -428,7 +428,7 @@ mod tests {
         let mut receiver = reader(factory).start();
         for expected in 0..3_u8 {
             let message = receiver.recv().await.expect("a read per connection");
-            assert_eq!(message.chip, ChipId::new(&format!("{expected:02X}")));
+            assert_eq!(message.chip, ChipId::new(format!("{expected:02X}")));
         }
         assert!(opens.load(Ordering::SeqCst) >= 3);
     }
