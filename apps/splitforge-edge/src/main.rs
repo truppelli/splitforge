@@ -618,11 +618,12 @@ fn check_for_silence(device: &Device) {
     } else if verdict == SilenceVerdict::Close {
         // Reads are arriving again, so whatever was open has ended — including a confirmed
         // gap, because a reader that is delivering is a reader that came back.
-        if let Err(error) =
-            stores
-                .journal
-                .close_reader_gap(&watching.reader, now, monotonic_ms, Some("reads resumed"))
-        {
+        if let Err(error) = stores.journal.close_reader_gap(
+            &watching.reader,
+            now,
+            monotonic_ms,
+            Some("reads resumed"),
+        ) {
             eprintln!("splitforge-edge: a reader gap could not be closed — {error}");
         }
     }
