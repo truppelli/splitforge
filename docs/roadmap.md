@@ -268,10 +268,13 @@ captures.
       both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
       and an open gap degrades health. The gap table and the watchdog are testable against the
       simulator; only *inducing* a real disconnection needs the module.
-      **The table and the health reporting are built**
-      ([ADR-0026](adr/0026-a-reader-gap-is-two-rows.md)); what remains is the watchdog that
-      opens a suspected gap, and the adapter reporting a confirmed one — which needs
-      `ReaderProvider` to be able to say the port died, and it currently cannot
+      **The table, the health reporting and the silence watchdog are built**
+      ([ADR-0026](adr/0026-a-reader-gap-is-two-rows.md)). The watchdog opens a *suspected* gap
+      when a running race goes quiet for longer than `reader_silence_ms`, and closes whatever
+      is open when reads resume; its decision is a pure function in the domain, so the
+      boundary cases are tested without a database or a timer. **What remains is a
+      *confirmed* gap**, which needs `ReaderProvider` to be able to say the port died — it
+      currently returns only a channel of reads, and that change is shared with M3b
 - [x] **`splitforge-edge` has a read path**, in the ordering
       [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
       first, always, then the journal append, then notify — `reads_persisted` moves only after

@@ -628,6 +628,15 @@ pub enum DeviceCommand {
         /// rather than in `policy set`.
         #[arg(long, value_name = "MB")]
         min_free_mb: Option<u64>,
+
+        /// Presume a reader gone after this many milliseconds of silence.
+        ///
+        /// **Zero disables the check.** The right value is not known — it depends on whether
+        /// the module says anything into an empty field, which is Q14 — so this is a race-day
+        /// policy with a conservative default and no accuracy claim attached to it. Too short
+        /// manufactures gaps on a quiet finish line; too long lets a dead reader go unnoticed.
+        #[arg(long, value_name = "MS")]
+        reader_silence_ms: Option<u64>,
     },
 
     /// Show device settings and what the disk currently has left.
@@ -957,7 +966,7 @@ mod tests {
     fn the_free_space_floor_is_set_in_mebibytes() {
         let cli = Cli::try_parse_from(["splitforge", "device", "set", "--min-free-mb", "512"])
             .expect("parse");
-        let Command::Device(DeviceCommand::Set { min_free_mb }) = cli.command else {
+        let Command::Device(DeviceCommand::Set { min_free_mb, .. }) = cli.command else {
             panic!("expected a device set");
         };
         assert_eq!(min_free_mb, Some(512));

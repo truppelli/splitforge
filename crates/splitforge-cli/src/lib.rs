@@ -395,19 +395,38 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Device(command) => {
             let mut store = open_store(&database)?;
             match command {
-                DeviceCommand::Set { min_free_mb } => {
-                    let Some(mb) = min_free_mb else {
-                        bail!("nothing to set; pass --min-free-mb");
-                    };
-                    let bytes = mb.saturating_mul(1024 * 1024);
-                    store.set_min_free_bytes(bytes)?;
-                    store.record_audit(
-                        &actor,
-                        "device.set",
-                        Some("min_free_mb"),
-                        Some(&format!(r#"{{"min_free_mb":{mb}}}"#)),
-                    )?;
-                    emit(&serde_json::json!({ "min_free_mb": mb }), format)
+                DeviceCommand::Set {
+                    min_free_mb,
+                    reader_silence_ms,
+                } => {
+                    if min_free_mb.is_none() && reader_silence_ms.is_none() {
+                        bail!("nothing to set; pass --min-free-mb or --reader-silence-ms");
+                    }
+                    let mut changed = serde_json::Map::new();
+
+                    if let Some(mb) = min_free_mb {
+                        store.set_min_free_bytes(mb.saturating_mul(1024 * 1024))?;
+                        store.record_audit(
+                            &actor,
+                            "device.set",
+                            Some("min_free_mb"),
+                            Some(&format!(r#"{{"min_free_mb":{mb}}}"#)),
+                        )?;
+                        changed.insert("min_free_mb".to_owned(), mb.into());
+                    }
+
+                    if let Some(ms) = reader_silence_ms {
+                        store.set_reader_silence_threshold_ms(ms)?;
+                        store.record_audit(
+                            &actor,
+                            "device.set",
+                            Some("reader_silence_ms"),
+                            Some(&format!(r#"{{"reader_silence_ms":{ms}}}"#)),
+                        )?;
+                        changed.insert("reader_silence_ms".to_owned(), ms.into());
+                    }
+
+                    emit(&serde_json::Value::Object(changed), format)
                 }
                 DeviceCommand::Show => {
                     let floor = store.min_free_bytes()?;
@@ -416,6 +435,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         &serde_json::json!({
                             "database": database.display().to_string(),
                             "min_free_mb": floor / (1024 * 1024),
+                            "reader_silence_ms": store.reader_silence_threshold_ms()?,
                             "free_mb": space.available_mb(),
                             "total_mb": space.total_mb(),
                             "above_floor": space.is_above(floor),
