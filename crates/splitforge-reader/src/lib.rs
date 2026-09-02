@@ -182,6 +182,70 @@ impl Ingest {
     }
 }
 
+/// Why a provider has no connection.
+///
+/// A token rather than a sentence, for the same reason the clock-source report names its
+/// `measurement` as one: a watchdog reading the evidence should never have to parse prose to
+/// tell these apart. They are different diagnoses — one says the reader was never reachable,
+/// the other says it was and stopped being.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disconnection {
+    /// The connection could never be established: no device node, no permission, nothing
+    /// listening. The ordinary reading is that the reader was not plugged in.
+    NotOpened,
+    /// A connection that had been delivering ended.
+    ///
+    /// This is the disconnection an observer actually induces, and the one Milestone 3a's
+    /// exit criterion is about.
+    Ended,
+}
+
+impl Disconnection {
+    /// What to write beside the gap this opened.
+    ///
+    /// Lives here rather than at the point the row is written so the two cannot drift, and
+    /// is a compile-time constant with no interpolation — which is what lets a diagnostic
+    /// bundle carry it
+    /// ([ADR-0020](../../../docs/adr/0020-diagnostic-bundles-carry-no-participant-data.md)).
+    #[must_use]
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::NotOpened => "the reader's port could not be opened",
+            Self::Ended => "the connection to the reader ended",
+        }
+    }
+}
+
+/// What a provider reports.
+///
+/// **A channel of reads alone cannot say the port died**, and that silence is the whole
+/// difficulty: a dead reader and a checkpoint with nobody crossing it produce identical
+/// evidence, which is why a gap derived from silence is recorded as
+/// [`GapDetection::Suspected`](splitforge_domain::GapDetection::Suspected) and never as
+/// confirmed. A provider holds the one fact that resolves the ambiguity — whether it still
+/// has a connection — and these variants are how it says so.
+///
+/// The lifecycle variants carry no timestamp. When a disconnection happened is the receiving
+/// end's observation, taken from the device clock it already trusts for evidence; a provider
+/// reporting its own idea of the time would be a second clock in the record with nothing
+/// disciplining it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReaderEvent {
+    /// One read, exactly as the channel used to carry it.
+    Read(ReaderMessage),
+    /// A connection was established.
+    ///
+    /// Sent on every successful connection rather than only the first, because after a
+    /// reconnection it is what closes the gap the disconnection opened — and a reader that
+    /// has come back but has nothing to report yet must not stay in one.
+    Connected,
+    /// There is no connection, and the provider is retrying.
+    Disconnected {
+        /// Which of the two ways it happened.
+        cause: Disconnection,
+    },
+}
+
 /// A source of reads.
 ///
 /// Channel-based rather than `async fn` in a trait, so it stays dyn-compatible: the edge
@@ -190,11 +254,15 @@ pub trait ReaderProvider: Send {
     /// Which reader this provider represents.
     fn reader_id(&self) -> ReaderId;
 
-    /// Starts producing reads, returning the channel they arrive on.
+    /// Starts producing events, returning the channel they arrive on.
     ///
     /// The provider owns its own connection lifecycle — including reconnect and backoff —
-    /// and keeps producing until the channel is dropped.
-    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderMessage>;
+    /// and keeps producing until the channel is dropped. It reports that lifecycle rather
+    /// than only its results: **a provider that cannot say it lost the port leaves the
+    /// receiving end unable to tell a dead reader from a quiet one**, which is the
+    /// distinction [ADR-0025](../../../docs/adr/0025-m3a-proves-durability-above-the-transport.md)
+    /// makes a clause of Milestone 3a's exit criterion.
+    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderEvent>;
 }
 
 #[cfg(test)]

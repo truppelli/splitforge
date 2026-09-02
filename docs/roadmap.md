@@ -262,7 +262,7 @@ captures.
       over which the module's counter is continuous — and the wall clock only says *when*,
       because the subtraction rests on the monotonic one
       ([clock discipline § 3](clock-and-time-discipline.md#3-the-three-clocks))
-- [ ] **Detect a disconnection and record it as a bounded gap**, which
+- [x] **Detect a disconnection and record it as a bounded gap**, which
       [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md) makes a deliverable
       rather than an assumption: a device node that vanishes and a stream that goes silent are
       both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
@@ -272,9 +272,14 @@ captures.
       ([ADR-0026](adr/0026-a-reader-gap-is-two-rows.md)). The watchdog opens a *suspected* gap
       when a running race goes quiet for longer than `reader_silence_ms`, and closes whatever
       is open when reads resume; its decision is a pure function in the domain, so the
-      boundary cases are tested without a database or a timer. **What remains is a
-      *confirmed* gap**, which needs `ReaderProvider` to be able to say the port died — it
-      currently returns only a channel of reads, and that change is shared with M3b
+      boundary cases are tested without a database or a timer. **Confirmed gaps are built
+      too**: `ReaderProvider` returns a channel of `ReaderEvent` rather than of reads, so a
+      provider can say it connected, produced, and lost the port. A transport that dies opens
+      a `confirmed` gap immediately instead of waiting out a silence threshold that was only
+      ever a guess, and a reconnection closes it — including one that comes back to an empty
+      field, which produces no read to close it with. **This is the change M3b shares**, and
+      it is the last of this bullet that could be written without the module: what remains is
+      inducing a real disconnection
 - [x] **`splitforge-edge` has a read path**, in the ordering
       [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
       first, always, then the journal append, then notify — `reads_persisted` moves only after
@@ -332,6 +337,49 @@ in hardware — *"duplicate tag reads do not result in additional entries"* — 
 structurally unobservable on this adapter, turning 638 raw reads into roughly 24 entries and a
 count. Its 52-entry ceiling also bounds the wrong thing: distinct tags, so a full buffer loses a
 runner where streaming loses a redundant read.
+
+**Observed**, the connection lifecycle. The service rendering its own health, with a
+provider that lost the port and then got it back:
+
+```console
+$ curl -s --unix-socket api.sock http://localhost/health          # the port died
+{"status":"degraded","degraded_by":["reader mat has been confirmed gone since
+ 2026-09-02 17:33:21.914872 +00:00:00; reads from it are not being recorded"],...,
+ "reader":{"kind":"simulated","state":"disconnected","reads_received":0,
+ "reads_persisted":0,"open_gap":{"detection":"confirmed","open_for_ms":0}}}
+                                                                       HTTP 503
+
+$ curl -s --unix-socket api.sock http://localhost/health          # and came back
+{"status":"ok","degraded_by":[],...,
+ "reader":{"kind":"simulated","state":"connected","reads_received":0,
+ "reads_persisted":0,"open_gap":null}}
+                                                                       HTTP 200
+```
+
+`"detection":"confirmed"` is the milestone. Every gap this service could open before this
+change was `suspected`, because silence was the only evidence it had — and the silence
+threshold that decides when to open one is
+[Q14](open-questions.md#q14-reader-silence-threshold), which is still unanswered and still a
+guess. A transport that says the port died needs no
+threshold and no guess, and it says so in the same millisecond.
+
+`reads_received` is `0` in both. **A connection is not a read**, and neither is a
+disconnection: the lifecycle moves `state` and `open_gap` and touches no counter that claims
+to count evidence. It does reset the silence clock, because a connection is the only proof of
+life a reader in an empty field will ever produce — without that, the watchdog would open a
+*suspected* gap seconds after a real reconnection closed a confirmed one.
+
+**The confirmed half is deliberately not gated on a race running and the suspected half is.**
+The asymmetry is the ambiguity rather than an oversight: silence on a bench overnight means
+nothing and would teach an operator to ignore the signal, whereas a reader that is *not there*
+is a true statement at any hour — and it is the statement an operator most wants before the
+gun, when the reason the port will not open is usually that nothing has been plugged into it.
+
+What none of this has seen is a real cable. The provider's lifecycle is exercised against
+ports that fail on demand, and the service's against a `Device` on a temporary database;
+`apps/splitforge-edge/tests/service.rs` — the file that spawns the real binary and talks over
+a real socket — is `#![cfg(unix)]` and was not run on the machine this was written on.
+**Inducing a disconnection on hardware is the exit criterion, and it is still open.**
 
 **Observed**, the frame codec. Thirty-nine tests, none of which need hardware, and most of
 which feed the parser input that is deliberately wrong. Three carry the claim:

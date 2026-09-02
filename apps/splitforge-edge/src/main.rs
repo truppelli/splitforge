@@ -57,7 +57,7 @@ use splitforge_domain::{
     ClockStep, DeviceClockState, GapDetection, RaceId, RawReadJournal, ReaderId,
     SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
 };
-use splitforge_reader::{Ingest, ReaderMessage, ReaderProvider};
+use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
 use splitforge_timesource::ClockReading;
 use tokio::sync::mpsc::Receiver;
@@ -474,8 +474,23 @@ impl Device {
 /// A failed write stops the loop rather than skipping the read. A timer that cannot persist
 /// evidence must say so and stop, not keep counting into a journal that is missing rows —
 /// and stopping is visible, both as `ReaderState::Stopped` and as a degraded `/health`.
-fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderMessage>, ingest: Ingest) {
-    while let Some(message) = receiver.blocking_recv() {
+fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, ingest: Ingest) {
+    while let Some(event) = receiver.blocking_recv() {
+        let message = match event {
+            ReaderEvent::Read(message) => message,
+            // The lifecycle half, which is why this loop takes events rather than reads.
+            // Neither of these is a read, so neither touches a counter that claims to
+            // count reads.
+            ReaderEvent::Connected => {
+                record_connection(device, None);
+                continue;
+            }
+            ReaderEvent::Disconnected { cause } => {
+                record_connection(device, Some(cause));
+                continue;
+            }
+        };
+
         device.update_reader(|status| {
             status.received += 1;
             // Before the write, deliberately. This says the reader is alive, which it has
@@ -522,6 +537,95 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderMessage>, ing
     // The channel closed: the reader has nothing more to send. For a scripted scenario that
     // is the ordinary end of a run, which is why it carries no fault beside it.
     device.update_reader(|status| status.state = Some(ReaderState::Stopped));
+}
+
+/// Records a change in whether the reader is connected, as evidence rather than as a flag.
+///
+/// `cause` is `None` for a connection and `Some` for the loss of one. This is the *confirmed*
+/// half of [ADR-0025](../../../docs/adr/0025-m3a-proves-durability-above-the-transport.md)'s
+/// third clause — the half `check_for_silence` below deliberately cannot supply, because a
+/// stream that has gone quiet is indistinguishable from a checkpoint nobody is crossing. A
+/// transport that says the port died is not ambiguous, so what it opens is
+/// [`GapDetection::Confirmed`].
+///
+/// **This one is not gated on a race running, and the silence watchdog is.** The asymmetry is
+/// the ambiguity, not an oversight: silence during a race means something and silence on a
+/// bench overnight does not, whereas a reader that is *not there* is a true statement at any
+/// hour. It is also the statement an operator most wants before the gun, when the reason the
+/// port will not open is usually that nothing has been plugged into it yet.
+///
+/// Writing the same gap twice costs nothing — `open_reader_gap` returns the gap already open
+/// rather than opening a second ([ADR-0026](../../../docs/adr/0026-a-reader-gap-is-two-rows.md))
+/// — which is what lets the provider report every failed reconnection without this function
+/// having to remember what it was last told.
+fn record_connection(device: &Device, cause: Option<Disconnection>) {
+    // The reader's lock first, and released before the journal work below, which can block on
+    // an fsync the read path is in the middle of. Same ordering as `check_for_silence`, for
+    // the same reason.
+    let watching = {
+        let Ok(mut status) = device.reader.lock() else {
+            eprintln!(
+                "splitforge-edge: the reader's state could not be updated; it is \
+                 unreadable after an earlier failure"
+            );
+            return;
+        };
+        status.state = Some(if cause.is_some() {
+            ReaderState::Disconnected
+        } else {
+            ReaderState::Connected
+        });
+        if cause.is_none() {
+            // A connection is evidence the reader is alive, exactly as a read is — and it is
+            // the only such evidence a reader in an empty field will produce. Without this,
+            // silence would still be measured from before the outage, and the watchdog would
+            // open a *suspected* gap seconds after a real reconnection closed a confirmed
+            // one.
+            status.last_message = Some(Instant::now());
+        }
+        status.watching.clone()
+    };
+
+    // No reader composed means there is nothing to record a gap against. The provider cannot
+    // reach this state today; the guard is here because `watching` is what names the row.
+    let Some(watching) = watching else {
+        return;
+    };
+
+    let Ok(mut stores) = device.stores.lock() else {
+        return;
+    };
+
+    let now = time::OffsetDateTime::now_utc();
+    let monotonic_ms = u64::try_from(device.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let outcome = match cause {
+        Some(cause) => stores
+            .journal
+            .open_reader_gap(
+                &watching.reader,
+                GapDetection::Confirmed,
+                now,
+                monotonic_ms,
+                Some(cause.detail()),
+            )
+            .map(|_| ()),
+        // Closes whatever is open, including a gap that was merely suspected: a reader that
+        // is connected is a reader that came back, whichever way its absence was noticed.
+        None => stores
+            .journal
+            .close_reader_gap(
+                &watching.reader,
+                now,
+                monotonic_ms,
+                Some("the reader connected"),
+            )
+            .map(|_| ()),
+    };
+
+    if let Err(error) = outcome {
+        eprintln!("splitforge-edge: a reader connection change could not be recorded — {error}");
+    }
 }
 
 /// How often the silence watchdog looks at the clock.
@@ -820,7 +924,11 @@ fn compose_simulated_reader(
 
     device.update_reader(|status| {
         status.kind = ReaderKind::Simulated;
-        status.state = Some(ReaderState::Connected);
+        // Not `Connected`. The composition root has started a provider, not established a
+        // connection, and only the provider can say which it has — a distinction that costs
+        // a simulated reader microseconds and stops a serial reader whose port never opened
+        // from reporting a healthy read path all day.
+        status.state = Some(ReaderState::Disconnected);
         status.watching = Some(Watching {
             reader: reader.clone(),
             race: race.id,
@@ -883,4 +991,183 @@ async fn serve(_socket: &std::path::Path, _device: Arc<Device>) -> Result<()> {
         "splitforge-edge serves its API on a Unix socket (ADR-0021) and cannot run on this \
          platform. The target is 64-bit Linux (ADR-0002); use the CLI here instead."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device on a temporary 5K, with a reader composed and nothing behind it.
+    ///
+    /// The directory comes back with it: dropping it deletes the database out from under an
+    /// open journal, which on Windows fails the next write rather than the assertion that
+    /// wanted it.
+    fn a_device_watching_a_reader() -> (Device, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let database = directory.path().join("event.db");
+
+        let mut config = ConfigStore::open(&database).expect("open the configuration");
+        splitforge_cli::load_fixture(&mut config, "test", "five-k").expect("load the fixture");
+        let race = match config.resolve_race(None).expect("resolve the race") {
+            RaceSelection::One(race) => race,
+            other => panic!("expected exactly one race, got {other:?}"),
+        };
+        let loaded = config.load(race.id).expect("load the race configuration");
+        let reader = loaded
+            .readers
+            .first()
+            .expect("the fixture configures a reader")
+            .id
+            .clone();
+
+        let (journal, _recovery) =
+            SqliteJournal::open_recovering(&database).expect("open the journal");
+
+        let device = Device {
+            database,
+            started: Instant::now(),
+            stores: Mutex::new(Stores { journal, config }),
+            clock: RwLock::new(None),
+            reader: Mutex::new(ReaderStatus {
+                // The kind is irrelevant here and there is no `Serial` yet: composing the
+                // adapter is the next bullet, and a variant nothing produces would be a
+                // claim about hardware this milestone has not earned.
+                kind: ReaderKind::Simulated,
+                state: Some(ReaderState::Disconnected),
+                received: 0,
+                persisted: 0,
+                fault: None,
+                watching: Some(Watching {
+                    reader,
+                    race: race.id,
+                }),
+                last_message: Some(Instant::now()),
+            }),
+        };
+
+        (device, directory)
+    }
+
+    fn open_gap(device: &Device) -> Option<splitforge_domain::ReaderGap> {
+        let watching = device
+            .reader
+            .lock()
+            .expect("the reader's state")
+            .watching
+            .clone()
+            .expect("a reader is composed");
+        device
+            .stores
+            .lock()
+            .expect("the stores")
+            .journal
+            .open_reader_gap_for(&watching.reader)
+            .expect("read the open gap")
+    }
+
+    #[test]
+    fn a_transport_that_died_opens_a_confirmed_gap() {
+        let (device, _directory) = a_device_watching_a_reader();
+        assert!(open_gap(&device).is_none(), "nothing is wrong yet");
+
+        record_connection(&device, Some(Disconnection::Ended));
+
+        let gap = open_gap(&device).expect("the disconnection opened a gap");
+        // The milestone. Until the provider could say the port died, every gap this service
+        // could open was `suspected` — because silence was the only evidence it had, and a
+        // quiet checkpoint produces exactly the same silence.
+        assert_eq!(gap.detection, GapDetection::Confirmed);
+        assert_eq!(
+            device.reader.lock().expect("the reader's state").state,
+            Some(ReaderState::Disconnected)
+        );
+    }
+
+    #[test]
+    fn a_reconnection_closes_the_gap_the_disconnection_opened() {
+        let (device, _directory) = a_device_watching_a_reader();
+
+        record_connection(&device, Some(Disconnection::NotOpened));
+        assert!(open_gap(&device).is_some());
+
+        record_connection(&device, None);
+
+        assert!(
+            open_gap(&device).is_none(),
+            "a gap that ended must stop degrading health, or the device is permanently sick"
+        );
+        assert_eq!(
+            device.reader.lock().expect("the reader's state").state,
+            Some(ReaderState::Connected)
+        );
+    }
+
+    #[test]
+    fn a_reconnection_restarts_the_silence_clock() {
+        let (device, _directory) = a_device_watching_a_reader();
+
+        // Backdated well past any threshold: without the reset below, the watchdog would
+        // open a *suspected* gap moments after a real reconnection closed a confirmed one.
+        let stale = Instant::now() - std::time::Duration::from_secs(3_600);
+        device.update_reader(|status| status.last_message = Some(stale));
+
+        record_connection(&device, None);
+
+        let last = device
+            .reader
+            .lock()
+            .expect("the reader's state")
+            .last_message
+            .expect("a reader is composed");
+        assert!(
+            last > stale,
+            "a connection is evidence the reader is alive, and is the only such evidence a \
+             reader in an empty field will produce"
+        );
+    }
+
+    #[test]
+    fn repeated_reports_of_the_same_outage_write_one_gap() {
+        let (device, _directory) = a_device_watching_a_reader();
+
+        // The provider reports every failed reconnection rather than tracking which it has
+        // already mentioned. That is only safe because opening is idempotent here.
+        for _ in 0..5 {
+            record_connection(&device, Some(Disconnection::NotOpened));
+        }
+
+        let gap = open_gap(&device).expect("a gap");
+        let all = device
+            .stores
+            .lock()
+            .expect("the stores")
+            .journal
+            .recent_reader_gaps(16)
+            .expect("read the gaps");
+        assert_eq!(all.len(), 1, "five reports, one gap: {all:?}");
+        assert_eq!(gap.detection, GapDetection::Confirmed);
+    }
+
+    #[test]
+    fn the_detail_beside_a_gap_names_which_way_it_failed() {
+        // Two different diagnoses. One says look for a cable, the other says something that
+        // was working stopped — and an operator reads the second very differently.
+        assert_ne!(
+            Disconnection::NotOpened.detail(),
+            Disconnection::Ended.detail()
+        );
+
+        for cause in [Disconnection::NotOpened, Disconnection::Ended] {
+            let detail = cause.detail();
+            // The defect that has shipped four times in this repository: a message written
+            // across two source lines whose trailing backslash was dropped still compiles,
+            // still passes every test that checks the fields around it, and prints the
+            // source file's indentation into the middle of the sentence.
+            assert!(
+                !detail.contains("  "),
+                "collapsed line continuation: {detail:?}"
+            );
+            assert!(!detail.is_empty());
+        }
+    }
 }

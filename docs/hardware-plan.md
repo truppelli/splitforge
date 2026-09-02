@@ -549,6 +549,21 @@ antenna, and completely different framing is the first genuine adversary the abs
 faced. If `ReaderProvider` survives it unchanged, that is evidence. If it needs changes,
 finding out now costs a crate; finding out at M6 costs a rewrite.
 
+**Answered, and it needed a change.** The port survived everything this section expected it
+to be tested by: different framing, no reader clock, and one antenna all fit behind it
+without moving it. What it did not survive was the thing the module *cannot* do — announce
+its own failure. On a link with no flow control the adapter is the only thing that knows the
+port died, and `start()` returned a channel of reads, so it had nowhere to say so; a service
+downstream could not tell a dead reader from a checkpoint nobody was crossing. `start()` now
+returns a channel of `ReaderEvent`, which carries the connection lifecycle beside the reads.
+
+**That is the prediction working rather than failing**, and it is the same shape as the CRC:
+the abstraction was written around LLRP, LLRP runs over TCP, and TCP made liveness somebody
+else's problem so completely that the port never asked for it. The gap was found by the
+adapter that has no such transport — the crate this section argued for — rather than at M6 by
+the reader that would have inherited the assumption. The change is small and it is shared
+with M3b, which needs the same signal for a socket that closes.
+
 ### It retires the Pi-side reliability questions that need real reads
 
 [Milestone 5](roadmap.md#milestone-5--field-reliability) names four things it could not retire

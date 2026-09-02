@@ -37,7 +37,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use splitforge_domain::{ChipId, ReaderId};
-use splitforge_reader::{ReaderMessage, ReaderProvider, ReaderTimestamp};
+use splitforge_reader::{ReaderEvent, ReaderMessage, ReaderProvider, ReaderTimestamp};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::mpsc;
 
@@ -363,9 +363,17 @@ impl ReaderProvider for SimulatedReader {
         self.reader.clone()
     }
 
-    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderMessage> {
+    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderEvent> {
         let (sender, receiver) = mpsc::channel(self.buffer.max(1));
         tokio::spawn(async move {
+            // A scripted reader is connected the moment it starts, and says so on the
+            // channel rather than letting the composition root assume it. The assumption is
+            // harmless here and is not harmless for a serial port that may never open, so
+            // the honest signal is the one both providers send.
+            if sender.send(ReaderEvent::Connected).await.is_err() {
+                return;
+            }
+
             let mut previous: Option<OffsetDateTime> = None;
             for scripted in self.script {
                 if let Speed::Accelerated { factor } = self.speed {
@@ -380,7 +388,11 @@ impl ReaderProvider for SimulatedReader {
                 // A closed channel means the consumer is gone. Stopping is correct: a real
                 // adapter with nowhere to deliver reads should stop reading, not buffer
                 // the race into memory.
-                if sender.send(scripted.message).await.is_err() {
+                if sender
+                    .send(ReaderEvent::Read(scripted.message))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -605,8 +617,21 @@ mod tests {
         let expected = reader.scripted_reads();
 
         let mut receiver = Box::new(reader).start();
+
+        // The connection comes first and is not part of the script. Asserting it here rather
+        // than filtering it away keeps this test honest about everything the channel carries.
+        assert_eq!(
+            receiver.recv().await.expect("the connection"),
+            ReaderEvent::Connected
+        );
+
         let mut received = 0_usize;
-        while receiver.recv().await.is_some() {
+        while let Some(event) = receiver.recv().await {
+            assert!(
+                matches!(event, ReaderEvent::Read(_)),
+                "a scripted reader reports no disconnection: its script ends, and the \
+                 channel closing is how it says so"
+            );
             received += 1;
         }
         assert_eq!(received, expected);

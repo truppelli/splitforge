@@ -144,6 +144,14 @@ pub enum ReaderKind {
 pub enum ReaderState {
     /// Producing, or waiting for the next read.
     Connected,
+    /// Composed, with no connection to the reader right now.
+    ///
+    /// The state a serial reader is in before its port opens and between losing it and
+    /// getting it back, and the state every reader starts in — a composition root cannot
+    /// honestly report a connection it has not been told exists. Distinct from
+    /// [`Self::Stopped`] because the provider is still trying: this one is expected to
+    /// change on its own, and that one is not.
+    Disconnected,
     /// Finished or given up. A simulated reader reaching the end of its script is the
     /// ordinary case; a read path that stopped because a write failed is not, and that one
     /// also degrades the status with a reason.
