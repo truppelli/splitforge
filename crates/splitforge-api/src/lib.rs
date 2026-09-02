@@ -42,7 +42,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
-use splitforge_domain::DeviceClockState;
+use splitforge_domain::{DeviceClockState, GapDetection};
 
 #[cfg(unix)]
 mod socket;
@@ -167,6 +167,17 @@ pub struct ReaderHealth {
     /// and the gap between them is a monitored quantity."* A single counter incremented
     /// before the write would report reads that a power cut took.
     pub reads_persisted: u64,
+    /// The gap this reader is in right now, if it is in one.
+    ///
+    /// `None` is the ordinary state and means the reader is producing — or that it never
+    /// was, which [`Self::kind`] and [`Self::state`] already distinguish. An open gap
+    /// degrades the whole report, so a watchdog sees it on the status line without parsing
+    /// prose ([ADR-0025](../../../docs/adr/0025-m3a-proves-durability-above-the-transport.md)).
+    ///
+    /// Read from the journal on every request rather than held in memory, which is what
+    /// makes it survive a restart: the row that opened the gap was on disk before the power
+    /// went ([ADR-0026](../../../docs/adr/0026-a-reader-gap-is-two-rows.md)).
+    pub open_gap: Option<OpenGap>,
 }
 
 impl ReaderHealth {
@@ -178,8 +189,24 @@ impl ReaderHealth {
             state: None,
             reads_received: 0,
             reads_persisted: 0,
+            open_gap: None,
         }
     }
+}
+
+/// The gap a reader is currently in.
+///
+/// Deliberately not the whole [`splitforge_domain::ReaderGap`]: health answers *is this
+/// device in trouble right now*, and the sequence numbers that identify the evidence belong
+/// to whoever is reading the evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenGap {
+    /// How it was noticed. `suspected` means the stream went quiet, which is
+    /// indistinguishable from a checkpoint nobody is crossing — so an operator reading this
+    /// is being told what was observed, not what is wrong.
+    pub detection: GapDetection,
+    /// How long it has been open, in milliseconds, on the monotonic clock.
+    pub open_for_ms: u64,
 }
 
 /// What the system's time daemon last reported.
@@ -359,6 +386,7 @@ mod tests {
             state: Some(ReaderState::Stopped),
             reads_received: 638,
             reads_persisted: 638,
+            open_gap: None,
         };
 
         assert_ne!(never.reader.kind, stopped.reader.kind);

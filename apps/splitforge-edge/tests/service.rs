@@ -500,6 +500,100 @@ async fn a_clock_that_jumped_makes_the_service_report_degraded() {
 }
 
 #[tokio::test]
+async fn an_open_gap_degrades_health_and_a_closed_one_does_not() {
+    // The claim ADR-0025 asks for: a disconnection does not pass unnoticed. Written from
+    // another process on purpose — the service never held this gap in memory, and reads it
+    // from the rows on every request, which is what makes it survive a restart (ADR-0026).
+    let service = Service::start().await;
+
+    let (status, before) = service.get("/health").await;
+    assert!(status.contains("200 OK"), "no gap yet: {status}");
+    assert!(
+        before["reader"]["open_gap"].is_null(),
+        "a device with no gap reports none, not a zero: {before}"
+    );
+
+    let mut journal = SqliteJournal::open(service.database()).expect("open journal");
+    let mat = splitforge_domain::ReaderId::new("mat");
+    journal
+        .open_reader_gap(
+            &mat,
+            splitforge_domain::GapDetection::Confirmed,
+            time::OffsetDateTime::now_utc(),
+            1_000,
+            Some("no such device"),
+        )
+        .expect("open a gap");
+    drop(journal);
+
+    let (status, during) = service.get("/health").await;
+    assert!(
+        status.contains("503"),
+        "an unplugged reader is exactly what a watchdog must see: {status}"
+    );
+    assert_eq!(during["status"], "degraded");
+    assert_eq!(during["reader"]["open_gap"]["detection"], "confirmed");
+
+    let reason = during["degraded_by"][0].as_str().expect("a reason");
+    assert!(
+        reason.contains("mat"),
+        "which reader is the first thing an operator needs: {reason}"
+    );
+
+    // Closing it is the other half: a gap that ended must stop degrading, or the device
+    // stays red for the rest of the event over a cable that was plugged back in.
+    let mut journal = SqliteJournal::open(service.database()).expect("reopen journal");
+    journal
+        .close_reader_gap(&mat, time::OffsetDateTime::now_utc(), 31_000, None)
+        .expect("close the gap")
+        .expect("a gap was open");
+    drop(journal);
+
+    let (status, after) = service.get("/health").await;
+    assert!(status.contains("200 OK"), "the reader is back: {status}");
+    assert_eq!(after["status"], "ok");
+    assert!(after["reader"]["open_gap"].is_null());
+
+    service.terminate().await;
+}
+
+#[tokio::test]
+async fn a_suspected_gap_says_so_rather_than_asserting_the_reader_is_dead() {
+    // ADR-0025's ambiguity, surviving into what an operator reads. A quiet finish line and a
+    // dead module are indistinguishable, so the report must not claim to have told them
+    // apart.
+    let service = Service::start().await;
+
+    let mut journal = SqliteJournal::open(service.database()).expect("open journal");
+    journal
+        .open_reader_gap(
+            &splitforge_domain::ReaderId::new("finish"),
+            splitforge_domain::GapDetection::Suspected,
+            time::OffsetDateTime::now_utc(),
+            1_000,
+            None,
+        )
+        .expect("open a gap");
+    drop(journal);
+
+    let (status, health) = service.get("/health").await;
+    assert!(status.contains("503"), "got: {status}");
+    assert_eq!(health["reader"]["open_gap"]["detection"], "suspected");
+
+    let reason = health["degraded_by"][0].as_str().expect("a reason");
+    assert!(
+        reason.contains("possibly"),
+        "a suspicion must not be worded as a fact: {reason}"
+    );
+    assert!(
+        !reason.contains("confirmed"),
+        "and must not borrow the other word: {reason}"
+    );
+
+    service.terminate().await;
+}
+
+#[tokio::test]
 async fn sigterm_stops_the_service_cleanly_and_removes_the_socket() {
     // systemd sends SIGTERM on both `stop` and `restart`. A service that ignored it would
     // be killed after the timeout and leave its socket behind for the next start to clear.

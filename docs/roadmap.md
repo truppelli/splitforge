@@ -249,7 +249,11 @@ captures.
       rather than an assumption: a device node that vanishes and a stream that goes silent are
       both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
       and an open gap degrades health. The gap table and the watchdog are testable against the
-      simulator; only *inducing* a real disconnection needs the module
+      simulator; only *inducing* a real disconnection needs the module.
+      **The table and the health reporting are built**
+      ([ADR-0026](adr/0026-a-reader-gap-is-two-rows.md)); what remains is the watchdog that
+      opens a suspected gap, and the adapter reporting a confirmed one — which needs
+      `ReaderProvider` to be able to say the port died, and it currently cannot
 - [x] **`splitforge-edge` has a read path**, in the ordering
       [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
       first, always, then the journal append, then notify — `reads_persisted` moves only after

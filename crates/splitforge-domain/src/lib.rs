@@ -34,6 +34,7 @@ mod clock;
 mod derived;
 mod entity;
 mod error;
+mod gap;
 mod ids;
 mod manual;
 mod policy;
@@ -51,6 +52,7 @@ pub use entity::{
     RaceConfig, RaceSession, Reader, SessionAction,
 };
 pub use error::DomainError;
+pub use gap::{DEFAULT_SILENCE_THRESHOLD_MS, GapDetection, GapEdge, ReaderGap};
 pub use ids::{
     AcceptedReadId, Bib, CheckpointId, ChipId, EventId, ManualEntryId, ParticipantId, RaceId,
     RawReadId, ReaderId, ResultRevisionId, SPLITFORGE_NAMESPACE, StatusDeclarationId,

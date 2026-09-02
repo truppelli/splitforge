@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 use sha2::{Digest, Sha256};
 use splitforge_domain::{
-    CheckpointId, ChipId, ClockStep, DeviceClockState, FallbackReason, JournalError, ManualEntry,
-    ManualEntryId, ParticipantId, RaceId, RawRead, RawReadId, RawReadJournal, ReaderId,
-    StoredClockStep, StoredManualEntry, StoredRawRead, TimestampSource,
+    CheckpointId, ChipId, ClockStep, DeviceClockState, FallbackReason, GapDetection, GapEdge,
+    JournalError, ManualEntry, ManualEntryId, ParticipantId, RaceId, RawRead, RawReadId,
+    RawReadJournal, ReaderGap, ReaderId, StoredClockStep, StoredManualEntry, StoredRawRead,
+    TimestampSource,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -356,6 +357,218 @@ impl SqliteJournal {
             });
         }
         Ok(steps)
+    }
+
+    /// Opens a gap for `reader_id`, or returns the one already open.
+    ///
+    /// **The first detection wins** (ADR-0026). A confirmed disconnection arriving while a
+    /// suspected gap is already open does not open a second gap and does not upgrade the
+    /// first: it is one outage noticed twice, and the alternative — closing the suspected gap
+    /// to reopen it as confirmed — would write a "reads resumed" edge at a moment when
+    /// nothing resumed.
+    ///
+    /// No sidecar, for the same reason a clock step has none (ADR-0018): a gap is derived
+    /// from state this process already holds rather than taken off a wire once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the row cannot be written or the table cannot be read.
+    pub fn open_reader_gap(
+        &mut self,
+        reader_id: &ReaderId,
+        detection: GapDetection,
+        observed_at: OffsetDateTime,
+        monotonic_ms: u64,
+        detail: Option<&str>,
+    ) -> Result<ReaderGap, StorageError> {
+        if let Some(existing) = self.open_reader_gap_for(reader_id)? {
+            return Ok(existing);
+        }
+
+        let observed_us = to_micros(observed_at)?;
+        self.conn.execute(
+            "INSERT INTO reader_gap_events
+                (reader_id, edge, detection, observed_at_us, monotonic_ms, closes_seq, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+            params![
+                reader_id.as_str(),
+                GapEdge::Opened.as_str(),
+                detection.as_str(),
+                observed_us,
+                i64::try_from(monotonic_ms).unwrap_or(i64::MAX),
+                detail,
+            ],
+        )?;
+
+        let seq = u64::try_from(self.conn.last_insert_rowid()).unwrap_or(0);
+        Ok(ReaderGap {
+            opened_seq: seq,
+            closed_seq: None,
+            reader_id: reader_id.clone(),
+            detection,
+            started_at: from_micros(observed_us)?,
+            ended_at: None,
+            started_monotonic_ms: monotonic_ms,
+            ended_monotonic_ms: None,
+            detail: detail.map(str::to_owned),
+        })
+    }
+
+    /// Closes the gap open for `reader_id`, returning it, or `None` if none was open.
+    ///
+    /// Closing is idempotent in the only sense that matters on a reconnect loop: a reader
+    /// that was never recorded as gone produces no row, so a provider that reconnects
+    /// without ever having failed does not litter the table with empty gaps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the row cannot be written or the table cannot be read.
+    pub fn close_reader_gap(
+        &mut self,
+        reader_id: &ReaderId,
+        observed_at: OffsetDateTime,
+        monotonic_ms: u64,
+        detail: Option<&str>,
+    ) -> Result<Option<ReaderGap>, StorageError> {
+        let Some(open) = self.open_reader_gap_for(reader_id)? else {
+            return Ok(None);
+        };
+
+        let observed_us = to_micros(observed_at)?;
+        self.conn.execute(
+            "INSERT INTO reader_gap_events
+                (reader_id, edge, detection, observed_at_us, monotonic_ms, closes_seq, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                reader_id.as_str(),
+                GapEdge::Closed.as_str(),
+                open.detection.as_str(),
+                observed_us,
+                i64::try_from(monotonic_ms).unwrap_or(i64::MAX),
+                i64::try_from(open.opened_seq).unwrap_or(i64::MAX),
+                detail,
+            ],
+        )?;
+
+        let seq = u64::try_from(self.conn.last_insert_rowid()).unwrap_or(0);
+        Ok(Some(ReaderGap {
+            closed_seq: Some(seq),
+            ended_at: Some(from_micros(observed_us)?),
+            ended_monotonic_ms: Some(monotonic_ms),
+            ..open
+        }))
+    }
+
+    /// The gap currently open for one reader, if it has one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or a row cannot be decoded.
+    pub fn open_reader_gap_for(
+        &self,
+        reader_id: &ReaderId,
+    ) -> Result<Option<ReaderGap>, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare(&Self::gap_query("AND closed.seq IS NULL AND opened.reader_id = ?1"))?;
+        let mut rows = statement.query(params![reader_id.as_str()])?;
+        rows.next()?.map(Self::gap_from_row).transpose()
+    }
+
+    /// Every gap still open, across all readers, oldest first.
+    ///
+    /// This is what degrades `/health`: an open gap is a reportable state rather than an
+    /// omission (ADR-0025), and it answers correctly after a restart because the opening row
+    /// was on disk before the power went.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or a row cannot be decoded.
+    pub fn open_reader_gaps(&self) -> Result<Vec<ReaderGap>, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare(&Self::gap_query("AND closed.seq IS NULL ORDER BY opened.seq"))?;
+        let mut rows = statement.query([])?;
+
+        let mut gaps = Vec::new();
+        while let Some(row) = rows.next()? {
+            gaps.push(Self::gap_from_row(row)?);
+        }
+        Ok(gaps)
+    }
+
+    /// The most recent gaps, newest first, open and closed alike, capped at `limit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or a row cannot be decoded.
+    pub fn recent_reader_gaps(&self, limit: u32) -> Result<Vec<ReaderGap>, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare(&Self::gap_query("ORDER BY opened.seq DESC LIMIT ?1"))?;
+        let mut rows = statement.query([limit])?;
+
+        let mut gaps = Vec::new();
+        while let Some(row) = rows.next()? {
+            gaps.push(Self::gap_from_row(row)?);
+        }
+        Ok(gaps)
+    }
+
+    /// How many gaps this device has recorded, open and closed alike.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be queried.
+    pub fn reader_gap_count(&self) -> Result<u64, StorageError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM reader_gap_events WHERE edge = ?1",
+            [GapEdge::Opened.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// The pairing every gap query shares.
+    ///
+    /// Written once and reused because it is the join a caller would otherwise forget:
+    /// selecting from this table without it returns *edges*, which look enough like gaps to
+    /// be mistaken for them and are twice as numerous.
+    fn gap_query(tail: &str) -> String {
+        let opened = GapEdge::Opened.as_str();
+        format!(
+            "SELECT opened.seq, closed.seq, opened.reader_id, opened.detection,
+                    opened.observed_at_us, closed.observed_at_us,
+                    opened.monotonic_ms, closed.monotonic_ms, opened.detail
+             FROM reader_gap_events AS opened
+             LEFT JOIN reader_gap_events AS closed ON closed.closes_seq = opened.seq
+             WHERE opened.edge = '{opened}' {tail}"
+        )
+    }
+
+    /// Decodes one paired row.
+    fn gap_from_row(row: &Row<'_>) -> Result<ReaderGap, StorageError> {
+        let detection_token: String = row.get(3)?;
+        let detection = GapDetection::parse(&detection_token).ok_or_else(|| {
+            StorageError::Decode(format!("unknown gap detection {detection_token:?}"))
+        })?;
+
+        let ended_us: Option<i64> = row.get(5)?;
+        let ended_monotonic: Option<i64> = row.get(7)?;
+
+        Ok(ReaderGap {
+            opened_seq: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+            closed_seq: row
+                .get::<_, Option<i64>>(1)?
+                .map(|seq| u64::try_from(seq).unwrap_or(0)),
+            reader_id: ReaderId::new(row.get::<_, String>(2)?),
+            detection,
+            started_at: from_micros(row.get(4)?)?,
+            ended_at: ended_us.map(from_micros).transpose()?,
+            started_monotonic_ms: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+            ended_monotonic_ms: ended_monotonic.map(|ms| u64::try_from(ms).unwrap_or(0)),
+            detail: row.get(8)?,
+        })
     }
 
     /// Records one operator's claim that a participant was at a checkpoint at a time.
@@ -1344,5 +1557,231 @@ mod tests {
         let entries = journal.manual_entries(race).expect("read back");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], written, "a restart must not alter the claim");
+    }
+
+    fn a_gap_at(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_775_000_000 + seconds).expect("a valid timestamp")
+    }
+
+    #[test]
+    fn a_gap_opens_unpaired_and_closes_into_a_bounded_one() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let mat = ReaderId::new("mat");
+
+        let opened = journal
+            .open_reader_gap(
+                &mat,
+                GapDetection::Confirmed,
+                a_gap_at(0),
+                1_000,
+                Some("no such device"),
+            )
+            .expect("open a gap");
+        assert!(opened.is_open(), "a gap with no closing row is open");
+        assert_eq!(opened.duration_ms(), None);
+        assert_eq!(journal.open_reader_gaps().expect("open gaps").len(), 1);
+
+        let closed = journal
+            .close_reader_gap(&mat, a_gap_at(30), 31_000, Some("port reopened"))
+            .expect("close a gap")
+            .expect("a gap was open");
+        assert!(!closed.is_open());
+        assert_eq!(closed.opened_seq, opened.opened_seq);
+        assert_eq!(closed.duration_ms(), Some(30_000));
+        assert_eq!(closed.detection, GapDetection::Confirmed);
+        assert!(journal.open_reader_gaps().expect("open gaps").is_empty());
+    }
+
+    #[test]
+    fn an_open_gap_is_found_again_by_a_process_that_did_not_open_it() {
+        // The property that makes two rows worth the trouble: nothing is held in memory, so
+        // a service that died mid-gap and restarted still knows the reader was gone.
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("event.db");
+        {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            journal
+                .open_reader_gap(
+                    &ReaderId::new("mat"),
+                    GapDetection::Confirmed,
+                    a_gap_at(0),
+                    1_000,
+                    None,
+                )
+                .expect("open a gap");
+        }
+
+        let reopened = SqliteJournal::open(&path).expect("reopen");
+        let open = reopened.open_reader_gaps().expect("open gaps");
+        assert_eq!(open.len(), 1, "the gap outlived the process that opened it");
+        assert!(open[0].is_open());
+    }
+
+    #[test]
+    fn the_first_detection_wins_and_no_second_gap_opens() {
+        // ADR-0026: one outage noticed twice is one gap. Upgrading `suspected` to
+        // `confirmed` is forbidden by ADR-0025, and closing the suspected gap to reopen it
+        // would write a "reads resumed" edge at a moment when nothing resumed.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let mat = ReaderId::new("mat");
+
+        let first = journal
+            .open_reader_gap(&mat, GapDetection::Suspected, a_gap_at(0), 1_000, None)
+            .expect("open a gap");
+        let second = journal
+            .open_reader_gap(&mat, GapDetection::Confirmed, a_gap_at(5), 6_000, None)
+            .expect("the same gap back");
+
+        assert_eq!(second.opened_seq, first.opened_seq);
+        assert_eq!(second.detection, GapDetection::Suspected);
+        assert_eq!(journal.reader_gap_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn two_readers_keep_their_gaps_apart() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let start = ReaderId::new("start");
+        let finish = ReaderId::new("finish");
+
+        journal
+            .open_reader_gap(&start, GapDetection::Confirmed, a_gap_at(0), 1_000, None)
+            .expect("open");
+        journal
+            .open_reader_gap(&finish, GapDetection::Suspected, a_gap_at(1), 2_000, None)
+            .expect("open");
+
+        assert_eq!(journal.open_reader_gaps().expect("open gaps").len(), 2);
+
+        journal
+            .close_reader_gap(&start, a_gap_at(10), 11_000, None)
+            .expect("close")
+            .expect("start had a gap");
+
+        let still_open = journal.open_reader_gaps().expect("open gaps");
+        assert_eq!(still_open.len(), 1);
+        assert_eq!(still_open[0].reader_id, finish);
+    }
+
+    #[test]
+    fn closing_a_reader_that_was_never_gone_records_nothing() {
+        // A provider that reconnects without ever having failed must not litter the table
+        // with empty gaps.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let closed = journal
+            .close_reader_gap(&ReaderId::new("mat"), a_gap_at(0), 1_000, None)
+            .expect("close");
+        assert!(closed.is_none());
+        assert_eq!(journal.reader_gap_count().expect("count"), 0);
+    }
+
+    #[test]
+    fn a_gap_cannot_be_closed_twice() {
+        // The unique index is the guard: two closing rows for one opening row would give a
+        // gap two different durations depending on which row a query happened to find.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let mat = ReaderId::new("mat");
+        let opened = journal
+            .open_reader_gap(&mat, GapDetection::Confirmed, a_gap_at(0), 1_000, None)
+            .expect("open");
+
+        journal
+            .close_reader_gap(&mat, a_gap_at(10), 11_000, None)
+            .expect("close")
+            .expect("a gap was open");
+
+        let second = journal.conn.execute(
+            "INSERT INTO reader_gap_events
+                (reader_id, edge, detection, observed_at_us, monotonic_ms, closes_seq, detail)
+             VALUES ('mat', 'closed', 'confirmed', 1, 1, ?1, NULL)",
+            [i64::try_from(opened.opened_seq).expect("a small seq")],
+        );
+        assert!(second.is_err(), "a second closing row must be refused");
+    }
+
+    #[test]
+    fn an_edge_that_pairs_with_nothing_cannot_be_written() {
+        // The CHECK constraint, stated as a test: a closing row without `closes_seq` would
+        // be a gap end belonging to no gap, and an opening row with one would be a gap that
+        // ends itself.
+        let journal = SqliteJournal::open_in_memory().expect("open");
+
+        let dangling_close = journal.conn.execute(
+            "INSERT INTO reader_gap_events
+                (reader_id, edge, detection, observed_at_us, monotonic_ms, closes_seq, detail)
+             VALUES ('mat', 'closed', 'confirmed', 1, 1, NULL, NULL)",
+            [],
+        );
+        assert!(dangling_close.is_err(), "a closing row needs closes_seq");
+
+        let self_closing_open = journal.conn.execute(
+            "INSERT INTO reader_gap_events
+                (reader_id, edge, detection, observed_at_us, monotonic_ms, closes_seq, detail)
+             VALUES ('mat', 'opened', 'confirmed', 1, 1, 1, NULL)",
+            [],
+        );
+        assert!(
+            self_closing_open.is_err(),
+            "an opening row takes no closes_seq"
+        );
+    }
+
+    #[test]
+    fn reader_gaps_are_append_only_at_the_database() {
+        // Same guarantee as raw_reads and clock_steps, and the reason ADR-0026 made a gap
+        // two rows rather than one: an end written into the opening row would be an UPDATE,
+        // and this is what an UPDATE meets.
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        journal
+            .open_reader_gap(
+                &ReaderId::new("mat"),
+                GapDetection::Confirmed,
+                a_gap_at(0),
+                1_000,
+                None,
+            )
+            .expect("open");
+
+        let update = journal
+            .conn
+            .execute("UPDATE reader_gap_events SET detection = 'suspected'", [])
+            .expect_err("UPDATE must be refused");
+        assert!(
+            update.to_string().contains("append-only"),
+            "the refusal should say why: {update}"
+        );
+
+        let delete = journal
+            .conn
+            .execute("DELETE FROM reader_gap_events", [])
+            .expect_err("DELETE must be refused");
+        assert!(
+            delete.to_string().contains("append-only"),
+            "the refusal should say why: {delete}"
+        );
+
+        assert_eq!(journal.reader_gap_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn recent_gaps_come_back_newest_first_open_and_closed_alike() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        let mat = ReaderId::new("mat");
+
+        journal
+            .open_reader_gap(&mat, GapDetection::Confirmed, a_gap_at(0), 1_000, None)
+            .expect("open");
+        journal
+            .close_reader_gap(&mat, a_gap_at(10), 11_000, None)
+            .expect("close");
+        journal
+            .open_reader_gap(&mat, GapDetection::Suspected, a_gap_at(20), 21_000, None)
+            .expect("open again");
+
+        let recent = journal.recent_reader_gaps(10).expect("recent");
+        assert_eq!(recent.len(), 2, "two gaps, not four edges");
+        assert!(recent[0].is_open(), "newest first");
+        assert_eq!(recent[0].detection, GapDetection::Suspected);
+        assert!(!recent[1].is_open());
+        assert_eq!(recent[1].duration_ms(), Some(10_000));
     }
 }
