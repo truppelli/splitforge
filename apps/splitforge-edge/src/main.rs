@@ -256,8 +256,8 @@ impl HealthSource for Device {
                 if let Some(gap) = gaps.first() {
                     // Wall clock, because the gap may have been opened by a previous run of
                     // this service and monotonic readings do not survive that.
-                    let elapsed = (time::OffsetDateTime::now_utc() - gap.started_at)
-                        .whole_milliseconds();
+                    let elapsed =
+                        (time::OffsetDateTime::now_utc() - gap.started_at).whole_milliseconds();
                     health.reader.open_gap = Some(OpenGap {
                         detection: gap.detection,
                         open_for_ms: u64::try_from(elapsed).unwrap_or(0),

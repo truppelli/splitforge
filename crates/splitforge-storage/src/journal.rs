@@ -468,9 +468,9 @@ impl SqliteJournal {
         &self,
         reader_id: &ReaderId,
     ) -> Result<Option<ReaderGap>, StorageError> {
-        let mut statement = self
-            .conn
-            .prepare(&Self::gap_query("AND closed.seq IS NULL AND opened.reader_id = ?1"))?;
+        let mut statement = self.conn.prepare(&Self::gap_query(
+            "AND closed.seq IS NULL AND opened.reader_id = ?1",
+        ))?;
         let mut rows = statement.query(params![reader_id.as_str()])?;
         rows.next()?.map(Self::gap_from_row).transpose()
     }
@@ -485,9 +485,9 @@ impl SqliteJournal {
     ///
     /// Returns [`StorageError`] if the table cannot be read or a row cannot be decoded.
     pub fn open_reader_gaps(&self) -> Result<Vec<ReaderGap>, StorageError> {
-        let mut statement = self
-            .conn
-            .prepare(&Self::gap_query("AND closed.seq IS NULL ORDER BY opened.seq"))?;
+        let mut statement = self.conn.prepare(&Self::gap_query(
+            "AND closed.seq IS NULL ORDER BY opened.seq",
+        ))?;
         let mut rows = statement.query([])?;
 
         let mut gaps = Vec::new();
