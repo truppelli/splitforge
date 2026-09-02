@@ -37,7 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use splitforge_domain::ReaderId;
-use splitforge_reader::{ReaderMessage, ReaderProvider};
+use splitforge_reader::{Disconnection, ReaderEvent, ReaderMessage, ReaderProvider};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
@@ -203,7 +203,7 @@ where
         self.reader_id.clone()
     }
 
-    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderMessage> {
+    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderEvent> {
         let (sender, receiver) = mpsc::channel(self.capacity.max(1));
 
         // A dedicated OS thread rather than an async task, because `serialport` reads block
@@ -225,7 +225,13 @@ where
     D: TagReportDecoder,
 {
     /// Connects, reads, and reconnects until the consumer goes away.
-    fn run(&mut self, sender: &mpsc::Sender<ReaderMessage>) {
+    ///
+    /// **Every turn of this loop is reported**, which is the point of it being a loop over
+    /// events rather than over reads. This function already knew when the port died — it had
+    /// to, in order to decide whether to reopen one — and used to keep that to itself, which
+    /// left the service downstream with nothing to distinguish a dead reader from a quiet
+    /// one. The knowledge now leaves the thread it was computed on.
+    fn run(&mut self, sender: &mpsc::Sender<ReaderEvent>) {
         let mut failures: u32 = 0;
         let mut attempt: u64 = 0;
 
@@ -235,13 +241,43 @@ where
             match self.factory.open() {
                 Ok(port) => {
                     failures = 0;
+                    if sender.blocking_send(ReaderEvent::Connected).is_err() {
+                        return;
+                    }
                     if !self.pump(port, sender) {
                         // The consumer is gone. A reader with nowhere to deliver should stop
                         // reading rather than buffer a race into memory.
                         return;
                     }
+                    // `pump` returned because the connection ended rather than because the
+                    // consumer left, so this is the induced disconnection the exit criterion
+                    // is about — reported before the backoff sleep, not after it, so the gap
+                    // is recorded as starting when the port died rather than seconds later.
+                    if sender
+                        .blocking_send(ReaderEvent::Disconnected {
+                            cause: Disconnection::Ended,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-                Err(_) => failures = failures.saturating_add(1),
+                Err(_) => {
+                    failures = failures.saturating_add(1);
+                    // Sent on every failed attempt rather than only the first. Opening a gap
+                    // is idempotent at the journal — `open_reader_gap` returns the one
+                    // already open — so a stateless report here costs a row nobody writes,
+                    // and saves this loop from keeping a duplicate of state the evidence
+                    // already holds durably.
+                    if sender
+                        .blocking_send(ReaderEvent::Disconnected {
+                            cause: Disconnection::NotOpened,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
             }
 
             if sender.is_closed() {
@@ -258,7 +294,7 @@ where
     ///
     /// Returns `false` when the consumer has dropped the channel, and `true` when the port
     /// ended and reconnecting is the right response.
-    fn pump(&mut self, mut port: Port, sender: &mpsc::Sender<ReaderMessage>) -> bool {
+    fn pump(&mut self, mut port: Port, sender: &mpsc::Sender<ReaderEvent>) -> bool {
         // A fresh connection starts from no partial frame. Bytes held over from the previous
         // one would splice two sessions into a frame that was never transmitted.
         let mut reassembler = Reassembler::new();
@@ -286,7 +322,7 @@ where
             for message in reads.drain(..) {
                 // Blocking is the backpressure: if the journal cannot keep up, the right
                 // response is to stop taking bytes off the port, not to grow a queue.
-                if sender.blocking_send(message).is_err() {
+                if sender.blocking_send(ReaderEvent::Read(message)).is_err() {
                     return false;
                 }
             }
@@ -367,6 +403,20 @@ mod tests {
         }
     }
 
+    /// The next actual read, skipping the connection lifecycle around it.
+    ///
+    /// The tests that use this are about bytes becoming reads. That a connection is
+    /// announced before them, and its loss after them, is the subject of
+    /// `the_lifecycle_is_reported_...` below rather than a detail every test restates.
+    async fn next_read(receiver: &mut mpsc::Receiver<ReaderEvent>) -> ReaderMessage {
+        loop {
+            match receiver.recv().await.expect("the reader is still running") {
+                ReaderEvent::Read(message) => return message,
+                ReaderEvent::Connected | ReaderEvent::Disconnected { .. } => {}
+            }
+        }
+    }
+
     fn reader<P: PortFactory + 'static>(factory: P) -> Box<dyn ReaderProvider> {
         Box::new(
             ThingMagicReader::new(ReaderId::new("mat"), factory, StubDecoder)
@@ -389,7 +439,7 @@ mod tests {
         };
 
         let mut receiver = reader(factory).start();
-        let message = receiver.recv().await.expect("one read");
+        let message = next_read(&mut receiver).await;
         assert_eq!(message.chip, ChipId::new("ABCD"));
         assert_eq!(message.raw_payload, vec![0xAB, 0xCD]);
     }
@@ -407,7 +457,7 @@ mod tests {
         };
 
         let mut receiver = reader(factory).start();
-        let message = receiver.recv().await.expect("one read");
+        let message = next_read(&mut receiver).await;
         assert_eq!(message.chip, ChipId::new("010203"));
     }
 
@@ -427,7 +477,7 @@ mod tests {
 
         let mut receiver = reader(factory).start();
         for expected in 0..3_u8 {
-            let message = receiver.recv().await.expect("a read per connection");
+            let message = next_read(&mut receiver).await;
             assert_eq!(message.chip, ChipId::new(format!("{expected:02X}")));
         }
         assert!(opens.load(Ordering::SeqCst) >= 3);
@@ -448,7 +498,7 @@ mod tests {
         };
 
         let mut receiver = reader(factory).start();
-        let message = receiver.recv().await.expect("a read once the port appears");
+        let message = next_read(&mut receiver).await;
         assert_eq!(message.chip, ChipId::new("FF"));
         assert!(attempts.load(Ordering::SeqCst) >= 4);
     }
@@ -492,9 +542,89 @@ mod tests {
         };
 
         let mut receiver = reader(factory).start();
-        let message = receiver.recv().await.expect("the read after the timeouts");
+        let message = next_read(&mut receiver).await;
         assert_eq!(message.chip, ChipId::new("5A"));
         assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_lifecycle_is_reported_before_and_after_the_reads() {
+        // One connection that delivers a frame and then breaks. The three events around it
+        // are the whole of what this change adds: the consumer can now tell that the port
+        // opened, produced, and died, rather than inferring the last from an absence.
+        let script = vec![response(0x22, &[0x01])];
+        let factory = move || -> io::Result<Port> {
+            Ok(Box::new(ScriptedPort {
+                chunks: script.clone(),
+                index: 0,
+            }) as Port)
+        };
+
+        let mut receiver = reader(factory).start();
+
+        assert_eq!(
+            receiver.recv().await.expect("the connection"),
+            ReaderEvent::Connected,
+            "a connection is announced before anything it carries"
+        );
+        assert!(matches!(
+            receiver.recv().await.expect("the read"),
+            ReaderEvent::Read(_)
+        ));
+        assert_eq!(
+            receiver.recv().await.expect("the disconnection"),
+            ReaderEvent::Disconnected {
+                cause: Disconnection::Ended
+            },
+            "a port that dies mid-stream is reported as a connection that ended"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_port_that_never_opens_is_reported_as_not_opened() {
+        // The other cause, and a different diagnosis: nothing was ever reachable. An
+        // operator reading this at setup should look for a cable, not for a fault.
+        let factory = move || -> io::Result<Port> { Err(io::Error::from(ErrorKind::NotFound)) };
+
+        let mut receiver = reader(factory).start();
+        for _ in 0..3 {
+            assert_eq!(
+                receiver.recv().await.expect("a report per attempt"),
+                ReaderEvent::Disconnected {
+                    cause: Disconnection::NotOpened
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reconnection_is_announced_so_a_gap_can_be_closed() {
+        // A port that fails once and then works. The `Connected` after the failure is what
+        // ends the gap the failure opened — without it a reader that came back to an empty
+        // field would stay in a gap until the next runner crossed.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let factory = move || -> io::Result<Port> {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(io::Error::from(ErrorKind::NotFound));
+            }
+            Ok(Box::new(ScriptedPort {
+                chunks: vec![response(0x22, &[0x07])],
+                index: 0,
+            }) as Port)
+        };
+
+        let mut receiver = reader(factory).start();
+        assert_eq!(
+            receiver.recv().await.expect("the failed attempt"),
+            ReaderEvent::Disconnected {
+                cause: Disconnection::NotOpened
+            }
+        );
+        assert_eq!(
+            receiver.recv().await.expect("the reconnection"),
+            ReaderEvent::Connected
+        );
     }
 
     #[tokio::test]

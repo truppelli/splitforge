@@ -20,7 +20,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use splitforge_domain::{DeviceClockState, RaceConfig, RawReadJournal, ReaderId};
-use splitforge_reader::{Ingest, ReaderProvider};
+use splitforge_reader::{Ingest, ReaderEvent, ReaderProvider};
 use splitforge_simulator::{BurstProfile, Scenario, SimulatedReader, Transport, detection_time};
 use splitforge_storage::SqliteJournal;
 use splitforge_testkit::FixtureEvent;
@@ -162,7 +162,13 @@ pub async fn into_journal(
 
     let fallback = config.gun_time().unwrap_or(splitforge_testkit::RACE_START);
 
-    while let Some(message) = receiver.recv().await {
+    while let Some(event) = receiver.recv().await {
+        // A scripted reader reports its connection like any other provider. This command
+        // measures the read path, so the lifecycle is skipped rather than counted — every
+        // number in the report below says "reads", and a connection is not one.
+        let ReaderEvent::Read(message) = event else {
+            continue;
+        };
         reads_received += 1;
 
         // A reader that supplies no timestamp still has to be given a receipt time. Using

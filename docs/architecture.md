@@ -132,7 +132,9 @@ pub trait RawReadJournal {
 }
 
 pub trait ReaderProvider {
-    fn subscribe(&self) -> impl Stream<Item = ReaderMessage>;
+    // Events, not reads. A provider that can only deliver reads cannot say it lost the
+    // port, which leaves "no reads" meaning either a dead reader or a quiet checkpoint.
+    fn subscribe(&self) -> impl Stream<Item = ReaderEvent>;
 }
 ```
 
