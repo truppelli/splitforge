@@ -214,24 +214,33 @@ measurements — stopped being held hostage to one.
 ### Milestone 3a — One serial reader
 
 **Gated on buying the module.** [Q9a](open-questions.md#q9a-first-serial-module) is closed —
-the ThingMagic M7e-Pico — but nothing has been ordered. The three steps below that need no
-hardware can start immediately, and should, exactly as
+the ThingMagic M7e-Pico — but nothing has been ordered. The steps below that need no
+hardware did not wait for it, exactly as
 [ADR-0004](adr/0004-llrp-first-reader-adapter.md) argues for writing a parser against
-captures.
+captures. There are seven of them, not the three this paragraph used to claim.
 
-**No hardware required:**
+**No hardware required** — meaning these can be *built* without the module. That is a
+different question from whether they are **done**, and the boxes answer the second one: a box
+is ticked when its claim has been observed, and for anything the module participates in that
+means observed on the module. Most of what follows is built and unticked, which is the honest
+pair of facts rather than a contradiction.
 
 - [x] `crates/splitforge-thingmagic/` exists, holding the same boundary `splitforge-llrp`
       declares — `splitforge-domain` and `splitforge-reader` and nothing else. The
       hand-edited rows in `dependency_rules.rs` and
       [architecture § 2](architecture.md#dependency-rules) are the point of listing that
       table exhaustively ([ADR-0012](adr/0012-architecture-rules-enforced-by-tests.md))
-- [x] **Framing before semantics.** `0xFF` / length / opcode / payload / CRC-16 as pure
+- [ ] **Framing before semantics.** `0xFF` / length / opcode / payload / CRC-16 as pure
       functions over `&[u8]`, with no I/O near them. Truncated frames, bad CRCs, corrupted
       length fields, and a payload that is itself a whole valid frame are test cases rather
       than hypotheticals. This is the highest-risk code in the project and it was fully
-      testable before a module existed
-- [x] **`ReaderProvider` on top of the codec**, and the connection lifecycle under it:
+      testable before a module existed. **Unticked, and this crate's own history is the
+      argument.** The functions and their thirty-nine tests are done; that these are the
+      *right* bytes is a claim about the module, and one of them was already wrong — the CRC
+      passed thirty-four self-consistent tests and would have failed on the first frame it
+      ever saw. One captured `0x22` response now anchors it, which is real evidence and is
+      not a stream
+- [ ] **`ReaderProvider` on top of the codec**, and the connection lifecycle under it:
       `reassembly` keeps the buffer a serial port makes necessary, `port` is the only module
       that names `serialport`, and everything between takes a `PortFactory` — so opening,
       reassembly across arbitrary read boundaries, resynchronization after a mid-frame
@@ -244,7 +253,12 @@ captures.
       and the opcode table, the search flags, and the tag-report layout are recorded in
       [vendor-documents.md](readers/vendor-documents.md#the-command-set-from-the-sdk). Two
       corrections came with them — the antenna byte is a packed tx/rx nibble pair rather than an
-      antenna number, and `dspMicros` is named for a unit the vendor's own prose contradicts
+      antenna number, and `dspMicros` is named for a unit the vendor's own prose contradicts.
+      **Unticked because `port::open` has never opened one.** Every case above is exercised
+      against ports that fail on demand, which is the right way to test a lifecycle and is not
+      the same as running it: the branch deciding that a timeout is *not* a disconnection turns
+      on what a real idle `/dev/ttyUSB0` returns, and getting that wrong reopens the port
+      between every pair of runners
 - [ ] **Decode a tag report into a read.** The one thing the adapter above cannot do, and the
       reason `TagReportDecoder` is a trait this crate ships no implementation of. Field *order*
       is established from the parser itself; **which bit selects which field is not** —
@@ -255,14 +269,17 @@ captures.
       time in this crate. **Blocked on a document, not on hardware:** a current `tm_reader.h`
       closes it, and closes [Q14](open-questions.md#q14-reader-silence-threshold)'s other half
       with it
-- [x] Session-anchored timestamps — the module's relative value is preserved as evidence and
+- [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
       ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps)). `SessionAnchor` captures
       both clocks at the instant a connection opens, per connection because that is the scope
       over which the module's counter is continuous — and the wall clock only says *when*,
       because the subtraction rests on the monotonic one
-      ([clock discipline § 3](clock-and-time-discipline.md#3-the-three-clocks))
-- [x] **Detect a disconnection and record it as a bounded gap**, which
+      ([clock discipline § 3](clock-and-time-discipline.md#3-the-three-clocks)). **Unticked:**
+      the code is testable and is tested, but *why* the anchor is per connection rests on the
+      user guide's account of a counter this project has never watched advance — and
+      `dspMicros` is already one place that guide contradicts itself
+- [ ] **Detect a disconnection and record it as a bounded gap**, which
       [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md) makes a deliverable
       rather than an assumption: a device node that vanishes and a stream that goes silent are
       both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
@@ -278,8 +295,10 @@ captures.
       a `confirmed` gap immediately instead of waiting out a silence threshold that was only
       ever a guess, and a reconnection closes it — including one that comes back to an empty
       field, which produces no read to close it with. **This is the change M3b shares**, and
-      it is the last of this bullet that could be written without the module: what remains is
-      inducing a real disconnection
+      it is the last of this bullet that could be written without the module. **The box stays
+      unchecked deliberately**: what remains is inducing a real disconnection, and this
+      milestone does not tick a box because the code exists — it ticks one when the behavior
+      has been observed
 - [x] **`splitforge-edge` has a read path**, in the ordering
       [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
       first, always, then the journal append, then notify — `reads_persisted` moves only after
