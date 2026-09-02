@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use splitforge_cli::Speed;
-use splitforge_domain::ClockStep;
+use splitforge_domain::{ClockStep, RawReadJournal as _};
 use splitforge_storage::{ConfigStore, SqliteJournal};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
@@ -66,14 +66,23 @@ struct Service {
 }
 
 impl Service {
-    /// Configures a 5K, then starts the service against it.
+    /// Configures a 5K, then starts the service against it with no reader.
     async fn start() -> Self {
+        Self::start_with(None).await
+    }
+
+    /// Starts the service with the 5K running through its own read path.
+    async fn start_simulating() -> Self {
+        Self::start_with(Some(FIXTURE)).await
+    }
+
+    async fn start_with(scenario: Option<&str>) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         let database = directory.path().join("event.db");
         let socket = directory.path().join("api.sock");
         configure(&database);
 
-        let child = spawn(&database, &socket);
+        let child = spawn_with(&database, &socket, scenario);
         wait_for(&socket).await;
 
         Self {
@@ -100,25 +109,79 @@ impl Service {
         (status, json)
     }
 
+    /// Polls `/health` until `ready` accepts the body, or gives up after ten seconds.
+    ///
+    /// Background tasks land after the socket does — the service binds and starts answering
+    /// while its first time-source sample is still running in a subprocess. Polling is the
+    /// difference between asserting that something happened and racing it.
+    async fn poll_until(
+        &self,
+        ready: impl Fn(&serde_json::Value) -> bool,
+    ) -> Option<serde_json::Value> {
+        for _ in 0..200 {
+            let (_status, health) = self.get("/health").await;
+            if ready(&health) {
+                return Some(health);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
     /// Sends SIGTERM, which is what systemd sends on `stop` and `restart`.
-    async fn terminate(mut self) -> std::process::ExitStatus {
-        let killed = sigterm(self.child.id().expect("a pid")).await;
+    ///
+    /// Takes the whole handle, so the temporary directory goes with it — which is what a
+    /// test that is finished with the service wants, and what a test that still needs to
+    /// look at the files must not do. That one calls [`Self::stop`].
+    async fn terminate(self) -> std::process::ExitStatus {
+        self.stop().await.0
+    }
+
+    /// Stops the service and hands back its directory, still alive.
+    ///
+    /// A `TempDir` deletes its contents when it drops, so inspecting a database *after* the
+    /// service has exited means keeping the handle for as long as the files are wanted.
+    async fn stop(self) -> (std::process::ExitStatus, tempfile::TempDir) {
+        let Self {
+            _directory,
+            socket: _,
+            mut child,
+        } = self;
+
+        let killed = sigterm(child.id().expect("a pid")).await;
         assert!(killed, "kill -TERM failed");
 
-        tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
             .await
             .expect("the service did not exit within 10s of SIGTERM")
-            .expect("wait")
+            .expect("wait");
+
+        (status, _directory)
     }
 }
 
 /// Starts the service binary against one database and one socket path.
 fn spawn(database: &Path, socket: &Path) -> Child {
-    Command::new(SERVICE)
+    spawn_with(database, socket, None)
+}
+
+/// Starts the service, optionally running a scenario through its own read path.
+///
+/// The seed is passed explicitly rather than left to the binary's default, so that the read
+/// counts asserted below are the scenario's and not a default's — if the default ever moves,
+/// these tests should keep passing and `splitforge simulate` should be the thing that
+/// changes.
+fn spawn_with(database: &Path, socket: &Path, scenario: Option<&str>) -> Child {
+    let mut command = Command::new(SERVICE);
+    command
         .args(["--database", database.to_str().expect("utf-8")])
-        .args(["--socket", socket.to_str().expect("utf-8")])
-        .spawn()
-        .expect("start splitforge-edge")
+        .args(["--socket", socket.to_str().expect("utf-8")]);
+    if let Some(scenario) = scenario {
+        command
+            .args(["--simulate", scenario])
+            .args(["--simulate-seed", &SEED.to_string()]);
+    }
+    command.spawn().expect("start splitforge-edge")
 }
 
 /// Waits for the service to bind, which is also the check that it started at all.
@@ -187,6 +250,158 @@ async fn the_service_reports_the_database_it_was_pointed_at() {
     assert!(health["free_mb"].as_u64().is_some(), "got: {health}");
 
     service.terminate().await;
+}
+
+#[tokio::test]
+async fn the_service_measures_its_time_source_rather_than_assuming_one() {
+    // Every read this service writes carries a `DeviceClockState`, and that is permanent
+    // evidence. This asserts the measurement happened at all — the four tokens are the whole
+    // vocabulary, and which one arrives depends on what the machine running the test has
+    // installed, so the token is checked for membership rather than for a value.
+    let service = Service::start().await;
+
+    let health = service
+        .poll_until(|health| !health["clock_source"].is_null())
+        .await
+        .expect("the service never sampled its time source");
+
+    let source = &health["clock_source"];
+    let measurement = source["measurement"].as_str().expect("a token");
+    assert!(
+        matches!(
+            measurement,
+            "measured" | "no_daemon_tool" | "daemon_unreachable" | "unreadable"
+        ),
+        "unknown measurement token {measurement:?}: {health}"
+    );
+
+    // The distinction the field exists for. "Nobody could ask" must never arrive looking
+    // like "we asked, and the clock is bad" — only a real measurement carries a state.
+    if measurement == "measured" {
+        assert!(source["state"].is_string(), "got: {health}");
+    } else {
+        assert!(
+            source["state"].is_null(),
+            "an unmeasured clock has no state to report: {health}"
+        );
+    }
+
+    service.terminate().await;
+}
+
+#[tokio::test]
+async fn a_service_with_no_reader_reports_one_that_cannot_be_read_as_working() {
+    // The distinction the whole `ReaderHealth` shape exists for, asserted against the real
+    // binary rather than a constructed struct: a device waiting for hardware must not look
+    // like a device whose reader is fine.
+    let service = Service::start().await;
+    let (status, health) = service.get("/health").await;
+
+    assert!(status.contains("200 OK"), "got: {status}");
+    assert_eq!(health["status"], "ok", "no reader is not a fault: {health}");
+    assert_eq!(health["reader"]["kind"], "none");
+    assert!(
+        health["reader"]["state"].is_null(),
+        "nothing whose state could be described: {health}"
+    );
+    assert_eq!(health["reader"]["reads_received"], 0);
+    assert_eq!(health["reader"]["reads_persisted"], 0);
+
+    service.terminate().await;
+}
+
+#[tokio::test]
+async fn the_service_makes_the_reads_it_takes_off_its_reader_durable() {
+    // The milestone. Every read below was taken off a `ReaderProvider` by the service, in
+    // the service's own process, and written by the service — not simulated into the file by
+    // a test helper first, which is what every other read in this file has been.
+    let service = Service::start_simulating().await;
+
+    let health = service
+        .poll_until(|health| health["reader"]["reads_persisted"] == 638)
+        .await
+        .expect("the service never persisted the whole scenario");
+
+    assert_eq!(
+        health["reader"]["kind"], "simulated",
+        "reported, not hidden"
+    );
+    assert_eq!(health["reader"]["reads_received"], 638);
+    assert_eq!(health["reader"]["reads_persisted"], 638);
+
+    // The independent check, and the one that would catch a counter that moved without a
+    // write behind it: `raw_reads` is `SELECT COUNT(*)` against the database on every
+    // request, so it can only agree if the rows are actually there.
+    assert_eq!(
+        health["raw_reads"], 638,
+        "the counter and the journal must agree: {health}"
+    );
+    assert_eq!(health["status"], "ok", "got: {health}");
+
+    // The reader ran out of script, which is the ordinary end of a run and carries no fault.
+    let health = service
+        .poll_until(|health| health["reader"]["state"] == "stopped")
+        .await
+        .expect("the reader never reported stopping");
+    assert_eq!(health["status"], "ok", "a finished script is not a fault");
+
+    service.terminate().await;
+}
+
+#[tokio::test]
+async fn every_read_the_service_wrote_is_in_the_journal_after_it_exits() {
+    // Clause 2 of M3a's exit criterion, as far as a simulator can carry it: the journal does
+    // not disagree with what arrived. Checked from a different process, against the file, on
+    // a database the service has closed.
+    let service = Service::start_simulating().await;
+    service
+        .poll_until(|health| health["reader"]["reads_persisted"] == 638)
+        .await
+        .expect("the service never persisted the whole scenario");
+
+    let database = service.database();
+    // `stop` rather than `terminate`: the directory has to outlive the service, because the
+    // whole claim below is about what it left on disk.
+    let (_status, _directory) = service.stop().await;
+
+    let journal = SqliteJournal::open(&database).expect("reopen the journal");
+    let reads = journal.read_all().expect("read the journal");
+    assert_eq!(reads.len(), 638);
+
+    // Contiguous from 1. A gap here would mean a row was written and lost, or that two
+    // writers raced; neither may happen on a path that appends under one lock.
+    for (index, read) in reads.iter().enumerate() {
+        let expected = u64::try_from(index).expect("fits") + 1;
+        assert_eq!(read.seq, expected, "journal sequence is not contiguous");
+    }
+
+    // Every read carries the state the device measured, and the same one, because the clock
+    // was sampled before the read path started.
+    //
+    // This caught a real defect on its first run: the service used to start reading while
+    // its first sample was still in flight, so the opening reads were stamped `Unsynced` —
+    // not because the clock was bad but because nothing had asked yet. `is_trustworthy` is
+    // false for `Unsynced` and gates publication, and on a real event the mislabelled band
+    // falls across the gun. Whatever chrony says on the machine running this, it must be the
+    // same answer for every row of one short run.
+    let states: std::collections::BTreeSet<_> = reads
+        .iter()
+        .map(|read| read.read.device_clock_state)
+        .collect();
+    assert_eq!(
+        states.len(),
+        1,
+        "one run, one clock state — a split here means reads were written before the time \
+         source was sampled: {states:?}"
+    );
+
+    // Both directions, which is the reconciliation `doctor` performs: the sidecar holding a
+    // read the database lost is the recoverable case, and the database holding one the
+    // sidecar never saw would mean the write-ahead ordering was not honored.
+    let sidecar = journal.survey().expect("survey the sidecar");
+    assert_eq!(sidecar.missing_from_database, 0, "got: {sidecar:?}");
+    assert_eq!(sidecar.missing_from_sidecar, 0, "got: {sidecar:?}");
+    assert_eq!(sidecar.corrupt_lines, 0, "got: {sidecar:?}");
 }
 
 #[tokio::test]

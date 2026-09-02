@@ -32,6 +32,7 @@ this?" two years from now, the ADR is the answer.
 | [0022](0022-the-service-never-waits-for-the-network.md) | The service never waits for the network and never stops restarting | Accepted |
 | [0023](0023-manual-entries-are-derivation-inputs.md) | A manual entry is an input to derivation, not an override of its output | Accepted |
 | [0024](0024-serial-reader-adapter-before-llrp.md) | A serial module is the first physical adapter; LLRP stays the first networked one | Accepted |
+| [0025](0025-m3a-proves-durability-above-the-transport.md) | M3a proves durability above the transport; the adapter streams rather than polls | Accepted |
 
 ## Process
 

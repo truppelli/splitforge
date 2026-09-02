@@ -71,7 +71,7 @@ pub use report::{
     ManualEntriesView, ManualEntryView, ParticipantView, PolicyView, RaceView, RawReadView,
     ReaderStatusView, SessionView, SimulationReport, StatusReport, reader_status,
 };
-pub use simulate::into_journal;
+pub use simulate::{ScriptedReader, into_journal, scripted_reader};
 
 /// Runs one command.
 ///

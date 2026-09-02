@@ -814,6 +814,7 @@ dependencies = [
  "axum",
  "serde",
  "serde_json",
+ "splitforge-domain",
  "tempfile",
  "thiserror",
  "tokio",
@@ -837,6 +838,7 @@ dependencies = [
  "splitforge-simulator",
  "splitforge-storage",
  "splitforge-testkit",
+ "splitforge-timesource",
  "tempfile",
  "time",
  "tokio",
@@ -864,7 +866,9 @@ dependencies = [
  "splitforge-api",
  "splitforge-cli",
  "splitforge-domain",
+ "splitforge-reader",
  "splitforge-storage",
+ "splitforge-timesource",
  "tempfile",
  "time",
  "tokio",
@@ -959,6 +963,13 @@ name = "splitforge-thingmagic"
 version = "0.0.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "splitforge-timesource"
+version = "0.0.0"
+dependencies = [
+ "splitforge-domain",
 ]
 
 [[package]]

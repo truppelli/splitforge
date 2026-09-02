@@ -19,7 +19,7 @@
 //! could have typed, rather than configuration compiled into the binary.
 
 use anyhow::{Context, Result, anyhow, bail};
-use splitforge_domain::{DeviceClockState, RaceConfig, RawReadJournal};
+use splitforge_domain::{DeviceClockState, RaceConfig, RawReadJournal, ReaderId};
 use splitforge_reader::{Ingest, ReaderProvider};
 use splitforge_simulator::{BurstProfile, Scenario, SimulatedReader, Transport, detection_time};
 use splitforge_storage::SqliteJournal;
@@ -35,20 +35,40 @@ use crate::report::SimulationReport;
 /// `splitforge-reader`, not by pretending the fixture hardware is broken.
 const SIMULATED_CLOCK_STATE: DeviceClockState = DeviceClockState::GpsLocked;
 
-/// Runs a scenario's crossings into a journal, against configuration from the database.
+/// A simulated reader built against a database's configuration, ready to be started.
+///
+/// Two callers compose one and drain it differently. `splitforge simulate` drains it with a
+/// scripted clock, so a run is reproducible byte for byte; `splitforge-edge` drains it with
+/// the device's own clock and its own measured [`splitforge_domain::DeviceClockState`],
+/// because a service writes evidence rather than a fixture. What they must not do is
+/// disagree about *which* reader a scenario emits from or *how* the operator configured it,
+/// which is why that part is built here once.
+#[derive(Debug)]
+pub struct ScriptedReader {
+    /// The reader itself.
+    pub provider: SimulatedReader,
+    /// How its reads are normalized — the operator's trust setting, from the database.
+    pub ingest: Ingest,
+    /// Which reader the scenario emits from.
+    pub reader: ReaderId,
+    /// How many crossings the scenario plans, which is not how many reads it emits — one
+    /// crossing produces a burst, and reducing a burst to one accepted read is what
+    /// derivation is for.
+    pub planned_crossings: usize,
+}
+
+/// Builds a scenario's reader against the configuration a race actually has.
 ///
 /// # Errors
 ///
-/// Returns an error if the scenario is unknown, the race has no reader configured, or any
-/// read cannot be made durable. The last is fatal on purpose: a timer that cannot persist
-/// evidence must stop and say so, not keep counting.
-pub async fn into_journal(
+/// Returns an error if the scenario is unknown, plans no crossings, or emits from a reader
+/// the race has not configured.
+pub fn scripted_reader(
     config: &RaceConfig,
     scenario_slug: &str,
-    journal: &mut SqliteJournal,
     seed: u64,
     speed: Speed,
-) -> Result<SimulationReport> {
+) -> Result<ScriptedReader> {
     let fixture = FixtureEvent::by_slug(scenario_slug).ok_or_else(|| {
         anyhow!(
             "unknown scenario {scenario_slug:?}; known scenarios: {}",
@@ -90,20 +110,45 @@ pub async fn into_journal(
         scenario = scenario.crossing(crossing.chip.clone(), crossing.antenna, crossing.at);
     }
 
-    let provider = SimulatedReader::new(&scenario, speed.into());
-    let reads_scripted = provider.scripted_reads();
+    Ok(ScriptedReader {
+        provider: SimulatedReader::new(&scenario, speed.into()),
+        // The trust setting is the operator's, read back from the database — the same value
+        // a real reader will be ingested under in Milestone 3.
+        ingest: Ingest {
+            trust: config
+                .readers
+                .iter()
+                .find(|reader| reader.id == reader_id)
+                .map(|reader| reader.timestamp_trust)
+                .unwrap_or_default(),
+            ..Ingest::default()
+        },
+        reader: reader_id,
+        planned_crossings: fixture.crossings.len(),
+    })
+}
 
-    // The trust setting is the operator's, read back from the database — the same value a
-    // real reader will be ingested under in Milestone 3.
-    let ingest = Ingest {
-        trust: config
-            .readers
-            .iter()
-            .find(|reader| reader.id == reader_id)
-            .map(|reader| reader.timestamp_trust)
-            .unwrap_or_default(),
-        ..Ingest::default()
-    };
+/// Runs a scenario's crossings into a journal, against configuration from the database.
+///
+/// # Errors
+///
+/// Returns an error if the scenario is unknown, the race has no reader configured, or any
+/// read cannot be made durable. The last is fatal on purpose: a timer that cannot persist
+/// evidence must stop and say so, not keep counting.
+pub async fn into_journal(
+    config: &RaceConfig,
+    scenario_slug: &str,
+    journal: &mut SqliteJournal,
+    seed: u64,
+    speed: Speed,
+) -> Result<SimulationReport> {
+    let ScriptedReader {
+        provider,
+        ingest,
+        reader: reader_id,
+        planned_crossings,
+    } = scripted_reader(config, scenario_slug, seed, speed)?;
+    let reads_scripted = provider.scripted_reads();
 
     // Seeded from the scenario so that transport delay is part of the same reproducible
     // race. Offset so the two streams do not share a sequence of random values.
@@ -147,7 +192,7 @@ pub async fn into_journal(
         race: config.race.name.clone(),
         reader: reader_id,
         seed,
-        planned_crossings: fixture.crossings.len(),
+        planned_crossings,
         reads_scripted,
         reads_received,
         reads_persisted,

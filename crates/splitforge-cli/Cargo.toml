@@ -34,6 +34,9 @@ splitforge-reader.workspace = true
 splitforge-results.workspace = true
 splitforge-simulator.workspace = true
 splitforge-storage.workspace = true
+# `doctor` reports the device's time source. The asking lives there because the service
+# needs the same answer to stamp on every read it writes; this crate keeps the reporting.
+splitforge-timesource.workspace = true
 # Only for `splitforge fixture load`, which writes a built-in fixture's configuration into
 # a real database so a simulated race is one command away instead of eight. Configuration
 # itself now lives in SQLite (Milestone 2) — nothing here reads a fixture at derivation

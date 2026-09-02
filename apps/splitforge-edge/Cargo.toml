@@ -14,8 +14,21 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 splitforge-api.workspace = true
+# For `scripted_reader`, which turns a scenario slug into a reader against the race a
+# database actually has. The simulator owns the reader and the testkit owns the crossing
+# plan, and neither may depend on the other — so composing them is a composition root's job,
+# and doing it twice is how the CLI's answer and the service's would drift apart.
+splitforge-cli.workspace = true
 splitforge-domain.workspace = true
+# The port the read path is written against. The service holds a `Box<dyn ReaderProvider>`
+# and cannot tell a simulator from a module, which is the whole point of the port: the
+# ThingMagic adapter arrives as a different value passed to the same loop.
+splitforge-reader.workspace = true
 splitforge-storage.workspace = true
+# The service needs a `DeviceClockState` for every read it writes, which is permanent
+# evidence — so it asks the time daemon rather than assuming. Sampled on an interval off the
+# reactor, because `chronyc` blocks while it retries a daemon that is not answering.
+splitforge-timesource.workspace = true
 # ADR-0010: `time` is the project's timestamp crate. The clock monitor needs one directly,
 # because the discontinuity it looks for is between this crate and `std`'s monotonic clock.
 time.workspace = true
@@ -27,8 +40,8 @@ workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 # The tests spawn the real service binary, but build its fixture database through library
-# calls. Reaching for the `splitforge` executable by path instead made `cargo test -p
-# splitforge-edge` depend on a sibling crate's artifact being on disk.
-splitforge-cli.workspace = true
+# calls — `splitforge-cli` is a dependency above, so they reach for it directly. Shelling out
+# to the `splitforge` executable by path instead made `cargo test -p splitforge-edge` depend
+# on a sibling crate's artifact being on disk.
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread"] }

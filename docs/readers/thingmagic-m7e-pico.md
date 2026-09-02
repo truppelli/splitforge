@@ -54,6 +54,17 @@ second antenna means a second module, at which point each module presents as its
 `ReaderProvider` with its own reader and antenna identity — which is a valid deployment and
 still does not make *this* row true of *one* module.
 
+**And a third thing is structural, though it is not a checklist row.** M3a's original exit
+criterion asked that *"the count of reads the module believes it sent matches the count in the
+journal."* § 5.1.4.1 says *"flow control is not supported"* and § 8.8.2 says the module cannot
+*"detect a broken communications interface connection and stop streaming the tag results"* — so
+during a disconnection it streams into a dead cable, and there is no count on the module's side
+to reconcile against. This is not a measurement waiting to be taken; the interface cannot be
+asked the question.
+[ADR-0025](../adr/0025-m3a-proves-durability-above-the-transport.md) names it alongside rows 4
+and 5 for that reason, restates M3a's criterion around what a serial link *can* prove, and
+leaves M3b's wording untouched — LLRP runs over TCP, which knows what it delivered.
+
 So this page stays here and the support matrix stays empty. If that reads as pedantic after
 the module has run clean for eight hours, that is the moment the rule is doing its job:
 [hardware-support.md](../hardware-support.md)'s claim is that an entry in that table is

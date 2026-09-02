@@ -1,0 +1,21 @@
+[package]
+name = "splitforge-timesource"
+description = "Asks the system's time daemon what it believes about the clock."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Only the domain, which holds the pure parser this crate feeds. Deliberately no async
+# runtime: reading the daemon is a blocking subprocess call, and callers that need it off an
+# async worker thread wrap it themselves — which is a decision about their runtime, not this
+# crate's business.
+[dependencies]
+splitforge-domain.workspace = true
+
+[lints]
+workspace = true

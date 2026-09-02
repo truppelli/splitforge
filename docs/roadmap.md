@@ -233,21 +233,35 @@ captures.
       testable before a module existed
 - [ ] Implement `ReaderProvider` on top of the codec. The crate does **not** yet — framing is
       there and nothing above it, which is why `serialport` is not a dependency yet either.
-      **This step has a prerequisite the plan did not have.** The user guide cannot supply the
+      **The prerequisite this step had is now retired.** The user guide cannot supply the
       command set — § 7 is two framing diagrams and the CRC's covered range, and stops — so the
-      opcodes have to come from the MercuryAPI SDK, which is code rather than a specification
-      and needs its own archival and its own licensing read first
-      ([vendor-documents.md](readers/vendor-documents.md#the-command-set-is-not-in-this-document))
+      opcodes had to come from the MercuryAPI SDK, which is code rather than a specification and
+      needed its own archival and its own licensing read first. Both are done: the SDK is MIT,
+      and the opcode table, the search flags, and the tag-report layout are recorded in
+      [vendor-documents.md](readers/vendor-documents.md#the-command-set-from-the-sdk). Two
+      corrections came with them — the antenna byte is a packed tx/rx nibble pair rather than an
+      antenna number, and `dspMicros` is named for a unit the vendor's own prose contradicts
 - [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
       ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps))
+- [ ] **Detect a disconnection and record it as a bounded gap**, which
+      [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md) makes a deliverable
+      rather than an assumption: a device node that vanishes and a stream that goes silent are
+      both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
+      and an open gap degrades health. The gap table and the watchdog are testable against the
+      simulator; only *inducing* a real disconnection needs the module
+- [x] **`splitforge-edge` has a read path**, in the ordering
+      [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
+      first, always, then the journal append, then notify — `reads_persisted` moves only after
+      `append` returns, which is what makes it a different number from `reads_received`.
+      Health gained reader state, and the service measures its own `DeviceClockState` rather
+      than assuming one, because every read it writes carries one as permanent evidence.
+      **This bullet was filed under *needs the module* and did not belong there.** The loop is
+      written against `ReaderProvider`, so the module changes which provider is composed and
+      nothing else; what needs hardware is the serial adapter, which is the bullet above it
 
 **Needs the module:**
 
-- [ ] Give `splitforge-edge` a read path, in the ordering
-      [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
-      first, always, then the journal append, then notify. Health gains reader connection
-      state
 - [ ] `PrivateDevices=no` / `DevicePolicy=closed` / `DeviceAllow=char-ttyUSB rw` in the unit,
       plus a udev rule for a stable device name. `RestrictAddressFamilies=AF_UNIX` **stays** —
       a serial adapter opens a file, not a socket
@@ -257,20 +271,42 @@ captures.
 - [ ] Measure the Pi's receive-time jitter, which is what actually bounds accuracy on this
       hardware — not the module's throughput specification
 
-**Exit criterion:** a serial module runs for several hours while every read is preserved
-through deliberately induced disconnections and service restarts, and the count of reads the
-module believes it sent matches the count in the journal.
+**Exit criterion:** a serial module runs for several hours while **every read the host
+receives is preserved** through deliberately induced disconnections and service restarts;
+**the journal never disagrees with what arrived**; and **every disconnection is detected and
+recorded as a bounded gap in the evidence**, rather than passing unnoticed.
 
-**This criterion is now in doubt, and the doubt is recorded rather than resolved.** The user
-guide says the module cannot detect a broken serial connection and goes on streaming into it,
-and that the interface has no flow control — so reads emitted during an induced disconnection
-are simply gone, and no count can reconcile what the module sent against what arrived. The
-criterion quietly assumed a transport that knows what it delivered, and of the two adapters only
-M3b has one. **M3b's identical wording is unaffected**, because LLRP runs over TCP. The three
-ways out — reword the criterion, poll the tag buffer instead of streaming, or accept that M3a
-cannot close it — are laid out in
-[vendor-documents.md § 7](readers/vendor-documents.md#7-m3as-exit-criterion-may-not-be-reachable-on-this-interface),
-and none is chosen there or here.
+**This is the criterion as [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md)
+restates it**, and the wording it replaced is worth keeping in view: *"…and the count of reads
+the module believes it sent matches the count in the journal."*
+
+That clause cannot be evaluated on this interface. The user guide says the module cannot detect
+a broken serial connection and goes on streaming into it, and that the interface has no flow
+control — so reads emitted during an induced disconnection are simply gone, and no count can
+reconcile what the module sent against what arrived. It bundled two claims that TCP had made
+one: *SplitForge does not lose a read that reached it*, which is about this project's code and
+is provable on any adapter, and *the transport delivered everything the reader emitted*, which
+is about the wire and is only askable where the transport tracks delivery.
+
+**The second is named structurally unclosable** on a link with no flow control — the third such
+item, beside the reader clock and per-antenna identity, and named by the same rule ADR-0024
+already used rather than by a new one. **M3b keeps the original wording verbatim**, because LLRP
+runs over TCP and can answer it. **The support matrix stays empty.**
+
+**The criterion did not get easier.** The third clause is new work the old wording never asked
+for: the module cannot announce its own failure, so SplitForge has to notice — and a stream that
+has gone quiet is indistinguishable from a checkpoint with nobody crossing it, which is why a
+silence-derived gap is recorded as *suspected* and never as confirmed. How long silence must
+last is [Q14](open-questions.md#q14-reader-silence-threshold), and it is not answered.
+
+**The adapter streams rather than polling the tag buffer**, which was the second of § 7's three
+ways out and is rejected on a cost § 7 had underpriced as *"throughput"*. § 8.8.1 deduplicates
+in hardware — *"duplicate tag reads do not result in additional entries"* — and every
+`SelectionRule` the operator can configure selects from a burst. Polling would leave
+`first-above-rssi:-62` a single sample to choose from and make **Milestone 1's** exit criterion
+structurally unobservable on this adapter, turning 638 raw reads into roughly 24 entries and a
+count. Its 52-entry ceiling also bounds the wrong thing: distinct tags, so a full buffer loses a
+runner where streaming loses a redundant read.
 
 **Observed**, the frame codec. Thirty-nine tests, none of which need hardware, and most of
 which feed the parser input that is deliberately wrong. Three carry the claim:
