@@ -197,6 +197,18 @@ This question is only the number.
 *Leaning:* configurable per checkpoint, with a conservative default and no accuracy claim
 attached to it, until a module and the SDK together say which of the two situations this is.
 
+**Half of that leaning is now built, and the question is not answered by it.** The threshold is
+`reader_silence_ms` in `device_settings`, set by `splitforge device set --reader-silence-ms` and
+reported by `device show`; it defaults to `DEFAULT_SILENCE_THRESHOLD_MS`, which is two minutes
+chosen to be wrong in the safe direction and carries no measurement. **Zero disables the check**,
+because an operator who has decided a false gap is worse than a late one needs to say so
+explicitly rather than by setting a week and hoping.
+
+It is **per device, not per checkpoint**. The leaning above still stands and this is not a
+decision against it: one reader is composed per service today, so a per-checkpoint setting would
+be a schema with exactly one row in it and no way to tell whether it was right. What the number
+should be is unchanged and still open.
+
 ---
 
 ## Resolved

@@ -24,9 +24,9 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use splitforge_domain::{
-    AntennaMap, Bib, Checkpoint, CheckpointId, CheckpointKind, ChipAssignment, ChipId, Event,
-    EventId, Participant, ParticipantId, Race, RaceConfig, RaceId, RaceSession, Reader, ReaderId,
-    SessionAction, StartMode, TimestampTrust, TimingPolicy,
+    AntennaMap, Bib, Checkpoint, CheckpointId, CheckpointKind, ChipAssignment, ChipId,
+    DEFAULT_SILENCE_THRESHOLD_MS, Event, EventId, Participant, ParticipantId, Race, RaceConfig,
+    RaceId, RaceSession, Reader, ReaderId, SessionAction, StartMode, TimestampTrust, TimingPolicy,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -37,6 +37,9 @@ use crate::space::DEFAULT_MIN_FREE_BYTES;
 
 /// Key under which the free-space floor is stored in `device_settings`.
 const MIN_FREE_BYTES_KEY: &str = "min_free_bytes";
+
+/// Key under which the reader-silence threshold is stored in `device_settings`.
+const READER_SILENCE_MS_KEY: &str = "reader_silence_threshold_ms";
 
 /// What an import changed.
 ///
@@ -843,6 +846,61 @@ impl ConfigStore {
         self.set_device_setting(MIN_FREE_BYTES_KEY, &bytes.to_string())
     }
 
+    /// How long a reader may be silent before the watchdog presumes it gone, in milliseconds.
+    ///
+    /// Falls back to [`DEFAULT_SILENCE_THRESHOLD_MS`] when unset or unparseable, on the same
+    /// reasoning as the free-space floor: a device configured with nonsense should apply the
+    /// conservative default rather than switch the check off.
+    ///
+    /// **Zero disables the watchdog**, and is the one value that means something other than a
+    /// duration. An operator who has decided that a false gap is worse than a late one on
+    /// their course needs a way to say so, and turning it off explicitly is better than
+    /// setting it to a week and hoping.
+    ///
+    /// The number itself is [Q14](../../../docs/open-questions.md#q14-reader-silence-threshold)
+    /// and has no measurement behind it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the settings table cannot be read.
+    pub fn reader_silence_threshold_ms(&self) -> Result<u64, StorageError> {
+        Ok(self
+            .device_setting(READER_SILENCE_MS_KEY)?
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SILENCE_THRESHOLD_MS))
+    }
+
+    /// Sets the reader-silence threshold, in milliseconds. Zero disables the watchdog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the write fails.
+    pub fn set_reader_silence_threshold_ms(&mut self, ms: u64) -> Result<(), StorageError> {
+        self.set_device_setting(READER_SILENCE_MS_KEY, &ms.to_string())
+    }
+
+    /// Whether a race has been started and not since stopped.
+    ///
+    /// The same question [`RaceConfig::is_running`] answers, asked without loading the roster
+    /// and the chip assignments to answer it — the silence watchdog asks it on every tick, and
+    /// loading an entire race configuration to read one flag would put the whole event on the
+    /// journal lock once a minute.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read.
+    pub fn race_is_running(&self, race: RaceId) -> Result<bool, StorageError> {
+        let last: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT action FROM race_sessions WHERE race_id = ?1 ORDER BY seq DESC LIMIT 1",
+                params![race.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(last.as_deref() == Some(SessionAction::Start.as_str()))
+    }
+
     /// Reads one device setting.
     ///
     /// # Errors
@@ -1503,5 +1561,74 @@ mod tests {
             assert_eq!(parse_checkpoint_kind(kind_to_str(kind)), Ok(kind));
         }
         assert!(parse_checkpoint_kind("halfway").is_err());
+    }
+
+    #[test]
+    fn an_unset_silence_threshold_is_the_conservative_default() {
+        let store = ConfigStore::open_in_memory().expect("open");
+        assert_eq!(
+            store.reader_silence_threshold_ms().expect("read"),
+            DEFAULT_SILENCE_THRESHOLD_MS
+        );
+    }
+
+    #[test]
+    fn the_silence_threshold_round_trips_and_zero_survives_as_zero() {
+        // Zero is the one value that means something other than a duration — the operator
+        // switching the check off — so it must not be mistaken for "unset" and replaced by
+        // the default on the way back out.
+        let mut store = ConfigStore::open_in_memory().expect("open");
+        store.set_reader_silence_threshold_ms(30_000).expect("set");
+        assert_eq!(store.reader_silence_threshold_ms().expect("read"), 30_000);
+
+        store.set_reader_silence_threshold_ms(0).expect("disable");
+        assert_eq!(store.reader_silence_threshold_ms().expect("read"), 0);
+    }
+
+    #[test]
+    fn an_unparseable_silence_threshold_falls_back_rather_than_switching_the_check_off() {
+        // The same rule as the free-space floor: nonsense in the settings table must not
+        // become "no check at all", because that failure is silent for a whole event.
+        let mut store = ConfigStore::open_in_memory().expect("open");
+        store
+            .set_device_setting("reader_silence_threshold_ms", "soon")
+            .expect("write nonsense");
+        assert_eq!(
+            store.reader_silence_threshold_ms().expect("read"),
+            DEFAULT_SILENCE_THRESHOLD_MS
+        );
+    }
+
+    #[test]
+    fn a_race_is_running_only_between_a_start_and_the_next_stop() {
+        // The cheap query the silence watchdog asks every tick, checked against the same
+        // answer `RaceConfig::is_running` gives after loading the whole configuration.
+        let (mut store, race, _) = seeded();
+        assert!(!store.race_is_running(race.id).expect("read"));
+
+        store
+            .record_session(race.id, SessionAction::Start, START, "phillip", None)
+            .expect("start");
+        assert!(store.race_is_running(race.id).expect("read"));
+        assert_eq!(
+            store.race_is_running(race.id).expect("read"),
+            store.load(race.id).expect("load").is_running(),
+            "the cheap query and the loaded one must not disagree"
+        );
+
+        store
+            .record_session(
+                race.id,
+                SessionAction::Stop,
+                START + Duration::hours(1),
+                "phillip",
+                None,
+            )
+            .expect("stop");
+        assert!(!store.race_is_running(race.id).expect("read"));
+        assert_eq!(
+            store.race_is_running(race.id).expect("read"),
+            store.load(race.id).expect("load").is_running()
+        );
     }
 }

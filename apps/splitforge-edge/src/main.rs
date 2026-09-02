@@ -54,7 +54,8 @@ use splitforge_api::{
 };
 use splitforge_cli::{ScriptedReader, Speed};
 use splitforge_domain::{
-    ClockStep, DeviceClockState, GapDetection, RawReadJournal, SAMPLE_INTERVAL_MS,
+    ClockStep, DeviceClockState, GapDetection, RaceId, RawReadJournal, ReaderId,
+    SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
 };
 use splitforge_reader::{Ingest, ReaderMessage, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
@@ -149,6 +150,25 @@ struct ReaderStatus {
     persisted: u64,
     /// Why the read path stopped, when it stopped for a reason worth reporting.
     fault: Option<String>,
+    /// Which reader is composed, and which race it is reading for.
+    ///
+    /// `None` until one is composed, which is what stops the silence watchdog from opening a
+    /// gap against a device that simply has no reader yet.
+    watching: Option<Watching>,
+    /// When this service last saw a message from the reader, on the monotonic clock.
+    ///
+    /// Set when the reader is composed rather than left empty, so silence is measured from
+    /// the moment the service started listening. A `None` here would have to mean either
+    /// "no reader" or "a reader that has said nothing since boot", and those call for
+    /// opposite reactions.
+    last_message: Option<Instant>,
+}
+
+/// What the silence watchdog needs to know to do its job.
+#[derive(Clone)]
+struct Watching {
+    reader: ReaderId,
+    race: RaceId,
 }
 
 impl ReaderStatus {
@@ -160,6 +180,8 @@ impl ReaderStatus {
             received: 0,
             persisted: 0,
             fault: None,
+            watching: None,
+            last_message: None,
         }
     }
 }
@@ -454,7 +476,13 @@ impl Device {
 /// and stopping is visible, both as `ReaderState::Stopped` and as a degraded `/health`.
 fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderMessage>, ingest: Ingest) {
     while let Some(message) = receiver.blocking_recv() {
-        device.update_reader(|status| status.received += 1);
+        device.update_reader(|status| {
+            status.received += 1;
+            // Before the write, deliberately. This says the reader is alive, which it has
+            // just proved by sending; whether the journal can keep up is a different fault,
+            // reported by `persisted` falling behind rather than by a gap in the evidence.
+            status.last_message = Some(Instant::now());
+        });
 
         // The device's own clocks, read as close to arrival as this thread can manage. The
         // monotonic value is nanoseconds since this process started: an origin that is the
@@ -494,6 +522,111 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderMessage>, ing
     // The channel closed: the reader has nothing more to send. For a scripted scenario that
     // is the ordinary end of a run, which is why it carries no fault beside it.
     device.update_reader(|status| status.state = Some(ReaderState::Stopped));
+}
+
+/// How often the silence watchdog looks at the clock.
+///
+/// Ten seconds, and deliberately unrelated to the threshold it is comparing against. The
+/// interval bounds how *late* a gap's recorded start can be, not how long silence must last —
+/// so it stays small while the threshold stays a race-day policy that
+/// [Q14](../../../docs/open-questions.md#q14-reader-silence-threshold) has not answered.
+const SILENCE_TICK_SECS: u64 = 10;
+
+/// Opens and closes *suspected* gaps, forever.
+///
+/// The module cannot announce its own failure — user guide § 8.8.2 says it cannot *"detect a
+/// broken communications interface connection and stop streaming the tag results"* — so a
+/// reader that has died looks exactly like a reader with nothing to report. This is the half
+/// of [ADR-0025](../../../docs/adr/0025-m3a-proves-durability-above-the-transport.md)'s third
+/// clause that does not need the transport to say anything.
+///
+/// **Everything it opens is `suspected`, never `confirmed`.** A quiet checkpoint and a dead
+/// module are indistinguishable from here, and the evidence says so rather than resolving the
+/// ambiguity with a guess. `confirmed` belongs to whatever actually held the port.
+///
+/// **It only runs while a race is running.** A device on a bench overnight is silent for
+/// twelve hours and that is not a fault; recording it as one would fill the table with gaps
+/// nobody can act on and teach an operator to ignore the whole signal.
+async fn watch_for_silence(device: Arc<Device>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(SILENCE_TICK_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+        check_for_silence(&device);
+    }
+}
+
+/// One pass of the watchdog.
+///
+/// Split out from the loop so a test can run exactly one tick rather than waiting on a timer.
+fn check_for_silence(device: &Device) {
+    // Read the reader's state first and let go of that lock, because the journal work below
+    // can block on an fsync the read path is in the middle of.
+    let (watching, last_message) = match device.reader.lock() {
+        Ok(reader) => (reader.watching.clone(), reader.last_message),
+        Err(_) => return,
+    };
+
+    // No reader composed is not silence. There is nothing whose quiet could mean anything.
+    let (Some(watching), Some(last_message)) = (watching, last_message) else {
+        return;
+    };
+
+    let Ok(mut stores) = device.stores.lock() else {
+        return;
+    };
+
+    let threshold_ms = match stores.config.reader_silence_threshold_ms() {
+        Ok(ms) => ms,
+        Err(error) => {
+            eprintln!("splitforge-edge: the silence threshold could not be read — {error}");
+            return;
+        }
+    };
+
+    let running = match stores.config.race_is_running(watching.race) {
+        Ok(running) => running,
+        Err(error) => {
+            eprintln!("splitforge-edge: the race's state could not be read — {error}");
+            return;
+        }
+    };
+
+    let silent_for_ms = u64::try_from(last_message.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let now = time::OffsetDateTime::now_utc();
+    let monotonic_ms = u64::try_from(device.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    // The policy is a pure function in the domain, so the boundary cases are tested without
+    // a database or a timer. This function is only the I/O that carries the verdict out.
+    let verdict = assess_silence(threshold_ms, running, silent_for_ms);
+
+    if verdict == SilenceVerdict::Open {
+        // `open_reader_gap` returns the gap already open rather than opening a second, so a
+        // watchdog ticking every ten seconds through a twenty-minute outage writes one row.
+        // The recorded start is when the silence *began*, not when this tick noticed it.
+        let began = now - time::Duration::milliseconds(i64::try_from(silent_for_ms).unwrap_or(0));
+        if let Err(error) = stores.journal.open_reader_gap(
+            &watching.reader,
+            GapDetection::Suspected,
+            began,
+            monotonic_ms,
+            Some("no reads for longer than the configured silence threshold"),
+        ) {
+            eprintln!("splitforge-edge: a suspected reader gap could not be recorded — {error}");
+        }
+    } else if verdict == SilenceVerdict::Close {
+        // Reads are arriving again, so whatever was open has ended — including a confirmed
+        // gap, because a reader that is delivering is a reader that came back.
+        if let Err(error) = stores.journal.close_reader_gap(
+            &watching.reader,
+            now,
+            monotonic_ms,
+            Some("reads resumed"),
+        ) {
+            eprintln!("splitforge-edge: a reader gap could not be closed — {error}");
+        }
+    }
 }
 
 /// How often the service asks the time daemon what it believes.
@@ -614,6 +747,7 @@ async fn main() -> Result<()> {
     // one subprocess call it takes to have a real one.
     sample_the_time_source(&device).await;
     tokio::spawn(watch_the_time_source(Arc::clone(&device)));
+    tokio::spawn(watch_for_silence(Arc::clone(&device)));
 
     if let Some(scenario) = args.simulate.as_deref() {
         compose_simulated_reader(
@@ -687,6 +821,14 @@ fn compose_simulated_reader(
     device.update_reader(|status| {
         status.kind = ReaderKind::Simulated;
         status.state = Some(ReaderState::Connected);
+        status.watching = Some(Watching {
+            reader: reader.clone(),
+            race: race.id,
+        });
+        // Silence is measured from the moment the service started listening, not from the
+        // first read — otherwise a reader that never says anything at all is the one case
+        // the watchdog cannot see.
+        status.last_message = Some(Instant::now());
     });
 
     let device = Arc::clone(device);

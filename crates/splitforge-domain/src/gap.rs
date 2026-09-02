@@ -130,6 +130,46 @@ impl GapEdge {
     }
 }
 
+/// What the silence watchdog should do on one tick.
+///
+/// A pure decision, separated from the I/O that carries it out, because the interesting cases
+/// are all about *when* rather than about databases: a disabled threshold, a race that is not
+/// running, and the boundary itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SilenceVerdict {
+    /// Do nothing. Either the check is off, or no race is running, so silence means nothing.
+    Idle,
+    /// Open a [`GapDetection::Suspected`] gap, or leave the one already open alone.
+    Open,
+    /// Close whatever gap is open: reads are arriving, so the reader is back.
+    Close,
+}
+
+/// Decides what a silence watchdog tick should do.
+///
+/// `threshold_ms` of zero **disables the check**, which is the one value that means something
+/// other than a duration. An operator who has decided a false gap is worse than a late one
+/// needs a way to say so, and saying it explicitly beats setting a week and hoping.
+///
+/// A race that is not running yields [`SilenceVerdict::Idle`] rather than
+/// [`SilenceVerdict::Close`]: a device on a bench overnight is silent for twelve hours and
+/// that is not a fault, and stopping a race is not evidence that a reader came back.
+#[must_use]
+pub const fn assess_silence(
+    threshold_ms: u64,
+    race_running: bool,
+    silent_for_ms: u64,
+) -> SilenceVerdict {
+    if threshold_ms == 0 || !race_running {
+        return SilenceVerdict::Idle;
+    }
+    if silent_for_ms >= threshold_ms {
+        SilenceVerdict::Open
+    } else {
+        SilenceVerdict::Close
+    }
+}
+
 /// A gap, assembled from the edges that bound it.
 ///
 /// **Derived, never stored.** Nothing writes one of these; storage pairs the rows and hands
@@ -260,5 +300,40 @@ mod tests {
     fn only_a_transport_failure_is_confirmed() {
         assert!(GapDetection::Confirmed.is_confirmed());
         assert!(!GapDetection::Suspected.is_confirmed());
+    }
+
+    #[test]
+    fn a_zero_threshold_disables_the_watchdog_entirely() {
+        // The one value that means something other than a duration, and it must win over
+        // every other input — including a race that is running and a reader silent for a day.
+        assert_eq!(assess_silence(0, true, u64::MAX), SilenceVerdict::Idle);
+    }
+
+    #[test]
+    fn silence_means_nothing_while_no_race_is_running() {
+        // A device on a bench overnight is silent for twelve hours. Recording that as a fault
+        // would fill the table with gaps nobody can act on.
+        assert_eq!(assess_silence(1_000, false, u64::MAX), SilenceVerdict::Idle);
+    }
+
+    #[test]
+    fn a_race_that_is_not_running_does_not_close_an_open_gap_either() {
+        // Idle rather than Close: stopping a race is not evidence that a reader came back,
+        // and a gap that was open when the gun stopped keeps its start.
+        assert_ne!(assess_silence(1_000, false, 0), SilenceVerdict::Close);
+    }
+
+    #[test]
+    fn the_threshold_is_the_boundary_and_it_is_inclusive() {
+        assert_eq!(assess_silence(1_000, true, 999), SilenceVerdict::Close);
+        assert_eq!(assess_silence(1_000, true, 1_000), SilenceVerdict::Open);
+        assert_eq!(assess_silence(1_000, true, 1_001), SilenceVerdict::Open);
+    }
+
+    #[test]
+    fn reads_arriving_close_whatever_is_open() {
+        // Including a confirmed gap: a reader that is delivering is a reader that came back,
+        // however the outage was first noticed.
+        assert_eq!(assess_silence(120_000, true, 0), SilenceVerdict::Close);
     }
 }
