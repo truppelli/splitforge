@@ -16,7 +16,7 @@ pub struct Migration {
 }
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Every migration, in order.
 pub const MIGRATIONS: &[Migration] = &[
@@ -49,6 +49,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 6,
         name: "manual_entries",
         sql: MANUAL_ENTRIES,
+    },
+    Migration {
+        version: 7,
+        name: "reader_gap_events",
+        sql: READER_GAP_EVENTS,
     },
 ];
 
@@ -477,6 +482,70 @@ CREATE TRIGGER manual_entries_no_delete
 BEFORE DELETE ON manual_entries
 BEGIN
     SELECT RAISE(ABORT, 'manual_entries is append-only: DELETE is not permitted');
+END;
+";
+
+const READER_GAP_EVENTS: &str = r"
+-- Stretches where a reader was not producing (ADR-0025, ADR-0026).
+--
+-- Evidence, so append-only like raw_reads (ADR-0005, ADR-0011). A gap is what separates
+-- 'nobody crossed' from 'nobody was listening', and it is precisely the row somebody wants
+-- to dispute after a runner is missing from the results.
+--
+-- ONE GAP IS TWO ROWS, and that is not an accident of modelling. A gap is the only evidence
+-- here whose end arrives later than its beginning and is unknown when the beginning is
+-- written -- so the end cannot be an UPDATE to the opening row, because the triggers below
+-- refuse one. An 'opened' row with no matching 'closed' row IS the open gap. That is what
+-- makes an open gap survive a power cut, which is the single likeliest way to cause one.
+--
+-- `detection` is authoritative on the opening row and is never revised. 'suspected' means
+-- the stream went quiet, which is indistinguishable from a checkpoint nobody is crossing;
+-- 'confirmed' means the transport itself failed. Collapsing them would report a quiet finish
+-- line as a broken reader.
+--
+-- `monotonic_ms` is beside `observed_at_us` because a gap's duration must not be computed by
+-- subtracting two readings of a clock that may have stepped during it -- and an unplugged
+-- reader and a device that just found NTP are the same kind of morning.
+CREATE TABLE reader_gap_events (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- No REFERENCES readers(id), for the same reason raw_reads.source has none: evidence is
+    -- recorded about whatever was actually there, and a reader that failed before anyone ran
+    -- `reader add` is exactly the case where the evidence is most wanted. A foreign key here
+    -- would refuse to record a disconnection because of a configuration omission.
+    reader_id       TEXT    NOT NULL,
+    edge            TEXT    NOT NULL CHECK (edge IN ('opened', 'closed')),
+    detection       TEXT    NOT NULL CHECK (detection IN ('confirmed', 'suspected')),
+    observed_at_us  INTEGER NOT NULL,
+    monotonic_ms    INTEGER NOT NULL,
+
+    -- The opening row this one ends. Required on a closing row and forbidden on an opening
+    -- one, so an edge that pairs with nothing cannot be written at all.
+    closes_seq      INTEGER REFERENCES reader_gap_events(seq),
+
+    detail          TEXT,
+
+    CHECK ((edge = 'closed') = (closes_seq IS NOT NULL))
+) STRICT;
+
+-- One closing row per opening row. Without this, a gap could be closed twice and would have
+-- two different durations depending on which row a query happened to find.
+CREATE UNIQUE INDEX reader_gap_events_close_once ON reader_gap_events(closes_seq)
+WHERE closes_seq IS NOT NULL;
+
+-- 'Is this reader in a gap right now?' is asked on every health request.
+CREATE INDEX reader_gap_events_by_reader ON reader_gap_events(reader_id, edge);
+
+CREATE TRIGGER reader_gap_events_no_update
+BEFORE UPDATE ON reader_gap_events
+BEGIN
+    SELECT RAISE(ABORT, 'reader_gap_events is append-only: UPDATE is not permitted');
+END;
+
+CREATE TRIGGER reader_gap_events_no_delete
+BEFORE DELETE ON reader_gap_events
+BEGIN
+    SELECT RAISE(ABORT, 'reader_gap_events is append-only: DELETE is not permitted');
 END;
 ";
 

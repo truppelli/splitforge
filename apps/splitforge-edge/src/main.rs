@@ -49,9 +49,13 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use splitforge_api::{ClockSource, Health, HealthSource, ReaderHealth, ReaderKind, ReaderState};
+use splitforge_api::{
+    ClockSource, Health, HealthSource, OpenGap, ReaderHealth, ReaderKind, ReaderState,
+};
 use splitforge_cli::{ScriptedReader, Speed};
-use splitforge_domain::{ClockStep, DeviceClockState, RawReadJournal, SAMPLE_INTERVAL_MS};
+use splitforge_domain::{
+    ClockStep, DeviceClockState, GapDetection, RawReadJournal, SAMPLE_INTERVAL_MS,
+};
 use splitforge_reader::{Ingest, ReaderMessage, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
 use splitforge_timesource::ClockReading;
@@ -210,6 +214,10 @@ impl HealthSource for Device {
                     state: reader.state,
                     reads_received: reader.received,
                     reads_persisted: reader.persisted,
+                    // Filled in below, from the journal rather than from this struct. An
+                    // open gap has to survive the restart that a power cut causes, so the
+                    // rows are the authority and this process's memory is not.
+                    open_gap: None,
                 };
                 if let Some(fault) = reader.fault.as_ref() {
                     // A reader that stopped because a write failed is a different fact from
@@ -235,6 +243,42 @@ impl HealthSource for Device {
         match stores.journal.count() {
             Ok(reads) => health.raw_reads = reads,
             Err(error) => health.degrade(format!("the journal could not be counted: {error}")),
+        }
+
+        // Read from the rows, not from this process's memory. A gap that opened before the
+        // last restart is exactly the one worth reporting, and it is the one an in-memory
+        // flag would have forgotten (ADR-0026).
+        match stores.journal.open_reader_gaps() {
+            Ok(gaps) => {
+                // The reader field describes *this* device's reader, so the gap reported
+                // beside it is the longest-standing one; the rest are in the journal, which
+                // is where a device with several readers goes to see them all.
+                if let Some(gap) = gaps.first() {
+                    // Wall clock, because the gap may have been opened by a previous run of
+                    // this service and monotonic readings do not survive that.
+                    let elapsed =
+                        (time::OffsetDateTime::now_utc() - gap.started_at).whole_milliseconds();
+                    health.reader.open_gap = Some(OpenGap {
+                        detection: gap.detection,
+                        open_for_ms: u64::try_from(elapsed).unwrap_or(0),
+                    });
+                }
+                for gap in &gaps {
+                    // Named separately per reader, because "which one" is the first thing an
+                    // operator needs and the status line cannot carry it.
+                    health.degrade(format!(
+                        "reader {} has been {} gone since {}; \
+                         reads from it are not being recorded",
+                        gap.reader_id.as_str(),
+                        match gap.detection {
+                            GapDetection::Confirmed => "confirmed",
+                            GapDetection::Suspected => "possibly",
+                        },
+                        gap.started_at,
+                    ));
+                }
+            }
+            Err(error) => health.degrade(format!("reader gaps could not be read: {error}")),
         }
 
         let floor = match stores.config.min_free_bytes() {
