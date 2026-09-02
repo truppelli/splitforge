@@ -231,9 +231,13 @@ captures.
       length fields, and a payload that is itself a whole valid frame are test cases rather
       than hypotheticals. This is the highest-risk code in the project and it was fully
       testable before a module existed
-- [ ] Implement `ReaderProvider` on top of the codec. The crate does **not** yet — framing is
-      there and nothing above it, which is why `serialport` is not a dependency yet either.
-      **The prerequisite this step had is now retired.** The user guide cannot supply the
+- [x] **`ReaderProvider` on top of the codec**, and the connection lifecycle under it:
+      `reassembly` keeps the buffer a serial port makes necessary, `port` is the only module
+      that names `serialport`, and everything between takes a `PortFactory` — so opening,
+      reassembly across arbitrary read boundaries, resynchronization after a mid-frame
+      disconnect, bounded jittered reconnect, and a timeout that is *not* treated as a
+      disconnection are all exercised against ports that fail on demand.
+      **The prerequisite this step had was retired first.** The user guide cannot supply the
       command set — § 7 is two framing diagrams and the CRC's covered range, and stops — so the
       opcodes had to come from the MercuryAPI SDK, which is code rather than a specification and
       needed its own archival and its own licensing read first. Both are done: the SDK is MIT,
@@ -241,9 +245,23 @@ captures.
       [vendor-documents.md](readers/vendor-documents.md#the-command-set-from-the-sdk). Two
       corrections came with them — the antenna byte is a packed tx/rx nibble pair rather than an
       antenna number, and `dspMicros` is named for a unit the vendor's own prose contradicts
-- [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
+- [ ] **Decode a tag report into a read.** The one thing the adapter above cannot do, and the
+      reason `TagReportDecoder` is a trait this crate ships no implementation of. Field *order*
+      is established from the parser itself; **which bit selects which field is not** —
+      `TMR_TRD_METADATA_FLAG_*` lives in a header the archived mirror carries only a 2009 copy
+      of, containing none of the modern symbols
+      ([finding 9](readers/vendor-documents.md#9-the-command-set-is-spread-across-three-files-and-one-was-archived)).
+      Guessing them would ship an internally consistent, externally wrong parser for the second
+      time in this crate. **Blocked on a document, not on hardware:** a current `tm_reader.h`
+      closes it, and closes [Q14](open-questions.md#q14-reader-silence-threshold)'s other half
+      with it
+- [x] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
-      ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps))
+      ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps)). `SessionAnchor` captures
+      both clocks at the instant a connection opens, per connection because that is the scope
+      over which the module's counter is continuous — and the wall clock only says *when*,
+      because the subtraction rests on the monotonic one
+      ([clock discipline § 3](clock-and-time-discipline.md#3-the-three-clocks))
 - [ ] **Detect a disconnection and record it as a bounded gap**, which
       [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md) makes a deliverable
       rather than an assumption: a device node that vanishes and a stream that goes silent are
@@ -364,9 +382,13 @@ documentation before the hardware was bought, on the theory that a bug found at 
 cheaper than one found in a field with cold hands. The parser was wrong, and it was found at a
 desk, before the order.
 
-`serialport` is deliberately **not** a dependency yet. ADR-0024 authorizes it onto the read
-path; the crate currently opens nothing, and a dependency that can lose a read is worth
-adding with the code that opens the port rather than one commit earlier.
+`serialport` **is** a dependency now, on the terms the note that stood here set: ADR-0024
+authorized it onto the read path, and it arrived with the code that opens a port rather than
+one commit earlier. It is confined to `port::open` — the rest of the crate sees a
+`PortFactory`, which is what keeps the lifecycle testable without hardware. Its default
+features are off, because they pull in `libudev` for the *target* and the Pi cross-build
+installs no such thing; enumeration is not wanted anyway, since the port is named by a udev
+rule rather than discovered.
 
 **What M3a explicitly does not do:** put anything in the support matrix. Two of the nine
 criteria — a reader clock to measure offset and skew against, and per-antenna identity — are

@@ -10,16 +10,22 @@ homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
 
-# Deliberately no `serialport` yet. ADR-0024 authorizes it onto the read path, but this
-# crate currently holds only the frame codec — pure functions over `&[u8]` with no I/O
-# anywhere near them. A dependency that can lose a read is worth adding when the code that
-# opens the port lands, and not one commit sooner.
+# `serialport` is here now because the code that opens a port is here now — ADR-0024
+# authorizes it onto the read path, and the note that used to stand here said it would
+# arrive with that code rather than one commit sooner.
 #
-# `splitforge-domain` and `splitforge-reader` are permitted by the rule table in
-# `crates/splitforge-testkit/tests/dependency_rules.rs` and unused for the same reason:
-# that table grants permission, not obligation.
+# It is confined to `port::open`. Everything else in the crate takes a `PortFactory`, so
+# the connection lifecycle is exercised against fakes that fail on demand rather than
+# against hardware nobody has.
 [dependencies]
+serialport.workspace = true
+splitforge-domain.workspace = true
+splitforge-reader.workspace = true
 thiserror.workspace = true
+# The session anchor captures both clocks at once: `time` for the wall clock that says *when*,
+# `std::time::Instant` for the monotonic one the subtraction actually rests on.
+time.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

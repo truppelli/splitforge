@@ -2,9 +2,11 @@
 //!
 //! ThingMagic serial reader adapter: frame parsing, connection lifecycle, and reconnect.
 //!
-//! **Status:** the frame codec and the command set. There is no connection lifecycle here yet
-//! and no [`ReaderProvider`] implementation — see `docs/roadmap.md`, Milestone 3a, for what
-//! lands here and in what order.
+//! **Status:** the frame codec, the command set, and the connection lifecycle — this crate
+//! now implements [`ReaderProvider`]. What it cannot yet do is turn a tag report into a read:
+//! [`TagReportDecoder`] is a trait with no implementation here, because the metadata flag
+//! values that say which bit selects which field are in a header this project does not have.
+//! See `docs/roadmap.md`, Milestone 3a.
 //!
 //! ## Boundaries
 //!
@@ -32,11 +34,15 @@
 //! ## What is here, and what it is worth
 //!
 //! Framing, as pure functions over `&[u8]` — [`frame::decode`], [`frame::encode_command`],
-//! and the [`crc`] they rest on. Nothing in this crate opens a port, sleeps, or knows what
-//! time it is.
+//! and the [`crc`] they rest on. The I/O sits above them and stays out of their way:
+//! [`reassembly`] keeps a buffer to ask [`frame::decode`] about and still touches no port,
+//! and [`port`] is the only module in the crate that names `serialport` at all. Everything
+//! between them takes a [`PortFactory`], so opening, reading, resynchronizing after a
+//! mid-frame disconnect, and bounded jittered reconnect are all exercised against ports that
+//! fail exactly when a test wants them to.
 //!
-//! That is deliberate and it is most of the value. Binary parsing against untrusted input
-//! is the highest-risk code in the project, and it is the part that can be finished, in
+//! That layering is deliberate and it is most of the value. Binary parsing against untrusted
+//! input is the highest-risk code in the project, and it is the part that can be finished, in
 //! full, before anybody spends $345 — truncated frames, bad checksums, and a `0xFF` in the
 //! middle of a payload are all reachable from a byte-slice literal.
 //!
@@ -61,6 +67,9 @@
 pub mod command;
 pub mod crc;
 pub mod frame;
+pub mod port;
+pub mod provider;
+pub mod reassembly;
 
 pub use command::{OpCode, antenna_ports, search_flag};
 pub use crc::crc16;
@@ -69,3 +78,6 @@ pub use frame::{
     MAX_FRAME_LEN, MAX_RESPONSE_DATA_LEN, RESPONSE_HEADER_LEN, Response, SOH, decode,
     encode_command, resynchronize,
 };
+pub use port::{Port, PortFactory, SerialSettings, serial};
+pub use provider::{Backoff, SessionAnchor, TagReportDecoder, ThingMagicReader};
+pub use reassembly::{Reassembler, Stats};
