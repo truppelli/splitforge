@@ -262,7 +262,7 @@ captures.
       over which the module's counter is continuous — and the wall clock only says *when*,
       because the subtraction rests on the monotonic one
       ([clock discipline § 3](clock-and-time-discipline.md#3-the-three-clocks))
-- [x] **Detect a disconnection and record it as a bounded gap**, which
+- [ ] **Detect a disconnection and record it as a bounded gap**, which
       [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md) makes a deliverable
       rather than an assumption: a device node that vanishes and a stream that goes silent are
       both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
@@ -278,8 +278,10 @@ captures.
       a `confirmed` gap immediately instead of waiting out a silence threshold that was only
       ever a guess, and a reconnection closes it — including one that comes back to an empty
       field, which produces no read to close it with. **This is the change M3b shares**, and
-      it is the last of this bullet that could be written without the module: what remains is
-      inducing a real disconnection
+      it is the last of this bullet that could be written without the module. **The box stays
+      unchecked deliberately**: what remains is inducing a real disconnection, and this
+      milestone does not tick a box because the code exists — it ticks one when the behavior
+      has been observed
 - [x] **`splitforge-edge` has a read path**, in the ordering
       [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
       first, always, then the journal append, then notify — `reads_persisted` moves only after
