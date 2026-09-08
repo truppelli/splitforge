@@ -17,9 +17,15 @@ documentation portal had moved: `jadaktech.com/documents-downloads/…` 302-redi
 `novanta.com/precision-medicine/`, and the user-guide PDFs under
 `jadaktech.com/wp-content/uploads/…` return 404.
 
-That left the highest-risk code in the project resting on a document nobody could open. Both
-documents below were located on DigiKey's CDN, which is a distributor mirror and not the
-vendor — so it can rotate too, and a hash is recorded for each.
+That left the highest-risk code in the project resting on a document nobody could open. The two
+**PDFs** below were located on DigiKey's CDN, which is a distributor mirror and not the vendor —
+so it can rotate too, and a hash is recorded for each.
+
+The list has since grown past those two, and every addition has told the same story: the
+MercuryAPI sources are on third-party GitHub mirrors because the vendor's own SDK download is
+also a 404 now. **Not one document this project depends on is still retrievable from the
+vendor.** That is the strongest argument this file can make for its own existence, and it was
+not the argument it was created with.
 
 ## The documents
 
@@ -68,7 +74,12 @@ leaves out. Located after [the guide turned out to document no command set](#the
 | Retrieved | 2026-08-30, HTTP 200 |
 | Size | 208,039 bytes |
 | SHA-256 | `97b74cb184068bb1c9841f9f1e13ceedc1d9593fe1a88690787ea4f4e7d66d79` |
-| Depended on by | `crates/splitforge-thingmagic/src/crc.rs` |
+| Depended on by | `crates/splitforge-thingmagic/src/crc.rs`; [tag-report layout](#tag-report-layout--serial_reader_l3c-tmr_sr_parsemetadatafrommessage) rows 1–9 |
+
+**There is a second `serial_reader_l3.c` in this file.** The 2023 one is recorded under
+[MercuryAPI 2023](#mercuryapi-2023--four-files) and is 84 KB larger. Rows 1–9 of the tag-report
+table were taken from *this* 2009 copy and then cross-checked against that one; rows 10–14 exist
+only there. Cite by hash, not by filename.
 
 **The license answers the question the section below raised.** MIT is compatible with
 GPL-3.0-or-later, so this repository may read, adapt, and incorporate this code with attribution
@@ -110,13 +121,13 @@ every multi-byte field in a response is big-endian.
 | SHA-256 | `0f423f6b5219e23596c308d438324df9b217e8a9a8d6a5b9d513212f22cd6d37` |
 | Depended on by | [The command set, from the SDK](#the-command-set-from-the-sdk) |
 
-### MercuryAPI 2023 — `tmr_tag_data.h`, `tmr_serial_reader.h`, `serial_reader.c`
+### MercuryAPI 2023 — four files
 
 **A current SDK, and the answer to what
 [finding 9](#9-the-command-set-is-spread-across-three-files-and-one-was-archived) recorded as
-missing.** The three files above carry the `TMR_TRD_METADATA_FLAG_*` values, the
-`TMR_SR_STATUS_*` values, and the byte that separates a tag frame from a status frame — none of
-which the 2009 mirror could supply.
+missing.** These carry the `TMR_TRD_METADATA_FLAG_*` values, the `TMR_SR_STATUS_*` values, the
+byte that separates a tag frame from a status frame, and the five tag-report fields the 2009
+parser does not have — none of which the 2009 mirror could supply.
 
 **The vendor's own distribution is gone.** `python-mercuryapi`'s build fetches
 `mercuryapi-AHAB-1.35.2.72-1.zip` from `jadaktech.com/wp-content/uploads/2022/08/`, which now
@@ -131,18 +142,26 @@ drift the way `master` can.
 
 | | |
 |---|---|
-| Title | Mercury API — tag data, serial reader header, serial reader |
+| Title | Mercury API — tag data, serial reader header, serial reader, low level implementation |
 | Copyright | © 2023 Novanta, Inc. |
 | **License** | **MIT** — the same grant as the 2009 files, verified in each file's own header |
 | Mirror | `Commutyble/thingmagic-client`, pinned at `0b16964089c3a4234209cb9d04979d276f62a2e0` |
 | Retrieved | 2026-09-08, HTTP 200 |
-| Depended on by | [Metadata flags](#metadata-flags--tmr_tag_datah-enum-tmr_trd_metadataflag), [Status reports](#status-reports--tmr_serial_readerh-and-serial_readerc) |
+| Depended on by | [Tag-report layout](#tag-report-layout--serial_reader_l3c-tmr_sr_parsemetadatafrommessage), [Metadata flags](#metadata-flags--tmr_tag_datah-enum-tmr_trd_metadataflag), [Status reports](#status-reports--tmr_serial_readerh-and-serial_readerc) |
 
 | File | Path in the tree | Size | SHA-256 |
 |---|---|---|---|
 | `tmr_tag_data.h` | `c/src/api/tmr_tag_data.h` | 8,906 bytes | `d5352715aa7eec66f879aa29b92ed8586cc7013f93fcb52e3274ee1ea822003f` |
 | `tmr_serial_reader.h` | `c/src/api/tmr_serial_reader.h` | 14,748 bytes | `8a709d14a39bfcc1b540178e5fe3c551b700222f99e1c31b39df12d2e8b58fdb` |
 | `serial_reader.c` | `c/src/api/serial_reader.c` | 242,673 bytes | `852544644c6384d1a4ee35e09ca126efbf1442af278c1dfe06ed1df093e90573` |
+| `serial_reader_l3.c` | `c/src/api/serial_reader_l3.c` | 292,434 bytes | `3db28019080e98fcabed942d453498c84aa95ecdb889cfa6e6ac4f1d8793e57b` |
+
+**The fourth file is the same name as the 2009 one recorded above, and that is the point.**
+Rows 10–14 of the tag-report table and the whole of
+[finding 13](#13-the-2009-field-order-is-a-prefix-of-the-modern-one) come from *this* copy of
+`serial_reader_l3.c`, not from the 208 KB one. Two files fourteen years apart with the same
+name is exactly the situation a hash exists for: 292,434 bytes against 208,039, and a different
+digest, so there is no way to cite one and mean the other by accident.
 
 Raw URLs take the form:
 
@@ -195,13 +214,13 @@ Short quotations of technical fact, as below, are ordinary citation. The facts t
 that a length field is one byte, that a CRC covers four named fields — are not copyrightable
 at all, which is why the section that matters most to the code is reproduced in full.
 
-**The two source files above are a different case entirely.** Both are MIT, which permits
-copying and adaptation outright, so nothing forbids vendoring them. They are still not committed
-here, for a reason that is engineering rather than legal: this repository implements the
-protocol in Rust with its own tests, and a C file sitting beside it would be a second source of
-truth that nothing compiles or checks. What is taken from them is recorded where it is used —
-the algorithm in `crc.rs`, the captured frame in `CAPTURED_FRAME` — with attribution in the
-docstring rather than a copied file.
+**The MercuryAPI and SparkFun sources above are a different case entirely.** All of them are
+MIT, which permits copying and adaptation outright, so nothing forbids vendoring them. They are
+still not committed here, for a reason that is engineering rather than legal: this repository
+implements the protocol in Rust with its own tests, and a C file sitting beside it would be a
+second source of truth that nothing compiles or checks. What is taken from them is recorded
+where it is used — the algorithm in `crc.rs`, the captured frame in `CAPTURED_FRAME`, the opcode
+and flag tables below — with attribution in the docstring rather than a copied file.
 
 ## What the code depends on, quoted
 
@@ -360,6 +379,12 @@ The layout § 8.8.3 deferred on. A **flags word selects which fields are present
 present ones appear in exactly this order — so the parser is a sequence of conditional reads,
 not a fixed struct. Multi-byte fields are big-endian, per `tmr_utils.h`.
 
+**Two sources, and the table says which.** Rows 1–9 come from the **2009** `serial_reader_l3.c`
+and were cross-checked against the 2023 copy, where they are identical in flag value and in
+order. Rows 10–14 exist only in the **2023** copy. Both are recorded under
+[The documents](#the-documents) with separate hashes, because they share a filename and differ
+by 84 KB — see [finding 13](#13-the-2009-field-order-is-a-prefix-of-the-modern-one).
+
 | Order | Flag | Field | Width | Notes |
 |---|---|---|---|---|
 | 1 | `0x0001` | read count | `u8` | |
@@ -470,9 +495,22 @@ table. The response-type byte has to be checked *before* the metadata flags word
 
 ## What the read path will depend on, quoted
 
-Nothing in this section backs code that exists today. These are the statements a
-`ReaderProvider` will rest on, recorded while the document is open, because three of them
-constrain the design before a line of it is written.
+> **The *"will"* is now half wrong, and the heading keeps it anyway.** ADR-0025 and
+> `hardware-plan.md` both link to this anchor, and ADR-0025 is Accepted — the process in
+> [docs/adr/README.md](../adr/README.md) does not permit editing an accepted ADR to chase a
+> renamed heading. A stale word costs less than two broken links.
+
+**Half of this now backs code that exists.** `crates/splitforge-thingmagic/src/port.rs` opens a
+port at 115,200 baud with a test asserting the default, and the `ReaderProvider` above it
+implements the reconnect behavior § 8.8.2 forces by saying the module *"cannot detect a broken
+communications interface connection."* What is still ahead of the code is the tag-report
+reading — § 8.8.3 — because `TagReportDecoder` has no implementation yet.
+
+These were recorded while the document was open, before any of it was needed, because three of
+them constrain the design before a line of it is written. That turned out to be the right call:
+§ 5.1.4.1's *"flow control is not supported"* is what
+[finding 7](#7-m3as-exit-criterion-may-not-be-reachable-on-this-interface) rests on, and it was
+read a milestone before anything could act on it.
 
 ### The serial link — User Guide § 5.1.4, § 5.1.4.1
 
@@ -819,7 +857,9 @@ established, from the parser itself; which bit selects which field is not.
 > - **Neither symbol was ever in `tm_reader.h`.** `TMR_TRD_METADATA_FLAG_*` is in
 >   `tmr_tag_data.h` and `TMR_SR_STATUS_*` is in `tmr_serial_reader.h`. The note above blamed
 >   the mirror's 2009 vintage for an absence that was really a wrong filename — the age of the
->   copy was a true fact standing next to a false inference.
+>   copy was a true fact standing next to a false inference. **The 2023 `tm_reader.h` contains
+>   neither symbol either**, which is the check that settles it: the file was never where they
+>   live, in any vintage, so no newer copy of *that file* would ever have closed this.
 > - **`TMR_SR_STATUS_*` was in the mirror this file already cites, the whole time.**
 >   `ppelleti/mercuryapi-corrections/tmr_serial_reader.h` carries it, with values identical to
 >   the 2023 SDK's. It was never missing; it was never looked for in the right file.
@@ -911,10 +951,17 @@ arrives at all when no tags are in the field — which is the only property that
 keepalive. The `TMR_SR_STATUS_*` content flags that would say are in the header the mirror does
 not carry a current copy of ([finding 9](#9-the-command-set-is-spread-across-three-files-and-one-was-archived)).
 
-So ADR-0025's accepted cost is **stated too absolutely** and is corrected in place — it is
-Proposed, not Accepted, so the ADR process permits it. The honest form is that no liveness signal
-is *known* to be available, and there is a named candidate whose periodicity nobody has
-established.
+So ADR-0025's accepted cost is **stated too absolutely** and was corrected in place — it was
+Proposed at the time, and the ADR process permits editing a Proposed one. The honest form is
+that no liveness signal is *known* to be available, and there is a named candidate whose
+periodicity nobody has established.
+
+> **That window has closed.** ADR-0025 is **Accepted** now, and
+> [docs/adr/README.md](../adr/README.md) permits no further in-place edits: *"ADRs are not
+> edited after acceptance except to change status. A decision that no longer holds gets a new
+> ADR that supersedes it."* The sentence above is kept in the past tense rather than deleted,
+> because as written in the present tense it read as standing permission — and the next person
+> to find something else ADR-0025 states too absolutely would have taken it.
 
 > **Updated 2026-09-08, and Q14 is still open.** The `TMR_SR_STATUS_*` content flags this
 > section said were unavailable are now recorded, and a status frame turns out to be
