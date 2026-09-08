@@ -162,6 +162,23 @@ struct ReaderStatus {
     /// "no reader" or "a reader that has said nothing since boot", and those call for
     /// opposite reactions.
     last_message: Option<Instant>,
+    /// Whether the provider has said it lost the port and has not yet said it is back.
+    ///
+    /// **This is what stops the two detectors from arguing.** They answer the same question
+    /// from different evidence and only one of them is guessing: while the transport has
+    /// reported its own failure there is nothing an inference from quiet can add.
+    ///
+    /// It is a correctness guard rather than an optimization, because
+    /// [`assess_silence`] reads *not silent for long enough yet* as
+    /// [`SilenceVerdict::Close`] — a verdict that means "reads are arriving". A tick landing
+    /// inside the first threshold's worth of a real outage reaches it without any read having
+    /// arrived, and would close the confirmed gap the disconnection had just opened, writing
+    /// a *"reads resumed"* edge at a moment when nothing resumed.
+    ///
+    /// Deliberately **not** derived from whether a gap is open in the journal: a gap can be
+    /// open because a previous run of this service left one there, which says nothing about
+    /// whether *this* process's provider currently holds a port.
+    transport_down: bool,
 }
 
 /// What the silence watchdog needs to know to do its job.
@@ -182,6 +199,7 @@ impl ReaderStatus {
             fault: None,
             watching: None,
             last_message: None,
+            transport_down: false,
         }
     }
 }
@@ -575,6 +593,11 @@ fn record_connection(device: &Device, cause: Option<Disconnection>) {
         } else {
             ReaderState::Connected
         });
+        // Set even when the row below cannot be written. This is what this process believes
+        // about its own provider, and the watchdog has to stand down either way: a failed
+        // write leaves the evidence incomplete, and letting an inference from quiet file a
+        // *suspected* gap over the top would make it wrong as well.
+        status.transport_down = cause.is_some();
         if cause.is_none() {
             // A connection is evidence the reader is alive, exactly as a read is — and it is
             // the only such evidence a reader in an empty field will produce. Without this,
@@ -667,10 +690,26 @@ async fn watch_for_silence(device: Arc<Device>) {
 fn check_for_silence(device: &Device) {
     // Read the reader's state first and let go of that lock, because the journal work below
     // can block on an fsync the read path is in the middle of.
-    let (watching, last_message) = match device.reader.lock() {
-        Ok(reader) => (reader.watching.clone(), reader.last_message),
+    let (watching, last_message, transport_down) = match device.reader.lock() {
+        Ok(reader) => (
+            reader.watching.clone(),
+            reader.last_message,
+            reader.transport_down,
+        ),
         Err(_) => return,
     };
+
+    // **The transport has already spoken, so quiet adds nothing.** An inference is only worth
+    // making where something is left to infer, and a provider that reported its own failure
+    // has left nothing ambiguous — the gap is open, and it is already `confirmed`.
+    //
+    // Without this the next tick would *close* that gap: `assess_silence` reads "not silent
+    // for long enough yet" as `Close`, which means "reads are arriving", and inside the first
+    // threshold's worth of an outage it is reached without a single read having arrived.
+    // `Connected` is what closes this one, and it comes from the transport.
+    if transport_down {
+        return;
+    }
 
     // No reader composed is not silence. There is nothing whose quiet could mean anything.
     let (Some(watching), Some(last_message)) = (watching, last_message) else {
@@ -1042,6 +1081,10 @@ mod tests {
                     race: race.id,
                 }),
                 last_message: Some(Instant::now()),
+                // Matches `state` above: nothing has reported a connection yet. The guard
+                // this feeds is lifted by the first `Connected`, so a test that never
+                // records one is a test of a device whose provider has said nothing.
+                transport_down: false,
             }),
         };
 
@@ -1169,5 +1212,80 @@ mod tests {
             );
             assert!(!detail.is_empty());
         }
+    }
+
+    /// Starts the race the device is watching, so the silence watchdog does something.
+    ///
+    /// `load_fixture` configures a race and does not start one, and `assess_silence` is
+    /// [`SilenceVerdict::Idle`] while none is running — so a watchdog test that skipped this
+    /// would pass without the watchdog ever having made a decision.
+    fn start_the_race(device: &Device) {
+        let race = device
+            .reader
+            .lock()
+            .expect("the reader's state")
+            .watching
+            .as_ref()
+            .expect("a reader is composed")
+            .race;
+
+        device
+            .stores
+            .lock()
+            .expect("the stores")
+            .config
+            .record_session(
+                race,
+                splitforge_domain::SessionAction::Start,
+                time::OffsetDateTime::now_utc(),
+                "test",
+                None,
+            )
+            .expect("start the race");
+    }
+
+    #[test]
+    fn the_watchdog_leaves_a_gap_the_transport_opened_alone() {
+        let (device, _directory) = a_device_watching_a_reader();
+        start_the_race(&device);
+
+        record_connection(&device, Some(Disconnection::Ended));
+        assert!(open_gap(&device).is_some(), "the cable came out");
+
+        // The tick that lands inside the first threshold's worth of a real outage. This
+        // device last heard a read milliseconds ago and the threshold is two minutes, so
+        // `assess_silence` reads *not silent long enough yet* as `Close` — a verdict that
+        // means "reads are arriving" and is being reached here because none have stopped
+        // arriving for long enough to notice, not because any arrived.
+        check_for_silence(&device);
+
+        assert!(
+            open_gap(&device).is_some(),
+            "the transport said the port died and nothing has said otherwise; closing the \
+             gap here records that reads resumed at a moment when nothing resumed"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_still_closes_a_gap_when_reads_actually_resume() {
+        // The other side of the guard, so it cannot be satisfied by disabling the watchdog:
+        // a *suspected* gap must still close on its own evidence.
+        let (device, _directory) = a_device_watching_a_reader();
+        start_the_race(&device);
+
+        let stale = Instant::now() - std::time::Duration::from_secs(3_600);
+        device.update_reader(|status| status.last_message = Some(stale));
+        check_for_silence(&device);
+        let gap = open_gap(&device).expect("an hour of silence during a race");
+        assert_eq!(gap.detection, GapDetection::Suspected);
+
+        // A read arrives, exactly as the read path records one.
+        device.update_reader(|status| status.last_message = Some(Instant::now()));
+        check_for_silence(&device);
+
+        assert!(
+            open_gap(&device).is_none(),
+            "reads resumed, so the gap the watchdog opened must close"
+        );
     }
 }
