@@ -182,6 +182,46 @@ impl Ingest {
     }
 }
 
+/// Everything a reader can say.
+///
+/// **One channel, deliberately**
+/// ([ADR-0027](../../../docs/adr/0027-a-reader-reports-connection-events-on-the-read-channel.md)).
+/// A disconnection does not arrive beside the reads on a second channel; it arrives *behind*
+/// them in the same queue, so the order the provider observed is the order the consumer sees.
+///
+/// The reason is ordering rather than tidiness. Reads are already in flight on a bounded
+/// channel — a provider blocks in `blocking_send` when the journal cannot keep up, which is
+/// the back-pressure [architecture § 4](../../../docs/architecture.md) asks for — so at the
+/// moment a port dies, reads it already delivered may still be queued ahead of the consumer.
+/// On a second channel the consumer could observe the disconnection while those reads were
+/// still queued, and would open a gap timestamped **before** reads it had not yet written.
+/// The evidence would say the reader was gone during a period it was demonstrably producing,
+/// and nothing afterwards could reconcile the two. That interleaving is not rare: it is the
+/// expected one precisely when it matters most — under load, on a slow card, at the moment
+/// the transport fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReaderEvent {
+    /// A tag was read.
+    Read(ReaderMessage),
+    /// The transport came up.
+    ///
+    /// Emitted for every working connection including the first, so a consumer never has to
+    /// infer that an outage ended from the arrival of a read.
+    Connected,
+    /// The transport went down, and the transport itself said so.
+    ///
+    /// **Only ever a claim about the transport.** A provider emits this when a port fails to
+    /// open or a read returns an error — never because a stream has gone quiet. That
+    /// inference belongs to the silence watchdog, it is ambiguous in a way this is not, and
+    /// it is recorded under a different word: `suspected` rather than `confirmed`.
+    Disconnected {
+        /// Whatever the operating system said, for a human reading the evidence later.
+        ///
+        /// Free text, and nothing parses it. No promise is made about its wording.
+        detail: Option<String>,
+    },
+}
+
 /// A source of reads.
 ///
 /// Channel-based rather than `async fn` in a trait, so it stays dyn-compatible: the edge
@@ -190,11 +230,16 @@ pub trait ReaderProvider: Send {
     /// Which reader this provider represents.
     fn reader_id(&self) -> ReaderId;
 
-    /// Starts producing reads, returning the channel they arrive on.
+    /// Starts producing events, returning the channel they arrive on.
     ///
     /// The provider owns its own connection lifecycle — including reconnect and backoff —
     /// and keeps producing until the channel is dropped.
-    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderMessage>;
+    ///
+    /// **A provider that cannot disconnect emits neither connection event.** The simulator
+    /// has no cable and so has no claim to make; every event it sends is a
+    /// [`ReaderEvent::Read`]. A consumer must therefore never treat the absence of
+    /// [`ReaderEvent::Connected`] as an outage.
+    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderEvent>;
 }
 
 #[cfg(test)]

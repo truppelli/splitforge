@@ -37,7 +37,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use splitforge_domain::{ChipId, ReaderId};
-use splitforge_reader::{ReaderMessage, ReaderProvider, ReaderTimestamp};
+use splitforge_reader::{ReaderEvent, ReaderMessage, ReaderProvider, ReaderTimestamp};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::mpsc;
 
@@ -363,7 +363,16 @@ impl ReaderProvider for SimulatedReader {
         self.reader.clone()
     }
 
-    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderMessage> {
+    /// Plays the script, and says nothing else.
+    ///
+    /// **Every event is a [`ReaderEvent::Read`].** There is no cable here, so there is no
+    /// transport whose state this could report, and
+    /// [ADR-0027](../../../docs/adr/0027-a-reader-reports-connection-events-on-the-read-channel.md)
+    /// is explicit that a provider which cannot disconnect emits neither connection event.
+    /// Sending a `Connected` at the top of the script would be a claim about a wire that does
+    /// not exist, and it would write a "the reader came back" edge into a consumer's evidence.
+    /// What an operator is looking at is reported by `ReaderKind::Simulated` instead.
+    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderEvent> {
         let (sender, receiver) = mpsc::channel(self.buffer.max(1));
         tokio::spawn(async move {
             let mut previous: Option<OffsetDateTime> = None;
@@ -380,7 +389,11 @@ impl ReaderProvider for SimulatedReader {
                 // A closed channel means the consumer is gone. Stopping is correct: a real
                 // adapter with nowhere to deliver reads should stop reading, not buffer
                 // the race into memory.
-                if sender.send(scripted.message).await.is_err() {
+                if sender
+                    .send(ReaderEvent::Read(scripted.message))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -606,7 +619,14 @@ mod tests {
 
         let mut receiver = Box::new(reader).start();
         let mut received = 0_usize;
-        while receiver.recv().await.is_some() {
+        while let Some(event) = receiver.recv().await {
+            // Not `is_some()`. A simulated reader has no transport, so a connection event
+            // here would be a claim about a cable that does not exist — and it would be
+            // counted as a read by anything that only checked the channel was not empty.
+            assert!(
+                matches!(event, ReaderEvent::Read(_)),
+                "a simulated reader emits reads and nothing else, but sent {event:?}"
+            );
             received += 1;
         }
         assert_eq!(received, expected);

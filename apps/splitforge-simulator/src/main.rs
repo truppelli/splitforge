@@ -5,7 +5,7 @@
 //! deduplication, and JSON output — use `splitforge simulate` from `splitforge-cli`.
 
 use splitforge_domain::{ChipId, ReaderId};
-use splitforge_reader::{ReaderProvider, ReaderTimestamp};
+use splitforge_reader::{ReaderEvent, ReaderProvider, ReaderTimestamp};
 use splitforge_simulator::{BurstProfile, Scenario, SimulatedReader, Speed};
 use time::macros::datetime;
 use time::{Duration, OffsetDateTime};
@@ -42,7 +42,14 @@ async fn main() {
 
     let mut receiver = Box::new(reader).start();
     let mut count = 0_u32;
-    while let Some(message) = receiver.recv().await {
+    while let Some(event) = receiver.recv().await {
+        // A simulated reader emits nothing but reads, so this skips nothing today. It is
+        // written out rather than unwrapped because the demo is the one place a future
+        // provider gets composed by hand, and a silent `else` would print a race with the
+        // disconnections missing from it.
+        let ReaderEvent::Read(message) = event else {
+            continue;
+        };
         count += 1;
         let at = match message.timestamp {
             ReaderTimestamp::Utc { at } => at.to_string(),

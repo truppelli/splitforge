@@ -131,10 +131,21 @@ pub trait RawReadJournal {
     fn append(&self, read: &RawRead) -> Result<RawReadId, JournalError>;
 }
 
+// splitforge-reader, as built. Channel-based rather than a `Stream`, so the trait stays
+// dyn-compatible: `splitforge-edge` holds a `Box<dyn ReaderProvider>` and cannot tell a
+// simulator from a module.
 pub trait ReaderProvider {
-    fn subscribe(&self) -> impl Stream<Item = ReaderMessage>;
+    fn start(self: Box<Self>) -> mpsc::Receiver<ReaderEvent>;
 }
 ```
+
+**`ReaderEvent` rather than `ReaderMessage`, and one channel rather than two**
+([ADR-0027](adr/0027-a-reader-reports-connection-events-on-the-read-channel.md)). A reader
+reports its reads *and* its connection edges on the same queue, so a consumer sees them in the
+order the provider observed. Split across two channels, a disconnection could be observed while
+reads taken before it were still queued — and the reader gap it opens would then start before
+reads about to be written. That is the ordering § 4's back-pressure makes a live hazard rather
+than a theoretical one.
 
 `splitforge-edge` is the only place that knows which concrete implementations exist. This
 is also what makes `splitforge-simulator` a first-class citizen instead of a test hack:

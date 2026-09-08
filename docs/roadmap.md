@@ -262,7 +262,7 @@ captures.
       over which the module's counter is continuous — and the wall clock only says *when*,
       because the subtraction rests on the monotonic one
       ([clock discipline § 3](clock-and-time-discipline.md#3-the-three-clocks))
-- [ ] **Detect a disconnection and record it as a bounded gap**, which
+- [x] **Detect a disconnection and record it as a bounded gap**, which
       [ADR-0025](adr/0025-m3a-proves-durability-above-the-transport.md) makes a deliverable
       rather than an assumption: a device node that vanishes and a stream that goes silent are
       both recorded, the silent one as *suspected* because a quiet checkpoint looks identical,
@@ -272,9 +272,13 @@ captures.
       ([ADR-0026](adr/0026-a-reader-gap-is-two-rows.md)). The watchdog opens a *suspected* gap
       when a running race goes quiet for longer than `reader_silence_ms`, and closes whatever
       is open when reads resume; its decision is a pure function in the domain, so the
-      boundary cases are tested without a database or a timer. **What remains is a
-      *confirmed* gap**, which needs `ReaderProvider` to be able to say the port died — it
-      currently returns only a channel of reads, and that change is shared with M3b
+      boundary cases are tested without a database or a timer. **The *confirmed* gap is now
+      built too** ([ADR-0027](adr/0027-a-reader-reports-connection-events-on-the-read-channel.md)):
+      `ReaderProvider` returns a channel of `ReaderEvent` rather than of reads, so a provider
+      can say the port died — and says it *behind* the reads that port already delivered,
+      which is what stops a gap from starting before a read taken inside it. **What is left
+      here needs the module**, and it is the observation rather than the code: no cable has
+      been pulled
 - [x] **`splitforge-edge` has a read path**, in the ordering
       [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
       first, always, then the journal append, then notify — `reads_persisted` moves only after
@@ -323,6 +327,29 @@ for: the module cannot announce its own failure, so SplitForge has to notice —
 has gone quiet is indistinguishable from a checkpoint with nobody crossing it, which is why a
 silence-derived gap is recorded as *suspected* and never as confirmed. How long silence must
 last is [Q14](open-questions.md#q14-reader-silence-threshold), and it is not answered.
+
+**Both detectors now exist, and they detect different things**
+([ADR-0027](adr/0027-a-reader-reports-connection-events-on-the-read-channel.md)). The watchdog
+infers an outage from quiet and files it as *suspected*. The provider reports one the operating
+system handed it — a port that would not open, a read that returned an error — and that is
+*confirmed*. The distinction is the whole point of having two words, and the code is arranged so
+neither can quietly become the other: a provider is forbidden from inferring a disconnection
+from silence, and the simulator, having no cable, emits no connection events at all.
+
+**The ordering is what the decision actually turns on**, and it is subtler than the plumbing.
+Reads are already in flight on a bounded channel, because back-pressure is deliberate
+([architecture § 4](architecture.md#4-failure-behavior)) — so at the moment a port dies, reads
+it delivered may still be queued ahead of the consumer. Announced on a *second* channel, the
+disconnection could overtake them and open a gap timestamped **before** reads that are about to
+be written: evidence contradicting itself, with nothing recording which channel was drained
+first. One channel makes that unrepresentable rather than merely unlikely, which matters because
+the bad interleaving is the *expected* one exactly when it counts — under load, on a slow card,
+at the moment the transport fails.
+
+**What has not happened is the observation.** No cable has been pulled, because there is no
+module to pull it from. Every claim above is made against ports that fail on demand and a
+channel a test fills by hand; the exit criterion asks for a real disconnection on real hardware,
+and it is still waiting on the same purchase everything else in this milestone is.
 
 **The adapter streams rather than polling the tag buffer**, which was the second of § 7's three
 ways out and is rejected on a cost § 7 had underpriced as *"throughput"*. § 8.8.1 deduplicates

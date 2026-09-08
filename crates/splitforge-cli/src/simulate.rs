@@ -20,7 +20,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use splitforge_domain::{DeviceClockState, RaceConfig, RawReadJournal, ReaderId};
-use splitforge_reader::{Ingest, ReaderProvider};
+use splitforge_reader::{Ingest, ReaderEvent, ReaderProvider};
 use splitforge_simulator::{BurstProfile, Scenario, SimulatedReader, Transport, detection_time};
 use splitforge_storage::SqliteJournal;
 use splitforge_testkit::FixtureEvent;
@@ -162,7 +162,17 @@ pub async fn into_journal(
 
     let fallback = config.gun_time().unwrap_or(splitforge_testkit::RACE_START);
 
-    while let Some(message) = receiver.recv().await {
+    while let Some(event) = receiver.recv().await {
+        // **This command has no gap table in front of it**, so it says so here rather than
+        // relying on the type to make the question unaskable
+        // ([ADR-0027](../../../docs/adr/0027-a-reader-reports-connection-events-on-the-read-channel.md)).
+        // `splitforge simulate` runs a scenario into a journal from a one-shot process; a
+        // connection event belongs to a *running device*, where it becomes a reader gap and
+        // degrades health. The simulated provider emits none anyway, and this is written to
+        // stay correct if that ever stops being true.
+        let ReaderEvent::Read(message) = event else {
+            continue;
+        };
         reads_received += 1;
 
         // A reader that supplies no timestamp still has to be given a receipt time. Using

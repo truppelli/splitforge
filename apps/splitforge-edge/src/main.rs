@@ -57,7 +57,7 @@ use splitforge_domain::{
     ClockStep, DeviceClockState, GapDetection, RaceId, RawReadJournal, ReaderId,
     SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
 };
-use splitforge_reader::{Ingest, ReaderMessage, ReaderProvider};
+use splitforge_reader::{Ingest, ReaderEvent, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
 use splitforge_timesource::ClockReading;
 use tokio::sync::mpsc::Receiver;
@@ -162,6 +162,19 @@ struct ReaderStatus {
     /// "no reader" or "a reader that has said nothing since boot", and those call for
     /// opposite reactions.
     last_message: Option<Instant>,
+    /// Whether the provider has said its transport is down and not yet said it is back.
+    ///
+    /// **This is what stops the silence watchdog from arguing with the transport.** The two
+    /// detectors answer the same question from different evidence, and only one of them is
+    /// guessing: while the port itself has reported a failure there is nothing for an
+    /// inference from quiet to add, and — because `assess_silence` reads *not yet silent
+    /// enough* as "reads are arriving" — a tick landing inside the first threshold's worth of
+    /// a real outage would otherwise **close the confirmed gap that had just been opened**.
+    ///
+    /// Not derived from the open gap in the journal, deliberately. A gap can be open because a
+    /// previous run of this service left one there, and that says nothing about whether *this*
+    /// process's provider currently holds a port.
+    transport_down: bool,
 }
 
 /// What the silence watchdog needs to know to do its job.
@@ -182,6 +195,7 @@ impl ReaderStatus {
             fault: None,
             watching: None,
             last_message: None,
+            transport_down: false,
         }
     }
 }
@@ -474,8 +488,29 @@ impl Device {
 /// A failed write stops the loop rather than skipping the read. A timer that cannot persist
 /// evidence must say so and stop, not keep counting into a journal that is missing rows —
 /// and stopping is visible, both as `ReaderState::Stopped` and as a degraded `/health`.
-fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderMessage>, ingest: Ingest) {
-    while let Some(message) = receiver.blocking_recv() {
+///
+/// **It also drains the connection events, on the same channel and in the same loop**
+/// ([ADR-0027](../../../docs/adr/0027-a-reader-reports-connection-events-on-the-read-channel.md)).
+/// That is not a convenience: a disconnection delivered on a second channel could be observed
+/// while reads taken before it were still queued, and the gap this opens would then start
+/// before reads that are about to be written — evidence that contradicts itself, with nothing
+/// recording which channel was drained first. One queue, one order, by construction.
+fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, ingest: Ingest) {
+    while let Some(event) = receiver.blocking_recv() {
+        let message = match event {
+            ReaderEvent::Read(message) => message,
+            // Confirmed, not suspected. The transport reported its own failure, so unlike
+            // silence this is not a checkpoint that nobody happened to cross (ADR-0025).
+            ReaderEvent::Disconnected { detail } => {
+                open_confirmed_gap(device, detail.as_deref());
+                continue;
+            }
+            ReaderEvent::Connected => {
+                close_gap_on_reconnect(device);
+                continue;
+            }
+        };
+
         device.update_reader(|status| {
             status.received += 1;
             // Before the write, deliberately. This says the reader is alive, which it has
@@ -524,6 +559,128 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderMessage>, ing
     device.update_reader(|status| status.state = Some(ReaderState::Stopped));
 }
 
+/// Records a disconnection the transport reported, as a **confirmed** gap.
+///
+/// Confirmed rather than suspected because the port said so itself: a failed open or a read
+/// that returned an error is not the ambiguous case the silence watchdog handles, and
+/// recording it under the weaker word would discard a distinction the transport actually
+/// knows ([ADR-0025](../../../docs/adr/0025-m3a-proves-durability-above-the-transport.md)).
+///
+/// **Not conditioned on a race running**, which is the one place this deliberately parts
+/// company with the watchdog. That condition exists because a device on a bench is silent all
+/// night and silence off-race means nothing; an unplugged cable means the same thing whenever
+/// it happens, and a device that cannot see its reader before the gun is exactly the device
+/// whose operator needs to know.
+///
+/// A failed write is logged and the read path continues. A gap is derived from state this
+/// process already holds rather than taken off a wire once (ADR-0026), so losing one is not
+/// the unrecoverable loss that a failed *read* append is — and stopping the timer because a
+/// note about the reader could not be filed would turn a reconnectable outage into the end of
+/// the event.
+fn open_confirmed_gap(device: &Device, detail: Option<&str>) {
+    // The reader lock first, and let go of it before taking the journal's — the same order
+    // the watchdog uses, and for the same reason: the work below can block on an fsync the
+    // read path is in the middle of, and `/health` reads this status.
+    let watching = match device.reader.lock() {
+        Ok(mut status) => {
+            // Set even if the row below cannot be written. This is what this process believes
+            // about its own provider, and the watchdog has to stand down either way: a failed
+            // write leaves the evidence incomplete, and letting an inference from quiet file a
+            // *suspected* gap over the top would make it wrong as well.
+            status.transport_down = true;
+            status.watching.clone()
+        }
+        Err(_) => return,
+    };
+
+    // No reader composed. Nothing can have disconnected, and there is no reader to name.
+    let Some(watching) = watching else {
+        return;
+    };
+
+    eprintln!(
+        "splitforge-edge: reader {} reported its transport is down{}",
+        watching.reader.as_str(),
+        detail.map_or_else(String::new, |detail| format!(" — {detail}"))
+    );
+
+    let Ok(mut stores) = device.stores.lock() else {
+        eprintln!(
+            "splitforge-edge: a confirmed reader gap could not be recorded; the device state \
+             is unreadable after an earlier failure"
+        );
+        return;
+    };
+
+    let monotonic_ms = u64::try_from(device.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    // `open_reader_gap` returns whatever is already open rather than opening a second, so a
+    // disconnection arriving on top of a suspected gap the watchdog filed first stays one
+    // outage — noticed twice, recorded once, under the word that noticed it first (ADR-0026).
+    if let Err(error) = stores.journal.open_reader_gap(
+        &watching.reader,
+        GapDetection::Confirmed,
+        time::OffsetDateTime::now_utc(),
+        monotonic_ms,
+        detail,
+    ) {
+        eprintln!("splitforge-edge: a confirmed reader gap could not be recorded — {error}");
+    }
+}
+
+/// Closes whatever gap is open, because the transport says it is back.
+///
+/// The counterpart the watchdog structurally cannot supply. Silence can only observe a
+/// recovery through a read, and a reader that reconnects to a checkpoint nobody is crossing
+/// produces none — so without this event a gap would stay open over a reader that is working,
+/// degrading health until somebody ran past it.
+fn close_gap_on_reconnect(device: &Device) {
+    let watching = match device.reader.lock() {
+        Ok(mut status) => {
+            status.transport_down = false;
+            // Silence is measured from the moment the service started listening, and a
+            // reconnection is that moment again. Without this the next watchdog tick would
+            // measure quiet from the last read *before* the outage and immediately file a
+            // suspected gap against a reader that had just come back.
+            status.last_message = Some(Instant::now());
+            status.watching.clone()
+        }
+        Err(_) => return,
+    };
+
+    let Some(watching) = watching else {
+        return;
+    };
+
+    let Ok(mut stores) = device.stores.lock() else {
+        eprintln!(
+            "splitforge-edge: a reader gap could not be closed; the device state is \
+             unreadable after an earlier failure"
+        );
+        return;
+    };
+
+    let monotonic_ms = u64::try_from(device.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    // Nothing open means nothing to close: a provider whose first connection succeeds has
+    // never been gone, and must not leave an empty gap behind to prove it.
+    match stores.journal.close_reader_gap(
+        &watching.reader,
+        time::OffsetDateTime::now_utc(),
+        monotonic_ms,
+        Some("the reader's transport reconnected"),
+    ) {
+        Ok(Some(gap)) => eprintln!(
+            "splitforge-edge: reader {} is back; the {} gap that opened at {} is closed",
+            watching.reader.as_str(),
+            gap.detection.as_str(),
+            gap.started_at,
+        ),
+        Ok(None) => {}
+        Err(error) => eprintln!("splitforge-edge: a reader gap could not be closed — {error}"),
+    }
+}
+
 /// How often the silence watchdog looks at the clock.
 ///
 /// Ten seconds, and deliberately unrelated to the threshold it is comparing against. The
@@ -563,10 +720,27 @@ async fn watch_for_silence(device: Arc<Device>) {
 fn check_for_silence(device: &Device) {
     // Read the reader's state first and let go of that lock, because the journal work below
     // can block on an fsync the read path is in the middle of.
-    let (watching, last_message) = match device.reader.lock() {
-        Ok(reader) => (reader.watching.clone(), reader.last_message),
+    let (watching, last_message, transport_down) = match device.reader.lock() {
+        Ok(reader) => (
+            reader.watching.clone(),
+            reader.last_message,
+            reader.transport_down,
+        ),
         Err(_) => return,
     };
+
+    // **The transport has already spoken, so quiet adds nothing.** An inference is only worth
+    // making where there is something to infer, and a provider that reported its own failure
+    // has left nothing ambiguous — the gap is already open, and already confirmed.
+    //
+    // This is a correctness guard rather than an optimization. `assess_silence` reads
+    // *not silent for long enough yet* as [`SilenceVerdict::Close`], so a tick landing inside
+    // the first threshold's worth of a genuine outage would close the confirmed gap that the
+    // disconnection had just opened, and record a "reads resumed" edge at a moment when
+    // nothing resumed. `Connected` is what closes this one, and it comes from the transport.
+    if transport_down {
+        return;
+    }
 
     // No reader composed is not silence. There is nothing whose quiet could mean anything.
     let (Some(watching), Some(last_message)) = (watching, last_message) else {
@@ -883,4 +1057,242 @@ async fn serve(_socket: &std::path::Path, _device: Arc<Device>) -> Result<()> {
         "splitforge-edge serves its API on a Unix socket (ADR-0021) and cannot run on this \
          platform. The target is 64-bit Linux (ADR-0002); use the CLI here instead."
     )
+}
+
+/// The read path's own claims, made against a real database rather than a mock.
+///
+/// **The event mapping is tested here rather than in `tests/service.rs`** because the service
+/// composes only a simulated reader, and a simulated reader has no transport to lose
+/// (ADR-0027). Driving `read_into_journal` with a channel this module fills is the only way to
+/// put a `Disconnected` in front of it until the module is bought — at which point the *real*
+/// observation, an actual cable pulled out of a running Pi, becomes M3a's exit criterion.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use splitforge_domain::{ChipId, SessionAction};
+    use splitforge_reader::{ReaderMessage, ReaderTimestamp};
+    use tokio::sync::mpsc;
+
+    /// The 5K fixture's reader.
+    const READER: &str = "mat";
+
+    /// A device on a real database, with a running race and a reader being watched.
+    ///
+    /// The race is started because the silence watchdog does nothing while none is running,
+    /// and one of the claims below is about what the watchdog does *not* do.
+    fn device_watching_a_running_race(directory: &tempfile::TempDir) -> Arc<Device> {
+        let database = directory.path().join("event.db");
+
+        let mut store = ConfigStore::open(&database).expect("open the configuration");
+        splitforge_cli::load_fixture(&mut store, "test", "five-k").expect("load the fixture");
+        let race = match store.resolve_race(None).expect("resolve the race") {
+            RaceSelection::One(race) => race,
+            other => panic!("expected exactly one race, got {other:?}"),
+        };
+        store
+            .record_session(
+                race.id,
+                SessionAction::Start,
+                time::OffsetDateTime::now_utc(),
+                "test",
+                None,
+            )
+            .expect("start the race");
+        drop(store);
+
+        let (journal, _recovery) =
+            SqliteJournal::open_recovering(&database).expect("open the journal");
+        let config = ConfigStore::open(&database).expect("reopen the configuration");
+
+        let device = Arc::new(Device {
+            database,
+            started: Instant::now(),
+            stores: Mutex::new(Stores { journal, config }),
+            clock: RwLock::new(None),
+            reader: Mutex::new(ReaderStatus::none()),
+        });
+        device.update_reader(|status| {
+            status.kind = ReaderKind::Simulated;
+            status.state = Some(ReaderState::Connected);
+            status.watching = Some(Watching {
+                reader: ReaderId::new(READER),
+                race: race.id,
+            });
+            status.last_message = Some(Instant::now());
+        });
+        device
+    }
+
+    fn a_read() -> ReaderEvent {
+        ReaderEvent::Read(ReaderMessage {
+            source: ReaderId::new(READER),
+            antenna: Some(1),
+            chip: ChipId::new("E28011606000020000000101"),
+            timestamp: ReaderTimestamp::Absent,
+            rssi_dbm: Some(-52),
+            raw_payload: vec![0xAA, 0xBB],
+        })
+    }
+
+    /// Drains a scripted sequence of events through the read path and returns.
+    ///
+    /// The sender is dropped before the loop runs, so `blocking_recv` empties the queue and
+    /// then sees the channel close — the same ending a reader reaching the end of its script
+    /// produces, and what makes this a plain synchronous test.
+    fn drain(device: &Device, events: Vec<ReaderEvent>) {
+        let (sender, receiver) = mpsc::channel(events.len().max(1));
+        for event in events {
+            sender.try_send(event).expect("queue the event");
+        }
+        drop(sender);
+        read_into_journal(device, receiver, Ingest::default());
+    }
+
+    #[test]
+    fn a_disconnection_becomes_a_confirmed_gap_and_a_reconnection_closes_it() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let device = device_watching_a_running_race(&directory);
+
+        drain(
+            &device,
+            vec![
+                a_read(),
+                ReaderEvent::Disconnected {
+                    detail: Some("No such device (os error 19)".to_owned()),
+                },
+                ReaderEvent::Connected,
+            ],
+        );
+
+        let stores = device.stores.lock().expect("the stores");
+        let reads = stores.journal.read_all().expect("read the journal");
+        let gaps = stores.journal.recent_reader_gaps(8).expect("read the gaps");
+
+        assert_eq!(reads.len(), 1, "the read is evidence and is kept");
+        assert_eq!(gaps.len(), 1, "one outage, recorded once");
+        assert_eq!(
+            gaps[0].detection,
+            GapDetection::Confirmed,
+            "the transport reported this itself; it is not an inference from silence"
+        );
+        assert_eq!(
+            gaps[0].detail.as_deref(),
+            Some("No such device (os error 19)"),
+            "what the operating system said survives to whoever reads the evidence"
+        );
+        assert!(gaps[0].ended_at.is_some(), "the reconnection closed it");
+        assert!(
+            stores
+                .journal
+                .open_reader_gaps()
+                .expect("open gaps")
+                .is_empty()
+        );
+
+        // **The property ADR-0027 exists for.** The gap cannot begin before a read taken
+        // inside it, because both arrived on one queue in the order the provider observed.
+        // On a second channel this is the assertion that fails under load — which is
+        // precisely when the transport is most likely to be failing.
+        assert!(
+            gaps[0].started_at >= reads[0].read.received_at,
+            "a gap that starts before a read it contains is evidence contradicting itself"
+        );
+    }
+
+    #[test]
+    fn a_reader_that_was_never_gone_leaves_no_gap_behind() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let device = device_watching_a_running_race(&directory);
+
+        // The ordinary start: a provider whose first connection succeeds. Announcing that is
+        // what lets a gap be closed later, and it must not be mistaken for one ending here.
+        drain(&device, vec![ReaderEvent::Connected, a_read()]);
+
+        let stores = device.stores.lock().expect("the stores");
+        assert_eq!(stores.journal.read_all().expect("the journal").len(), 1);
+        assert!(
+            stores
+                .journal
+                .recent_reader_gaps(8)
+                .expect("the gaps")
+                .is_empty(),
+            "connecting is not an outage ending; an empty gap here would be a false alarm \
+             on every restart"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_leaves_the_gap_the_transport_opened_alone() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let device = device_watching_a_running_race(&directory);
+
+        drain(
+            &device,
+            vec![
+                a_read(),
+                ReaderEvent::Disconnected {
+                    detail: Some("Input/output error".to_owned()),
+                },
+            ],
+        );
+
+        // The tick this guard exists for. The device last heard a read milliseconds ago and
+        // the threshold is two minutes, so `assess_silence` reads the reader as producing —
+        // and would close a gap opened by a cable that is still out, writing a "reads
+        // resumed" edge at a moment when nothing resumed.
+        check_for_silence(&device);
+        check_for_silence(&device);
+
+        let stores = device.stores.lock().expect("the stores");
+        let open = stores.journal.open_reader_gaps().expect("open gaps");
+        assert_eq!(
+            open.len(),
+            1,
+            "the confirmed gap outlives the watchdog's tick"
+        );
+        assert_eq!(open[0].detection, GapDetection::Confirmed);
+        assert_eq!(
+            stores
+                .journal
+                .recent_reader_gaps(8)
+                .expect("the gaps")
+                .len(),
+            1,
+            "and no second gap was opened alongside it"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_speaks_again_once_the_transport_says_it_is_back() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let device = device_watching_a_running_race(&directory);
+
+        drain(
+            &device,
+            vec![
+                ReaderEvent::Disconnected { detail: None },
+                ReaderEvent::Connected,
+            ],
+        );
+
+        assert!(
+            !device
+                .reader
+                .lock()
+                .expect("the reader status")
+                .transport_down,
+            "a reconnection has to lift the guard, or silence is never watched again"
+        );
+
+        check_for_silence(&device);
+
+        let stores = device.stores.lock().expect("the stores");
+        let gaps = stores.journal.recent_reader_gaps(8).expect("the gaps");
+        assert_eq!(
+            gaps.len(),
+            1,
+            "the tick added nothing to an outage that ended"
+        );
+        assert!(gaps[0].ended_at.is_some());
+    }
 }
