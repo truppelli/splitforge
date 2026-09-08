@@ -247,14 +247,19 @@ captures.
       antenna number, and `dspMicros` is named for a unit the vendor's own prose contradicts
 - [ ] **Decode a tag report into a read.** The one thing the adapter above cannot do, and the
       reason `TagReportDecoder` is a trait this crate ships no implementation of. Field *order*
-      is established from the parser itself; **which bit selects which field is not** —
-      `TMR_TRD_METADATA_FLAG_*` lives in a header the archived mirror carries only a 2009 copy
-      of, containing none of the modern symbols
-      ([finding 9](readers/vendor-documents.md#9-the-command-set-is-spread-across-three-files-and-one-was-archived)).
-      Guessing them would ship an internally consistent, externally wrong parser for the second
-      time in this crate. **Blocked on a document, not on hardware:** a current `tm_reader.h`
-      closes it, and closes [Q14](open-questions.md#q14-reader-silence-threshold)'s other half
-      with it
+      was established from the parser itself; which bit selects which field was not.
+      **The document blocker is now retired** — a 2023 MercuryAPI was located and archived, and
+      `TMR_TRD_METADATA_FLAG_*`, `TMR_SR_STATUS_*`, and the response-type byte that separates a
+      tag frame from a status frame are all recorded with hashes
+      ([finding 9](readers/vendor-documents.md#9-the-command-set-is-spread-across-three-files-and-one-was-archived),
+      [finding 13](readers/vendor-documents.md#13-the-2009-field-order-is-a-prefix-of-the-modern-one)).
+      Three things came with it: the flags were never in `tm_reader.h`, so the blocker was a
+      wrong filename rather than an old mirror; the modern layout has **five more fields** than
+      the nine recorded, so a decoder written against the old list would return a plausible
+      wrong chip id; and a status frame must be rejected *before* the flags word is read, or it
+      becomes a fabricated read in an append-only table. **What this does not retire is
+      [ADR-0004](adr/0004-llrp-first-reader-adapter.md)** — the CRC was documented too, and was
+      wrong. A decoder is written now; it is *believed* when a capture agrees with it
 - [x] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
       ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps)). `SessionAnchor` captures

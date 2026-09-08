@@ -209,6 +209,27 @@ decision against it: one reader is composed per service today, so a per-checkpoi
 be a schema with exactly one row in it and no way to tell whether it was right. What the number
 should be is unchanged and still open.
 
+**The document route above is closed, and it did not answer the question — 2026-09-08.** The
+first of the two routes was *"a current `tm_reader.h` from a vendor SDK distribution."* Both
+halves of that turned out to be wrong, and pursuing it settled less than it looked like it
+would:
+
+- The vendor distribution is **gone**: `mercuryapi-AHAB-1.35.2.72-1.zip` returns HTTP 404 from
+  `jadaktech.com`, exactly as the user-guide PDFs did.
+- The symbols were **never in `tm_reader.h`**. `TMR_SR_STATUS_*` lives in `tmr_serial_reader.h`,
+  in the mirror this project already cites, and had been reachable all along — see
+  [finding 9](readers/vendor-documents.md#9-the-command-set-is-spread-across-three-files-and-one-was-archived).
+
+A 2023 SDK was located on a third-party mirror and archived, so the content flags and the
+status-frame layout are now recorded. **None of it states a period.** The SDK raises a flag and
+the module's firmware decides the cadence; there is no interval parameter anywhere in these
+sources, and nothing says whether a status frame arrives into an empty field.
+
+**So this question is now hardware-gated rather than document-gated**, and only the second route
+is left: a module on a bench with nothing in front of it and a terminal capturing the port. That
+is a change in which queue it waits in, not an answer, and `DEFAULT_SILENCE_THRESHOLD_MS` still
+carries no measurement behind it.
+
 ---
 
 ## Resolved
