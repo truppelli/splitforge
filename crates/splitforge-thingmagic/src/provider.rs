@@ -15,19 +15,29 @@
 //! not: the guide describes tag metadata in prose — Table 13 and § 8.8.3 name the fields and
 //! their meanings — and defers to the MercuryAPI SDK for "code details".
 //!
-//! Most of that gap is now closed. Opcodes and search flags are in [`crate::command`], and the
-//! report's field *order* — read count, RSSI, antenna, frequency, timestamp, phase, protocol,
-//! data, GPIO, then the EPC — is recorded in `vendor-documents.md`, taken from the parser
-//! itself. **What is still missing is which bit selects which field.** The
-//! `TMR_TRD_METADATA_FLAG_*` values live in a header the archived mirror carries only a 2009
-//! copy of, and that copy contains none of the modern symbols. Without them the field order is
-//! a sequence with no way to know which members of it are present.
+//! That gap is now closed. Opcodes and search flags are in [`crate::command`], and
+//! `vendor-documents.md` records the whole tag-report layout: the `TMR_TRD_METADATA_FLAG_*`
+//! values, the fourteen flagged fields in flag-bit order, and the response-type byte that
+//! separates a tag frame from a status frame.
 //!
-//! So the seam is a trait, and the decision is
+//! **The seam stays a trait anyway**, and the decision is
 //! [ADR-0004](../../../docs/adr/0004-llrp-first-reader-adapter.md)'s: *do not start from
-//! protocol documentation alone*. Inventing a byte layout that happens to compile would
-//! produce a parser that is internally consistent, externally wrong, and fully tested —
-//! which is worse than no parser at all, because it looks finished.
+//! protocol documentation alone*. A byte layout taken from a document and never checked against
+//! a capture produces a parser that is internally consistent, externally wrong, and fully
+//! tested — which is worse than no parser at all, because it looks finished. **This crate has
+//! already done that once**, with a CRC the user guide named and the module did not compute.
+//!
+//! Three specifics from the archived SDK belong in whatever fills this seam, because each is a
+//! way to be confidently wrong:
+//!
+//! - **Walk the flag bits ascending and reject an unknown high bit.** The layout gained five
+//!   fields between 2009 and 2023. A decoder that stops at `0x0100` does not fail loudly on a
+//!   module that sets `0x1000`; it reads the brand identifier as the EPC length and returns a
+//!   plausible wrong chip id.
+//! - **Three fields are conditional on the protocol as well as on their flag**, so the protocol
+//!   field has to be kept rather than skipped over.
+//! - **Reject a status frame before reading the flags word.** Parsed as a tag report it becomes
+//!   a fabricated read in an append-only table.
 //!
 //! Everything around that one seam is real and tested: opening, reading, reassembly,
 //! resynchronization, bounded jittered reconnect, and the counters that make loss visible.

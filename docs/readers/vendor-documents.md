@@ -110,6 +110,51 @@ every multi-byte field in a response is big-endian.
 | SHA-256 | `0f423f6b5219e23596c308d438324df9b217e8a9a8d6a5b9d513212f22cd6d37` |
 | Depended on by | [The command set, from the SDK](#the-command-set-from-the-sdk) |
 
+### MercuryAPI 2023 — `tmr_tag_data.h`, `tmr_serial_reader.h`, `serial_reader.c`
+
+**A current SDK, and the answer to what
+[finding 9](#9-the-command-set-is-spread-across-three-files-and-one-was-archived) recorded as
+missing.** The three files above carry the `TMR_TRD_METADATA_FLAG_*` values, the
+`TMR_SR_STATUS_*` values, and the byte that separates a tag frame from a status frame — none of
+which the 2009 mirror could supply.
+
+**The vendor's own distribution is gone.** `python-mercuryapi`'s build fetches
+`mercuryapi-AHAB-1.35.2.72-1.zip` from `jadaktech.com/wp-content/uploads/2022/08/`, which now
+returns **HTTP 404** — the same fate as the user-guide PDFs that
+[made this file necessary](#why-this-file-exists). So the version below is named by its
+copyright rather than by a version string: the sources carry **© 2023 Novanta**, which is the
+same vendor and year as the archived user guide, and no file in the tree states a release
+number.
+
+A third-party mirror again, and pinned to a **commit** rather than a branch so the URLs cannot
+drift the way `master` can.
+
+| | |
+|---|---|
+| Title | Mercury API — tag data, serial reader header, serial reader |
+| Copyright | © 2023 Novanta, Inc. |
+| **License** | **MIT** — the same grant as the 2009 files, verified in each file's own header |
+| Mirror | `Commutyble/thingmagic-client`, pinned at `0b16964089c3a4234209cb9d04979d276f62a2e0` |
+| Retrieved | 2026-09-08, HTTP 200 |
+| Depended on by | [Metadata flags](#metadata-flags--tmr_tag_datah-enum-tmr_trd_metadataflag), [Status reports](#status-reports--tmr_serial_readerh-and-serial_readerc) |
+
+| File | Path in the tree | Size | SHA-256 |
+|---|---|---|---|
+| `tmr_tag_data.h` | `c/src/api/tmr_tag_data.h` | 8,906 bytes | `d5352715aa7eec66f879aa29b92ed8586cc7013f93fcb52e3274ee1ea822003f` |
+| `tmr_serial_reader.h` | `c/src/api/tmr_serial_reader.h` | 14,748 bytes | `8a709d14a39bfcc1b540178e5fe3c551b700222f99e1c31b39df12d2e8b58fdb` |
+| `serial_reader.c` | `c/src/api/serial_reader.c` | 242,673 bytes | `852544644c6384d1a4ee35e09ca126efbf1442af278c1dfe06ed1df093e90573` |
+
+Raw URLs take the form:
+
+```text
+https://raw.githubusercontent.com/Commutyble/thingmagic-client/0b16964089c3a4234209cb9d04979d276f62a2e0/c/src/api/tmr_tag_data.h
+```
+
+**Two of the three tables below were cross-checked against the 2009 mirror and agree exactly**,
+which is the strongest corroboration available without a vendor copy — two mirrors, fourteen
+years apart, with no common maintainer. Where they differ, they differ by *addition*, and that
+difference is recorded in [finding 13](#13-the-2009-field-order-is-a-prefix-of-the-modern-one).
+
 ### SparkFun Simultaneous RFID Tag Reader Library
 
 | | |
@@ -315,21 +360,113 @@ The layout § 8.8.3 deferred on. A **flags word selects which fields are present
 present ones appear in exactly this order — so the parser is a sequence of conditional reads,
 not a fixed struct. Multi-byte fields are big-endian, per `tmr_utils.h`.
 
-| Order | Field | Width | Notes |
-|---|---|---|---|
-| 1 | read count | `u8` | |
-| 2 | RSSI | `i8` | Signed — read as `(int8_t)`, and dBm is negative |
-| 3 | antenna ID | `u8` | **Not an antenna number** — see [finding 10](#10-the-antenna-byte-is-a-packed-txrx-nibble-pair-not-an-antenna-number) |
-| 4 | frequency | `u24` | |
-| 5 | timestamp | `u32` | Relative to the read command; see [finding 11](#11-mercuryapi-anchors-the-relative-timestamp-exactly-as-adr-0024-prescribes) |
-| 6 | phase | `u16` | |
-| 7 | protocol | `u8` | |
-| 8 | data | `u16` bit-count, then bytes | Length is in **bits**, converted by `tm_u8s_per_bits` |
-| 9 | GPIO status | `u8` | Bit per pin |
-| — | EPC | `u16` bit-count, then bytes | Always present, after the flagged fields |
+| Order | Flag | Field | Width | Notes |
+|---|---|---|---|---|
+| 1 | `0x0001` | read count | `u8` | |
+| 2 | `0x0002` | RSSI | `i8` | Signed — read as `(int8_t)`, and dBm is negative |
+| 3 | `0x0004` | antenna ID | `u8` | **Not an antenna number** — see [finding 10](#10-the-antenna-byte-is-a-packed-txrx-nibble-pair-not-an-antenna-number) |
+| 4 | `0x0008` | frequency | `u24` | |
+| 5 | `0x0010` | timestamp | `u32` | Relative to the read command; see [finding 11](#11-mercuryapi-anchors-the-relative-timestamp-exactly-as-adr-0024-prescribes) |
+| 6 | `0x0020` | phase | `u16` | |
+| 7 | `0x0040` | protocol | `u8` | Must be *kept* — three later fields are conditional on it |
+| 8 | `0x0080` | data | `u16` bit-count, then bytes | Length is in **bits**, converted by `tm_u8s_per_bits` |
+| 9 | `0x0100` | GPIO status | `u8` | Bit per pin |
+| 10 | `0x0200` | Gen2 Q | `u8` | **Gen2 only** — skipped entirely for another protocol |
+| 11 | `0x0400` | Gen2 link frequency | `u8` | Gen2 only. An enum: `0x00`/`0x02`/`0x04` → 250/320/640 kHz |
+| 12 | `0x0800` | Gen2 target | `u8` | Gen2 only. `0x00` → A, `0x01` → B |
+| 13 | `0x1000` | brand identifier | 2 bytes | **Carved out of the EPC** — the parser subtracts 2 from the EPC byte count |
+| 14 | `0x2000` | tag type | **EBV**, variable | Extensible Bit Vector, via `parseEBVdata` — the one field with no fixed width |
+| — | — | EPC | `u16` bit-count, then bytes | Always present, after the flagged fields |
+
+**The order is the flag bits ascending**, which is worth stating as a rule rather than as a
+table to memorize: the parser tests each flag in turn from `0x0001` upward and consumes the
+field if set. A decoder that walks the bits in order cannot get the sequence wrong.
+
+Two of these break the pattern of "a flag selects a fixed-width field", and both are traps:
+
+- **Flags 10–12 are also conditional on the protocol.** `serial_reader_l3.c` wraps them in
+  `if (TMR_TAG_PROTOCOL_GEN2 == read->tag.protocol)`, so the flag being set is *not* sufficient
+  to consume the byte. The protocol comes from field 7, earlier in the same record — which is
+  why field 7 has to be retained rather than skipped over.
+- **Tag type is variable-length.** Every other field can be skipped by advancing a known number
+  of bytes; this one cannot be skipped without decoding it.
 
 The EPC length is also a **bit** count, and for Gen2 the EPC is followed by a two-byte PC word
 and then a CRC — with a third PC byte when `pc[0] & 0x02` is set.
+
+### Metadata flags — `tmr_tag_data.h`, `enum TMR_TRD_MetadataFlag`
+
+The flags word above, in full. **This is what
+[finding 9](#9-the-command-set-is-spread-across-three-files-and-one-was-archived) recorded as
+the missing piece**, and the reason `TagReportDecoder` shipped as a trait with no
+implementation.
+
+| Value | Name |
+|---|---|
+| `0x0000` | `NONE` |
+| `0x0001` | `READCOUNT` |
+| `0x0002` | `RSSI` |
+| `0x0004` | `ANTENNAID` |
+| `0x0008` | `FREQUENCY` |
+| `0x0010` | `TIMESTAMP` |
+| `0x0020` | `PHASE` |
+| `0x0040` | `PROTOCOL` |
+| `0x0080` | `DATA` |
+| `0x0100` | `GPIO_STATUS` |
+| `0x0200` | `GEN2_Q` |
+| `0x0400` | `GEN2_LF` |
+| `0x0800` | `GEN2_TARGET` |
+| `0x1000` | `BRAND_IDENTIFIER` |
+| `0x2000` | `TAGTYPE` |
+
+`ALL` is not a fixed constant: the 2023 header composes it from `#ifdef TMR_ENABLE_UHF` and
+`#ifdef TMR_ENABLE_HF_LF`, so its value depends on how the SDK was compiled. **Nothing in this
+repository should use `ALL`** — the flags word arrives on the wire and is read from there.
+
+### Status reports — `tmr_serial_reader.h` and `serial_reader.c`
+
+The other half of what finding 9 could not supply, and the half
+[Q14](../open-questions.md#q14-reader-silence-threshold) turns on.
+
+`enum TMR_SR_StatusType` — the *content* of a status report, requested in the `0x22` command
+body when `STATUS_REPORT_STREAMING` is set:
+
+| Value | Name |
+|---|---|
+| `0x0000` | `NONE` |
+| `0x0002` | `FREQUENCY` |
+| `0x0004` | `TEMPERATURE` |
+| `0x0008` | `ANTENNA` |
+| `0x000E` | `ALL` (the three above) |
+
+`0x0001` is **not assigned**, in both the 2009 and 2023 copies. Nothing explains the hole and
+nothing here depends on it; it is recorded so the next reader does not assume a typo.
+
+**How a status frame is told apart from a tag frame** — `serial_reader.c`,
+`TMR_SR_hasMoreTags`. A streaming response carries a **response-type byte**, and the SDK
+switches on it:
+
+| Value | Meaning |
+|---|---|
+| `0x00` | The stream **ends** with this message |
+| `0x01` | A tag read; the stream continues |
+| `0x02` | A **status** stream response |
+
+Its position is not fixed:
+
+```c
+response_type_pos = (0x10 == (msg[5 + idx] & 0x10)) ? (10 + idx) : (8 + idx);
+```
+
+…where `idx` is 1 when multi-select or read-after-write is enabled and 0 otherwise. Neither is a
+`TMR_SR_SearchFlag`, and `crates/splitforge-thingmagic/src/command.rs` offers no way to request
+either — so on the commands this project can currently build, `idx` is 0. The expression is
+recorded whole regardless, because a decoder that hard-codes offset 8 is one that silently
+misreads every frame the day somebody adds a feature that shifts it.
+
+**This is a decoding hazard, not a nicety.** A status frame parsed as a tag report would produce
+a read with a fabricated EPC — evidence about a chip that was never there, in an append-only
+table. The response-type byte has to be checked *before* the metadata flags word is read.
 
 ## What the read path will depend on, quoted
 
@@ -671,6 +808,27 @@ which came from files that agree with each other, and it **is** a problem for an
 numeric values of `TMR_TRD_METADATA_FLAG_*` and `TMR_SR_STATUS_*`. The tag-report field *order* is
 established, from the parser itself; which bit selects which field is not.
 
+> **Closed, 2026-09-08 — and the premise above was wrong twice.**
+>
+> Both symbol sets are now recorded under
+> [Metadata flags](#metadata-flags--tmr_tag_datah-enum-tmr_trd_metadataflag) and
+> [Status reports](#status-reports--tmr_serial_readerh-and-serial_readerc). Two corrections
+> come with them, and both are worth keeping because the mistake was in the *diagnosis* rather
+> than in the effort:
+>
+> - **Neither symbol was ever in `tm_reader.h`.** `TMR_TRD_METADATA_FLAG_*` is in
+>   `tmr_tag_data.h` and `TMR_SR_STATUS_*` is in `tmr_serial_reader.h`. The note above blamed
+>   the mirror's 2009 vintage for an absence that was really a wrong filename — the age of the
+>   copy was a true fact standing next to a false inference.
+> - **`TMR_SR_STATUS_*` was in the mirror this file already cites, the whole time.**
+>   `ppelleti/mercuryapi-corrections/tmr_serial_reader.h` carries it, with values identical to
+>   the 2023 SDK's. It was never missing; it was never looked for in the right file.
+>
+> The lesson is narrow and worth stating: *"the symbol is not in the file I expected"* was
+> recorded as *"the symbol is not in this distribution"*, and the second is a much stronger
+> claim than what had been checked. A grep across the tree would have closed this in a minute;
+> a grep of one file closed nothing and read like a conclusion.
+
 ### 10. The antenna byte is a packed tx/rx nibble pair, not an antenna number
 
 § 8.8.3 says *"the Antenna ID entry will contain the logical antenna port of the tag read"*, and
@@ -757,6 +915,52 @@ So ADR-0025's accepted cost is **stated too absolutely** and is corrected in pla
 Proposed, not Accepted, so the ADR process permits it. The honest form is that no liveness signal
 is *known* to be available, and there is a named candidate whose periodicity nobody has
 established.
+
+> **Updated 2026-09-08, and Q14 is still open.** The `TMR_SR_STATUS_*` content flags this
+> section said were unavailable are now recorded, and a status frame turns out to be
+> unambiguously identifiable on the wire — response-type byte `0x02`, checked before the
+> metadata flags are read. So the *mechanics* are settled: SplitForge could ask for status
+> reports, and would know one when it saw one.
+>
+> **What the SDK still cannot say is the only thing Q14 needs.** Nothing in these sources
+> states an interval, and nothing states whether a status frame arrives when no tags are in the
+> field. The SDK sets a flag and the module's firmware decides the cadence; there is no period
+> parameter to read. So the candidate keepalive is now a *reachable* candidate rather than an
+> unreachable one, and it is still not known to be a keepalive.
+>
+> Two routes remain, and both need the module: enable `STATUS_REPORT_STREAMING` against a bench
+> module with an empty field and time the frames, or read the firmware's own documentation if a
+> copy that covers it ever surfaces. **This is now hardware-gated rather than document-gated**,
+> which is a change in *which* queue the question is in and not an answer to it.
+>
+> One consequence is worth stating now rather than discovering later: **a status frame is not a
+> read**, so it must not reach the journal — but it *is* evidence the transport is alive, which
+> is exactly what the silence watchdog is guessing at. Wiring it to `last_message` without
+> writing a row would let a quiet checkpoint be distinguished from a dead module. That is a
+> design worth having and it is **not** built, because building it against an unmeasured cadence
+> would bake in the assumption Q14 exists to test.
+
+### 13. The 2009 field order is a prefix of the modern one
+
+The tag-report layout recorded above came from the 2009 `serial_reader_l3.c`, and ends at GPIO
+status with the EPC after it. The 2023 parser has **five more flagged fields** between those
+two — Gen2 Q, Gen2 link frequency, Gen2 target, brand identifier, and tag type.
+
+That is not a discrepancy; it is a version difference, and it resolves in the reassuring
+direction. The nine fields the two copies share have **identical flag values and identical
+order**, fourteen years apart. The new ones are appended at higher bits, which is how a
+wire format stays compatible.
+
+**It does change what a correct decoder looks like.** Written against the nine-field list, a
+decoder is correct only for a module that never sets a flag above `0x0100` — and it would not
+fail loudly if one did. It would read the brand identifier's two bytes as the start of the EPC
+length and return a plausible, wrong chip id. Which is the failure mode this crate has already
+had once, with the CRC ([finding 8](#8-the-crc-was-not-ccitt-false-and-the-codec-computed-the-wrong-checksum)):
+internally consistent, externally wrong, and fully tested.
+
+The defence is to **decode by walking the flag bits ascending** and to treat an unknown
+high bit as a hard error rather than as an unset field — because at that point the parser has
+lost its place in the stream and everything after it is a guess.
 
 ## Adding a document here
 

@@ -4,9 +4,16 @@
 //!
 //! **Status:** the frame codec, the command set, and the connection lifecycle — this crate
 //! now implements [`ReaderProvider`]. What it cannot yet do is turn a tag report into a read:
-//! [`TagReportDecoder`] is a trait with no implementation here, because the metadata flag
-//! values that say which bit selects which field are in a header this project does not have.
-//! See `docs/roadmap.md`, Milestone 3a.
+//! [`TagReportDecoder`] is a trait with no implementation here.
+//!
+//! **The reason changed on 2026-09-08 and the seam did not.** The metadata flag values are no
+//! longer missing — a 2023 MercuryAPI was archived, and `docs/readers/vendor-documents.md`
+//! now records which bit selects which field, five fields the earlier layout did not have, and
+//! the response-type byte that tells a tag frame from a status frame. What remains is
+//! [ADR-0004](../../../docs/adr/0004-llrp-first-reader-adapter.md)'s rule rather than a gap in
+//! the documentation: this crate has already shipped one parser that was internally consistent,
+//! fully tested, and wrong, because the CRC was taken from a document nobody could check
+//! against a capture. See `docs/roadmap.md`, Milestone 3a.
 //!
 //! ## Boundaries
 //!
