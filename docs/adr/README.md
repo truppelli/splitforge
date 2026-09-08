@@ -33,7 +33,8 @@ this?" two years from now, the ADR is the answer.
 | [0023](0023-manual-entries-are-derivation-inputs.md) | A manual entry is an input to derivation, not an override of its output | Accepted |
 | [0024](0024-serial-reader-adapter-before-llrp.md) | A serial module is the first physical adapter; LLRP stays the first networked one | Accepted |
 | [0025](0025-m3a-proves-durability-above-the-transport.md) | M3a proves durability above the transport; the adapter streams rather than polls | Accepted |
-| [0026](0026-a-reader-gap-is-two-rows.md) | A reader gap is two append-only rows, paired by sequence number | Proposed |
+| [0026](0026-a-reader-gap-is-two-rows.md) | A reader gap is two append-only rows, paired by sequence number | Accepted |
+| [0027](0027-a-reader-reports-connection-events-on-the-read-channel.md) | A reader reports connection events on the same channel as its reads | Accepted |
 
 ## Process
 
