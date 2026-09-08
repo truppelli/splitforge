@@ -1,6 +1,6 @@
 # ADR-0026: A reader gap is two append-only rows, paired by sequence number
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-01
 - **Deciders:** —
 
