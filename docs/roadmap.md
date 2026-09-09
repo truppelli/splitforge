@@ -273,7 +273,19 @@ pair of facts rather than a contradiction.
       wrong chip id; and a status frame must be rejected *before* the flags word is read, or it
       becomes a fabricated read in an append-only table. **What this does not retire is
       [ADR-0004](adr/0004-llrp-first-reader-adapter.md)** — the CRC was documented too, and was
-      wrong. A decoder is written now; it is *believed* when a capture agrees with it
+      wrong. A decoder is written now; it is *believed* when a capture agrees with it.
+      **Written, and a capture does agree with it.** `StreamDecoder` walks the flag bits
+      ascending and is anchored on `CAPTURED_FRAME`, the same real `0x22` response that caught
+      the CRC: it decodes to read count 1, RSSI −60 dBm, antenna tx 1 / rx 1, 923.200 MHz,
+      295 ms, Gen2, GPIO `0x0F`, and a 96-bit EPC — **consuming to the payload's last byte
+      exactly**, which is the assertion that fails first if any width or order is wrong, and
+      which is now checked on every frame rather than only in a test. Everything that frame
+      does not demonstrate is refused: a flag above `0x0100`, a layout whose option byte does
+      not set `0x10`, a record leaving bytes over. Each is a counted decode fault, so a wrong
+      assumption surfaces as no reads and a climbing error count rather than as a plausible,
+      wrong chip id in an append-only table. **Still unticked**: one M6e frame is not a stream
+      from an M7e-Pico, and *"believed when a capture agrees"* is a weaker claim than the one
+      this box is for
 - [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
       ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps)). `SessionAnchor` captures

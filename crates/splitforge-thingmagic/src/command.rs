@@ -18,18 +18,18 @@
 //! `docs/readers/vendor-documents.md` records both files with their SHA-256 hashes, and the
 //! whole table is reproduced there in prose. What is here is the half a compiler can check.
 //!
-//! # What is deliberately not here
+//! # Where the metadata flags went
 //!
-//! **The tag-report metadata flag values.** The report's field *order* is established — read
-//! count, RSSI, antenna, frequency, timestamp, phase, protocol, data, GPIO, then the EPC — and
-//! it is written down in `vendor-documents.md`. Which *bit* selects which field is **not**:
-//! `TMR_TRD_METADATA_FLAG_*` lives in a header the archived mirror does not carry a current
-//! copy of.
+//! **They used to be listed here as deliberately missing, and they are now in
+//! [`crate::tag_report::flag`].** The note that stood here said `TMR_TRD_METADATA_FLAG_*`
+//! lived in a header the archived mirror had no current copy of; that was wrong twice over —
+//! the values were never in `tm_reader.h` in any vintage, and a 2023 SDK has since been
+//! located and archived. They sit beside the parser that walks them rather than here, because
+//! a flag value and the field it selects are one fact.
 //!
-//! Guessing them would produce a parser that is internally consistent and externally wrong,
-//! which is precisely the failure this crate has already shipped once — see [`crate::crc`].
-//! They are absent rather than approximated, and the read path cannot be finished without
-//! them.
+//! What has not changed is why guessing them was refused: a parser that is internally
+//! consistent and externally wrong is the failure this crate has already shipped once — see
+//! [`crate::crc`].
 
 /// A command opcode.
 ///

@@ -27,10 +27,10 @@
 //! same loop, which is the claim the port exists to make — composing a module changes which
 //! value is boxed and nothing else.
 //!
-//! **`--serial` records no reads yet**, because `splitforge-thingmagic` has no tag-report
-//! decoder and is composed with one that deliberately decodes nothing. What it does record is
-//! every connection edge the transport reports, as a confirmed gap — the half of Milestone
-//! 3a's exit criterion that needs a real cable and no parser.
+//! **`--serial` decodes reads with a parser anchored on one captured frame** and refuses to
+//! guess at layouts it has not seen, so a wrong assumption shows up as no reads and a climbing
+//! fault count rather than as evidence about a chip that was never there. Connection edges
+//! become confirmed gaps whatever the reports look like — that half needs no decoder.
 //!
 //! What it adds over `splitforge status` is **liveness**. A one-shot command answers from
 //! the database and cannot tell you whether the service is running; `Restart=always`
@@ -68,7 +68,7 @@ use splitforge_domain::{
 };
 use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
-use splitforge_thingmagic::{SerialSettings, ThingMagicReader, UndecodedReports};
+use splitforge_thingmagic::{SerialSettings, StreamDecoder, ThingMagicReader};
 use splitforge_timesource::ClockReading;
 use tokio::sync::mpsc::Receiver;
 
@@ -116,10 +116,10 @@ struct Args {
 
     /// Read from a ThingMagic serial module on this device path.
     ///
-    /// **It will record no reads.** The adapter has no tag-report decoder yet, so frames
-    /// arrive and none of them become evidence — what this composes is the *connection*
-    /// half of Milestone 3a: a port that opens, a cable pulled out, a reconnection, and
-    /// every one of those recorded as a bounded gap. Use `reader gaps` to see them.
+    /// Reads are decoded by a parser anchored on one captured frame from real hardware, and
+    /// **it refuses to guess**: a report whose layout it has not seen becomes a counted
+    /// decode fault rather than a wrong chip identifier. Connection edges are recorded as
+    /// bounded gaps whatever the reports look like — that half needs no decoder.
     ///
     /// **The installed unit cannot use this.** `deploy/splitforge-edge.service` passes no
     /// arguments and sets `PrivateDevices=yes`, which gives the service a private `/dev`
@@ -1048,11 +1048,17 @@ fn compose_simulated_reader(
 /// for the port: composing a module changes which value is boxed and nothing else. The loop it
 /// hands the reader to is the one the simulator has been exercising since Milestone 1.
 ///
-/// **It composes a decoder that decodes nothing**, deliberately. `UndecodedReports` produces
-/// no reads, so this records no evidence — what it *does* record is every connection edge the
-/// transport reports, as a confirmed gap. That is the half of Milestone 3a's exit criterion
-/// that needs a real cable and no parser, and it is worth having before the parser exists
-/// rather than after.
+/// **It composes [`StreamDecoder`]**, which turns a `0x22` streaming response into a read and
+/// refuses to guess at anything a captured frame does not anchor. A layout it cannot walk
+/// becomes a counted decode fault rather than a plausible, wrong chip identifier — so the
+/// failure mode of a wrong assumption here is no reads and a climbing error count, not
+/// evidence about a chip that was never there.
+///
+/// Two halves of Milestone 3a run through this function and they fail independently. The
+/// **connection** half — a port that opens, a cable pulled out, a reconnection, each recorded
+/// as a bounded gap — needs no decoder at all and works whatever the reports turn out to look
+/// like. The **read** half is the decoder's, and is the one a real module could still
+/// disagree with.
 fn compose_serial_reader(
     device: &Arc<Device>,
     path: &str,
@@ -1131,7 +1137,7 @@ fn compose_serial_reader(
     let provider: Box<dyn ReaderProvider> = Box::new(ThingMagicReader::new(
         reader_id.clone(),
         splitforge_thingmagic::serial(settings),
-        UndecodedReports::new(),
+        StreamDecoder::new(reader_id.clone()),
     ));
     let receiver = provider.start();
 
