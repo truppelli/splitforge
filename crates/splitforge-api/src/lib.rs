@@ -136,6 +136,13 @@ pub enum ReaderKind {
     /// A simulated reader. Its reads are synthetic and they enter the journal as evidence
     /// like any other, which is why this is reported rather than hidden.
     Simulated,
+    /// A serial module, reached over a UART.
+    ///
+    /// **Reported separately from [`Self::Simulated`] because the failure modes differ, not
+    /// because the read path does.** A simulated reader cannot lose a cable and a serial one
+    /// cannot run out of script, so an operator reading `/health` needs to know which set of
+    /// explanations applies to a reader that has stopped producing.
+    Serial,
 }
 
 /// Whether a configured reader is producing reads.

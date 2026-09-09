@@ -25,6 +25,11 @@ splitforge-domain.workspace = true
 # ThingMagic adapter arrives as a different value passed to the same loop.
 splitforge-reader.workspace = true
 splitforge-storage.workspace = true
+# The serial adapter, composed by `--serial`. **This is the only crate in the workspace
+# allowed to name a protocol adapter** — `dependency_rules.rs` has a test saying so, and it
+# is what keeps the engine unable to tell one reader protocol from another (ADR-0001,
+# ADR-0024). `splitforge-llrp` will arrive here the same way at Milestone 3b.
+splitforge-thingmagic.workspace = true
 # The service needs a `DeviceClockState` for every read it writes, which is permanent
 # evidence — so it asks the time daemon rather than assuming. Sampled on an interval off the
 # reactor, because `chronyc` blocks while it retries a daemon that is not answering.

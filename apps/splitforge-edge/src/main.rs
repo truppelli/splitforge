@@ -17,11 +17,20 @@
 //! [`ReaderProvider`] and makes them durable, and serves
 //! [`splitforge-api`](splitforge_api) on a Unix socket (ADR-0021).
 //!
-//! **The only provider it can compose is a simulated one**, because there is no adapter for
-//! a physical reader yet — Milestone 3a is gated on buying the module. That is a real read
-//! path with synthetic reads on the front of it, not a placeholder: the loop, the ordering,
-//! the failure behavior, and the health reporting are the ones a module will arrive into,
-//! and the port is what keeps `--simulate` from being a second code path.
+//! **It composes one of two providers, or none.** `--simulate` runs a scenario through the
+//! read path; `--serial` opens a ThingMagic module on a device path; omitting both serves
+//! health and reads nothing, which is what a device waiting for hardware should do. The two
+//! flags conflict at the argument parser, so the service never arbitrates between a real
+//! module and a scripted one.
+//!
+//! Neither is a second code path. Both arrive as a `Box<dyn ReaderProvider>` handed to the
+//! same loop, which is the claim the port exists to make — composing a module changes which
+//! value is boxed and nothing else.
+//!
+//! **`--serial` records no reads yet**, because `splitforge-thingmagic` has no tag-report
+//! decoder and is composed with one that deliberately decodes nothing. What it does record is
+//! every connection edge the transport reports, as a confirmed gap — the half of Milestone
+//! 3a's exit criterion that needs a real cable and no parser.
 //!
 //! What it adds over `splitforge status` is **liveness**. A one-shot command answers from
 //! the database and cannot tell you whether the service is running; `Restart=always`
@@ -59,6 +68,7 @@ use splitforge_domain::{
 };
 use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
+use splitforge_thingmagic::{SerialSettings, ThingMagicReader, UndecodedReports};
 use splitforge_timesource::ClockReading;
 use tokio::sync::mpsc::Receiver;
 
@@ -103,6 +113,31 @@ struct Args {
     /// real back-pressure on the write path. A multiplier is for watching it happen.
     #[arg(long, value_name = "SPEED", default_value = "immediate")]
     simulate_speed: Speed,
+
+    /// Read from a ThingMagic serial module on this device path.
+    ///
+    /// **It will record no reads.** The adapter has no tag-report decoder yet, so frames
+    /// arrive and none of them become evidence — what this composes is the *connection*
+    /// half of Milestone 3a: a port that opens, a cable pulled out, a reconnection, and
+    /// every one of those recorded as a bounded gap. Use `reader gaps` to see them.
+    ///
+    /// **The installed unit cannot use this.** `deploy/splitforge-edge.service` passes no
+    /// arguments and sets `PrivateDevices=yes`, which gives the service a private `/dev`
+    /// with no serial node in it. This is a bench flag until both change deliberately.
+    #[arg(long, value_name = "PATH", conflicts_with = "simulate")]
+    serial: Option<String>,
+
+    /// Bits per second for `--serial`. The module's own default is 115200.
+    #[arg(long, value_name = "BAUD", default_value_t = 115_200)]
+    serial_baud: u32,
+
+    /// Which configured reader `--serial` is reading for.
+    ///
+    /// Optional when the race configures exactly one reader, which is the only topology this
+    /// milestone supports. It names the reader a gap is recorded against, so it has to match
+    /// a reader the database knows.
+    #[arg(long, value_name = "ID")]
+    reader: Option<String>,
 }
 
 /// Everything the health endpoint reads, behind one lock.
@@ -892,14 +927,36 @@ async fn main() -> Result<()> {
     tokio::spawn(watch_the_time_source(Arc::clone(&device)));
     tokio::spawn(watch_for_silence(Arc::clone(&device)));
 
-    if let Some(scenario) = args.simulate.as_deref() {
-        compose_simulated_reader(
-            &device,
-            scenario,
-            args.simulate_seed,
-            args.simulate_speed,
-            &args.database,
-        )?;
+    // At most one reader, and clap enforces the "at most" — `--serial` declares
+    // `conflicts_with = "simulate"`, so the two arms below cannot both be taken and the
+    // service never has to arbitrate between a real module and a scripted one.
+    //
+    // Composing none is the third case and it is not a fault: it is what a device waiting
+    // for hardware should do, and it is what every deployment does today, because the unit
+    // passes no arguments.
+    match (args.serial.as_deref(), args.simulate.as_deref()) {
+        (Some(path), _) => {
+            compose_serial_reader(
+                &device,
+                path,
+                args.serial_baud,
+                args.reader.as_deref(),
+                &args.database,
+            )?;
+        }
+        (None, Some(scenario)) => {
+            compose_simulated_reader(
+                &device,
+                scenario,
+                args.simulate_seed,
+                args.simulate_speed,
+                &args.database,
+            )?;
+        }
+        (None, None) => eprintln!(
+            "splitforge-edge: no reader composed; serving health only. Pass --serial to \
+             read a module, or --simulate to run a scenario through the read path."
+        ),
     }
 
     serve(&args.socket, device).await
@@ -982,6 +1039,128 @@ fn compose_simulated_reader(
     std::thread::spawn(move || read_into_journal(&device, receiver, ingest));
 
     Ok(())
+}
+
+/// Puts a real serial module on the front of the read path.
+///
+/// The same function as [`compose_simulated_reader`] with a different provider in the middle,
+/// which is the claim [ADR-0004](../../../docs/adr/0004-llrp-first-reader-adapter.md) makes
+/// for the port: composing a module changes which value is boxed and nothing else. The loop it
+/// hands the reader to is the one the simulator has been exercising since Milestone 1.
+///
+/// **It composes a decoder that decodes nothing**, deliberately. `UndecodedReports` produces
+/// no reads, so this records no evidence — what it *does* record is every connection edge the
+/// transport reports, as a confirmed gap. That is the half of Milestone 3a's exit criterion
+/// that needs a real cable and no parser, and it is worth having before the parser exists
+/// rather than after.
+fn compose_serial_reader(
+    device: &Arc<Device>,
+    path: &str,
+    baud: u32,
+    reader: Option<&str>,
+    database: &std::path::Path,
+) -> Result<()> {
+    let store = ConfigStore::open(database)
+        .with_context(|| format!("opening the configuration at {}", database.display()))?;
+    let race = match store.resolve_race(None).context("resolving the race")? {
+        RaceSelection::One(race) => race,
+        RaceSelection::None => anyhow::bail!(
+            "--serial {path} needs a configured race, and this database has none. A gap is \
+             recorded against a reader, and a reader belongs to a race."
+        ),
+        RaceSelection::Ambiguous(races) => anyhow::bail!(
+            "--serial {path} needs exactly one race and this database has {}. The service \
+             takes no race selector; configure one race.",
+            races.len()
+        ),
+    };
+    let config = store
+        .load(race.id)
+        .context("loading the race configuration")?;
+
+    // The reader has to be one the database knows, because its id is what names the gap rows
+    // this composition exists to produce. A gap against a reader nobody configured is a row
+    // an operator cannot act on.
+    let configured = match reader {
+        Some(wanted) => config
+            .readers
+            .iter()
+            .find(|candidate| candidate.id.as_str() == wanted)
+            .with_context(|| {
+                format!(
+                    "race {:?} has no reader {wanted:?}. Configured readers: {}",
+                    config.race.name,
+                    reader_ids(&config)
+                )
+            })?,
+        None => match config.readers.as_slice() {
+            [only] => only,
+            [] => anyhow::bail!(
+                "race {:?} configures no reader. Run `splitforge reader add` before \
+                 starting the service with --serial.",
+                config.race.name
+            ),
+            many => anyhow::bail!(
+                "race {:?} configures {} readers, so --serial cannot tell which one it is \
+                 reading for. Name it with --reader. Configured readers: {}",
+                config.race.name,
+                many.len(),
+                reader_ids(&config)
+            ),
+        },
+    };
+
+    let reader_id = configured.id.clone();
+    let ingest = Ingest {
+        trust: configured.timestamp_trust,
+        ..Ingest::default()
+    };
+
+    let settings = SerialSettings {
+        path: path.to_owned(),
+        baud,
+        ..SerialSettings::default()
+    };
+
+    eprintln!(
+        "splitforge-edge: SERIAL reader {:?} on {path} at {baud} baud — it has no tag-report \
+         decoder, so it will record connection gaps and no reads",
+        reader_id.as_str()
+    );
+
+    let provider: Box<dyn ReaderProvider> = Box::new(ThingMagicReader::new(
+        reader_id.clone(),
+        splitforge_thingmagic::serial(settings),
+        UndecodedReports::new(),
+    ));
+    let receiver = provider.start();
+
+    device.update_reader(|status| {
+        status.kind = ReaderKind::Serial;
+        // Disconnected until the provider says otherwise, which for a serial port is a
+        // materially different claim than it is for a simulator: this one may never open.
+        status.state = Some(ReaderState::Disconnected);
+        status.watching = Some(Watching {
+            reader: reader_id,
+            race: race.id,
+        });
+        status.last_message = Some(Instant::now());
+    });
+
+    let device = Arc::clone(device);
+    std::thread::spawn(move || read_into_journal(&device, receiver, ingest));
+
+    Ok(())
+}
+
+/// The configured readers, for an error message that tells the operator what to type.
+fn reader_ids(config: &splitforge_domain::RaceConfig) -> String {
+    config
+        .readers
+        .iter()
+        .map(|reader| reader.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(unix)]
@@ -1286,6 +1465,137 @@ mod tests {
         assert!(
             open_gap(&device).is_none(),
             "reads resumed, so the gap the watchdog opened must close"
+        );
+    }
+
+    /// A configured database with no service around it, for the argument-checking paths.
+    ///
+    /// `compose_serial_reader` opens its own `ConfigStore`, so these need a path rather than
+    /// a `Device` — and every assertion below is reached *before* any port is opened, which
+    /// is what keeps them from spawning a reconnect loop that outlives the test.
+    fn a_configured_database() -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let database = directory.path().join("event.db");
+        let mut config = ConfigStore::open(&database).expect("open the configuration");
+        splitforge_cli::load_fixture(&mut config, "test", "five-k").expect("load the fixture");
+        (directory, database)
+    }
+
+    /// A `Device` for a database the caller already configured.
+    fn a_device_on(database: &std::path::Path) -> Arc<Device> {
+        let (journal, _recovery) =
+            SqliteJournal::open_recovering(database).expect("open the journal");
+        let config = ConfigStore::open(database).expect("reopen the configuration");
+        Arc::new(Device {
+            database: database.to_path_buf(),
+            started: Instant::now(),
+            stores: Mutex::new(Stores { journal, config }),
+            clock: RwLock::new(None),
+            reader: Mutex::new(ReaderStatus::none()),
+        })
+    }
+
+    #[test]
+    fn naming_a_reader_the_database_does_not_have_lists_the_ones_it_does() {
+        let (_directory, database) = a_configured_database();
+        let device = a_device_on(&database);
+
+        let error = compose_serial_reader(&device, "/dev/null", 115_200, Some("nope"), &database)
+            .expect_err("an unknown reader cannot be composed");
+        let message = format!("{error}");
+
+        assert!(message.contains("nope"), "{message}");
+        // The fixture's reader, so the operator is told what to type rather than only that
+        // they were wrong.
+        assert!(message.contains("mat"), "{message}");
+        // The defect that has shipped four times in this repository: a message written
+        // across two source lines whose trailing backslash was dropped still compiles.
+        assert!(
+            !message.contains("  "),
+            "collapsed line continuation: {message}"
+        );
+    }
+
+    #[test]
+    fn two_readers_and_no_selector_is_an_error_that_says_which_flag_to_pass() {
+        let (_directory, database) = a_configured_database();
+        {
+            let mut config = ConfigStore::open(&database).expect("open the configuration");
+            config
+                .save_reader(&splitforge_domain::Reader {
+                    id: ReaderId::new("second-mat"),
+                    label: "a second reader".to_owned(),
+                    endpoint: None,
+                    timestamp_trust: splitforge_domain::TimestampTrust::default(),
+                })
+                .expect("save a second reader");
+        }
+        let device = a_device_on(&database);
+
+        let error = compose_serial_reader(&device, "/dev/null", 115_200, None, &database)
+            .expect_err("two readers and no --reader cannot be resolved");
+        let message = format!("{error}");
+
+        // A gap is recorded *against a reader*, so guessing which one would put evidence on
+        // the wrong row rather than merely picking a default.
+        assert!(message.contains("--reader"), "{message}");
+        assert!(
+            !message.contains("  "),
+            "collapsed line continuation: {message}"
+        );
+    }
+
+    #[test]
+    fn the_reader_composed_is_the_one_named_and_it_is_reported_as_serial() {
+        let (_directory, database) = a_configured_database();
+        let device = a_device_on(&database);
+
+        // `/dev/null` opens and returns end-of-stream rather than refusing, so the provider
+        // starts, reports a lifecycle, and reconnects — which is all this asserts. What it
+        // must not do is guess a reader or claim a connection the composition root has not
+        // been told about.
+        compose_serial_reader(&device, "/dev/null", 115_200, Some("mat"), &database)
+            .expect("the fixture's reader composes");
+
+        let status = device.reader.lock().expect("the reader's state");
+        assert_eq!(status.kind, ReaderKind::Serial);
+        assert_eq!(
+            status.state,
+            Some(ReaderState::Disconnected),
+            "a composition root cannot report a connection the provider has not announced"
+        );
+        assert_eq!(
+            status
+                .watching
+                .as_ref()
+                .expect("a reader is watched")
+                .reader
+                .as_str(),
+            "mat"
+        );
+    }
+
+    #[test]
+    fn a_module_and_a_scenario_cannot_be_composed_at_once() {
+        use clap::Parser as _;
+
+        // Enforced by clap rather than by an `if` in `main`, so the service never has to
+        // arbitrate between a real module and a scripted one at runtime.
+        Args::try_parse_from([
+            "splitforge-edge",
+            "--serial",
+            "/dev/splitforge-reader",
+            "--simulate",
+            "five-k",
+        ])
+        .expect_err("--serial and --simulate are mutually exclusive");
+
+        let serial = Args::try_parse_from(["splitforge-edge", "--serial", "/dev/ttyUSB0"])
+            .expect("--serial alone parses");
+        assert_eq!(serial.serial.as_deref(), Some("/dev/ttyUSB0"));
+        assert_eq!(
+            serial.serial_baud, 115_200,
+            "the module's own default, so an operator who omits it gets what the guide says"
         );
     }
 }

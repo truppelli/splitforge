@@ -111,6 +111,68 @@ pub trait TagReportDecoder: Send {
     );
 }
 
+/// A decoder that reads nothing, and counts what it declined to read.
+///
+/// **This is not a parser and it is not a stub for one.** The distinction is the whole reason
+/// it can exist in a crate that refuses to ship a tag-report decoder: a guessed parser emits
+/// reads that look right and are wrong, which is what
+/// [ADR-0004](../../../docs/adr/0004-llrp-first-reader-adapter.md) forbids and what this crate
+/// has already done once with the CRC. An empty decoder emits nothing, so there is no chip
+/// identifier for it to be wrong about.
+///
+/// # What it is for
+///
+/// Everything in Milestone 3a's exit criterion that is about the **transport** rather than
+/// about reads. A port that opens, a cable pulled out, a reconnection, a confirmed gap in the
+/// evidence, health degrading and recovering — none of that needs a single tag to be decoded,
+/// and all of it needs a real module on a real port. Composing a reader with this decoder is
+/// how that half becomes observable the day the hardware arrives, without waiting for the
+/// other half.
+///
+/// # What it costs
+///
+/// A service composed this way records **no reads at all**, and says so: `reads_received`
+/// stays at zero while [`Self::frames`] climbs. That is an honest report of a device that is
+/// receiving frames and understanding none of them, and it must not be mistaken for a working
+/// timer. The silence watchdog will open *suspected* gaps during a running race, correctly —
+/// nothing is being recorded.
+#[derive(Debug, Default)]
+pub struct UndecodedReports {
+    frames: u64,
+}
+
+impl UndecodedReports {
+    /// A decoder that has seen nothing yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { frames: 0 }
+    }
+
+    /// How many frames have arrived and been declined.
+    ///
+    /// The one number that distinguishes *"the module is streaming and nothing here can read
+    /// it"* from *"the module is silent"* — two situations that are otherwise identical from
+    /// outside, because both produce no reads.
+    #[must_use]
+    pub const fn frames(&self) -> u64 {
+        self.frames
+    }
+}
+
+impl TagReportDecoder for UndecodedReports {
+    fn decode(
+        &mut self,
+        _response: &Response<'_>,
+        _anchor: &SessionAnchor,
+        _out: &mut Vec<ReaderMessage>,
+    ) {
+        // Deliberately does not touch `out`. Every other line in this file exists so that a
+        // read which arrives is preserved; this one exists so that a read which cannot be
+        // understood is not invented.
+        self.frames = self.frames.saturating_add(1);
+    }
+}
+
 /// Bounded, jittered reconnect delays.
 ///
 /// Bounded because a reader that has been unplugged for an hour should still be picked up
@@ -344,7 +406,7 @@ where
 mod tests {
     use super::*;
     use crate::crc::crc16;
-    use crate::frame::{RESPONSE_HEADER_LEN, SOH};
+    use crate::frame::{Decoded, RESPONSE_HEADER_LEN, SOH};
     use splitforge_domain::ChipId;
     use splitforge_reader::ReaderTimestamp;
     use std::io;
@@ -657,6 +719,70 @@ mod tests {
         let settled = opens.load(Ordering::SeqCst);
         thread::sleep(Duration::from_millis(60));
         assert_eq!(opens.load(Ordering::SeqCst), settled);
+    }
+
+    #[test]
+    fn the_empty_decoder_never_invents_a_read() {
+        // The whole of its contract. A guessed parser would put a plausible, wrong chip id
+        // into an append-only table; this one cannot, because it never writes to `out` —
+        // and that is the difference that lets it exist in a crate refusing to ship a
+        // decoder at all (ADR-0004).
+        let mut decoder = UndecodedReports::new();
+        let anchor = SessionAnchor::now();
+        let mut out = Vec::new();
+
+        for byte in 0..8_u8 {
+            let frame = response(0x22, &[byte, 0xAB, 0xCD]);
+            let Decoded::Frame { response, .. } = crate::frame::decode(&frame).expect("a frame")
+            else {
+                panic!("the fixture builds a whole frame");
+            };
+            decoder.decode(&response, &anchor, &mut out);
+        }
+
+        assert!(
+            out.is_empty(),
+            "an empty decoder that produced a read would be a fabricated one: {out:?}"
+        );
+        assert_eq!(
+            decoder.frames(),
+            8,
+            "the count is what separates 'streaming and undecodable' from 'silent'"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reader_with_the_empty_decoder_still_reports_its_lifecycle() {
+        // The reason to compose one before a decoder exists. No read can arrive, and the
+        // connection edges — which are what a confirmed gap is made of — arrive anyway.
+        let script = vec![response(0x22, &[0x01, 0x02])];
+        let factory = move || -> io::Result<Port> {
+            Ok(Box::new(ScriptedPort {
+                chunks: script.clone(),
+                index: 0,
+            }) as Port)
+        };
+
+        let mut receiver: mpsc::Receiver<ReaderEvent> = Box::new(
+            ThingMagicReader::new(ReaderId::new("mat"), factory, UndecodedReports::new())
+                .with_backoff(Backoff {
+                    first: Duration::from_millis(1),
+                    max: Duration::from_millis(5),
+                })
+                .with_capacity(16),
+        )
+        .start();
+
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Connected));
+        // The frame the scripted port delivered produced no `Read`, so the next event is
+        // the port ending — which is exactly the evidence M3a's third clause asks for.
+        assert_eq!(
+            receiver.recv().await,
+            Some(ReaderEvent::Disconnected {
+                cause: Disconnection::Ended
+            }),
+            "a decoder that reads nothing must not swallow the connection lifecycle too"
+        );
     }
 
     #[test]
