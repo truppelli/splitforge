@@ -313,6 +313,18 @@ pair of facts rather than a contradiction.
       **This bullet was filed under *needs the module* and did not belong there.** The loop is
       written against `ReaderProvider`, so the module changes which provider is composed and
       nothing else; what needs hardware is the serial adapter, which is the bullet above it
+- [ ] **Compose the module.** `splitforge-edge --serial /dev/…` builds a `ThingMagicReader`
+      and hands it to the same loop `--simulate` uses; the two flags conflict at the argument
+      parser, so nothing arbitrates between a real module and a scripted one at runtime. This
+      is the first time the composition root has named a protocol adapter, which is the
+      dependency rule `dependency_rules.rs` reserves for it alone.
+      **It records no reads**, and is worth having anyway: it is composed with
+      `UndecodedReports`, a decoder that counts frames and produces nothing, so what runs is
+      the *connection* half of this milestone — a port that opens, a cable pulled out, a
+      reconnection, each recorded as a confirmed gap. That half needs a real cable and no
+      parser, and waiting for the decoder would have left it untested on hardware for no
+      reason. **Unticked, and this one cannot be ticked from a desk at all**: the flag exists
+      to be pointed at a device node, and `/dev/null` in a test is not one
 
 **Needs the module:**
 

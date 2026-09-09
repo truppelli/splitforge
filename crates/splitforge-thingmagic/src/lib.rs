@@ -86,5 +86,5 @@ pub use frame::{
     encode_command, resynchronize,
 };
 pub use port::{Port, PortFactory, SerialSettings, serial};
-pub use provider::{Backoff, SessionAnchor, TagReportDecoder, ThingMagicReader};
+pub use provider::{Backoff, SessionAnchor, TagReportDecoder, ThingMagicReader, UndecodedReports};
 pub use reassembly::{Reassembler, Stats};
