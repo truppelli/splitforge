@@ -2,18 +2,21 @@
 //!
 //! ThingMagic serial reader adapter: frame parsing, connection lifecycle, and reconnect.
 //!
-//! **Status:** the frame codec, the command set, and the connection lifecycle — this crate
-//! now implements [`ReaderProvider`]. What it cannot yet do is turn a tag report into a read:
-//! [`TagReportDecoder`] is a trait with no implementation here.
+//! **Status:** the frame codec, the command set, the connection lifecycle, and — since
+//! 2026-09-08 — a tag-report decoder. This crate implements [`ReaderProvider`] and produces
+//! reads. What it has never done is run against the module it is written for.
 //!
-//! **The reason changed on 2026-09-08 and the seam did not.** The metadata flag values are no
-//! longer missing — a 2023 MercuryAPI was archived, and `docs/readers/vendor-documents.md`
-//! now records which bit selects which field, five fields the earlier layout did not have, and
-//! the response-type byte that tells a tag frame from a status frame. What remains is
-//! [ADR-0004](../../../docs/adr/0004-llrp-first-reader-adapter.md)'s rule rather than a gap in
-//! the documentation: this crate has already shipped one parser that was internally consistent,
-//! fully tested, and wrong, because the CRC was taken from a document nobody could check
-//! against a capture. See `docs/roadmap.md`, Milestone 3a.
+//! **The seam is filled, and [ADR-0004](../../../docs/adr/0004-llrp-first-reader-adapter.md)
+//! is why it took a capture to fill it.** [`TagReportDecoder`] had no implementation for as
+//! long as the metadata flag values were missing, and then for a while after they were found,
+//! because a byte layout taken from a document and never checked against hardware output is
+//! how this crate shipped a CRC that was internally consistent, fully tested, and wrong.
+//!
+//! [`StreamDecoder`] is anchored on [`crc::CAPTURED_FRAME`] — the same real `0x22` response
+//! that caught the CRC — and **refuses everything that frame does not demonstrate**. A flag
+//! above `0x0100`, an unseen layout, a record that does not end exactly where the payload
+//! does: each is a counted fault rather than a plausible, wrong chip identifier. See
+//! `docs/roadmap.md`, Milestone 3a.
 //!
 //! ## Boundaries
 //!
@@ -77,6 +80,7 @@ pub mod frame;
 pub mod port;
 pub mod provider;
 pub mod reassembly;
+pub mod tag_report;
 
 pub use command::{OpCode, antenna_ports, search_flag};
 pub use crc::crc16;
@@ -88,3 +92,4 @@ pub use frame::{
 pub use port::{Port, PortFactory, SerialSettings, serial};
 pub use provider::{Backoff, SessionAnchor, TagReportDecoder, ThingMagicReader, UndecodedReports};
 pub use reassembly::{Reassembler, Stats};
+pub use tag_report::{ReportError, StreamDecoder};
