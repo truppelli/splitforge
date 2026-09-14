@@ -241,7 +241,8 @@ Deliberately minimal (see [roadmap](roadmap.md) Milestone 4):
 
 - One start checkpoint, one finish checkpoint
 - Gun time and chip time
-- First valid finish per participant
+- First valid finish per participant: the first finish crossing at or after the gun. A crossing
+  before the gun is set aside, not deleted ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md))
 - Statuses: `Finished`, `DNS`, `DNF`, `DQ`
 - Overall placement by the configured timing policy
 
@@ -259,7 +260,10 @@ policy is a flagged condition with a defined fallback, not a null.
 accepted — a mode that parsed and then scored like `gun` would be a wrong answer wearing a
 right one's name — and they arrive with the milestone that supports waves. The defined
 fallback for a chip-timed participant with no start read is the gun, and the entry carries a
-`no_start_read_under_chip_time` flag saying so. Set with
+`no_start_read_under_chip_time` flag saying so. A chip time is measured from the first
+start crossing at or after the gun. A runner detected at the start only before the gun
+starts at the gun, and the entry is flagged `start_read_before_gun`
+([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)). Set with
 `splitforge policy set --start-mode`, and see
 [ADR-0017](adr/0017-placement-semantics.md) for what that flag and the other three mean for
 placement.

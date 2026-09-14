@@ -111,22 +111,21 @@ pub fn score(input: &ScoringInput<'_>) -> Result<Vec<ResultEntry>, ScoringError>
         return Err(ScoringError::ChipTimeWithoutStartCheckpoint);
     }
 
-    // Earliest crossing per (participant, checkpoint). "First valid finish per participant"
-    // is the rule for the finish line; the same rule at the start line is what a chip time
-    // is measured from.
-    let mut earliest: BTreeMap<(ParticipantId, CheckpointId), &TimingEvent> = BTreeMap::new();
+    // The first crossing at or after the gun, per (participant, checkpoint). "First valid
+    // finish per participant" is the rule for the finish line; the same rule at the start
+    // line is what a chip time is measured from. A crossing before the gun is not part of
+    // the race and is set aside, not discarded (ADR-0028).
+    let mut crossings: BTreeMap<(ParticipantId, CheckpointId), Crossings<'_>> = BTreeMap::new();
     for event in input.timing_events {
-        earliest
+        crossings
             .entry((event.participant, event.checkpoint))
-            .and_modify(|held| {
-                if (event.at, event.id) < (held.at, held.id) {
-                    *held = event;
-                }
-            })
-            .or_insert(event);
+            .or_default()
+            .add(event, input.policy.gun_time);
     }
 
-    // Any crossing anywhere proves they started, even if the start mat missed them.
+    // Any crossing anywhere proves they started, even if the start mat missed them. That
+    // includes a crossing before the gun: ADR-0028 changes which crossings count as a start
+    // or a finish, not what makes a runner a DNF rather than a DNS.
     let mut seen_anywhere: BTreeMap<ParticipantId, ()> = BTreeMap::new();
     for event in input.timing_events {
         seen_anywhere.insert(event.participant, ());
@@ -138,12 +137,17 @@ pub fn score(input: &ScoringInput<'_>) -> Result<Vec<ResultEntry>, ScoringError>
         .participants
         .iter()
         .map(|participant| {
-            let start_event = start.and_then(|id| earliest.get(&(participant.id, id)).copied());
-            let finish_event = earliest.get(&(participant.id, finish)).copied();
+            let at_start = start
+                .and_then(|id| crossings.get(&(participant.id, id)).copied())
+                .unwrap_or_default();
+            let at_finish = crossings
+                .get(&(participant.id, finish))
+                .copied()
+                .unwrap_or_default();
             build_entry(
                 participant,
-                start_event,
-                finish_event,
+                at_start,
+                at_finish,
                 seen_anywhere.contains_key(&participant.id),
                 declared.get(&participant.id).copied(),
                 input.policy,
@@ -154,6 +158,33 @@ pub fn score(input: &ScoringInput<'_>) -> Result<Vec<ResultEntry>, ScoringError>
     assign_places(&mut entries);
     sort_for_publication(&mut entries);
     Ok(entries)
+}
+
+/// One participant's crossings of one checkpoint, sorted by whether they count (ADR-0028).
+#[derive(Debug, Default, Clone, Copy)]
+struct Crossings<'a> {
+    /// The earliest crossing at or after the gun. With no gun known, nothing bounds the
+    /// race, so this is simply the earliest crossing.
+    counted: Option<&'a TimingEvent>,
+    /// The latest crossing before the gun — the one closest to it. Set aside, but kept,
+    /// because it can still be the only evidence a runner started.
+    before_gun: Option<&'a TimingEvent>,
+}
+
+impl<'a> Crossings<'a> {
+    fn add(&mut self, event: &'a TimingEvent, gun: Option<OffsetDateTime>) {
+        let order = |event: &TimingEvent| (event.at, event.id);
+        if gun.is_some_and(|gun| event.at < gun) {
+            if self
+                .before_gun
+                .is_none_or(|held| order(event) > order(held))
+            {
+                self.before_gun = Some(event);
+            }
+        } else if self.counted.is_none_or(|held| order(event) < order(held)) {
+            self.counted = Some(event);
+        }
+    }
 }
 
 /// Finds the one checkpoint of a kind, or reports that there are several.
@@ -209,15 +240,31 @@ fn latest_declarations(
 /// Builds one participant's line, before placement.
 fn build_entry(
     participant: &Participant,
-    start_event: Option<&TimingEvent>,
-    finish_event: Option<&TimingEvent>,
+    at_start: Crossings<'_>,
+    at_finish: Crossings<'_>,
     seen_anywhere: bool,
     declaration: Option<&StatusDeclaration>,
     policy: &ScoringPolicy,
 ) -> ResultEntry {
     let mut flags = Vec::new();
 
-    let start_at = start_event.map(|event| event.at);
+    // A start detected only before the gun is a runner who was on or behind the line when it
+    // went off: they started at the gun. The detection is still the evidence the entry rests
+    // on, and the flag says the start came from the gun rather than from the mat.
+    let (start_at, start_event) = match (at_start.counted, at_start.before_gun, policy.gun_time) {
+        (Some(event), _, _) => (Some(event.at), Some(event)),
+        (None, Some(event), Some(gun)) => {
+            flags.push(ResultFlag::StartReadBeforeGun);
+            (Some(gun), Some(event))
+        }
+        _ => (None, None),
+    };
+
+    // A finish detected only before the gun is a warm-up, not a finish.
+    let finish_event = at_finish.counted;
+    if finish_event.is_none() && at_finish.before_gun.is_some() {
+        flags.push(ResultFlag::FinishReadBeforeGun);
+    }
     let finish_at = finish_event.map(|event| event.at);
 
     let gun_time_ms = policy
@@ -593,6 +640,161 @@ mod tests {
         );
         assert_eq!(entries[0].flags, vec![ResultFlag::NoStartReadUnderChipTime]);
         assert_eq!(entries[0].place, Some(1));
+    }
+
+    // ADR-0028. Four of these failed while scoring took the earliest crossing of each mat with
+    // no regard for the gun: both warm-ups, the runner on the start mat at the gun, and the
+    // finish read only before it. The other three pin behavior that was already right and has
+    // to stay right: a later pass over the start mat, a crossing at the gun's instant, and a
+    // race with no gun.
+
+    #[test]
+    fn a_warm_up_over_the_start_mat_does_not_lengthen_a_chip_time() {
+        let course = course();
+        let runner = runner(&course, "101");
+        // Walked over the start mat 15 min early, started 5 s after the gun, finished at 20:00.
+        let events = vec![
+            crossing(&runner, &course.start, -900),
+            crossing(&runner, &course.start, 5),
+            crossing(&runner, &course.finish, 1_200),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &chip_policy());
+
+        assert_eq!(entries[0].start_at, Some(at(5)));
+        assert_eq!(
+            entries[0].chip_time_ms,
+            Some(1_195_000),
+            "not 35:00 — the warm-up is not the start"
+        );
+        assert_eq!(entries[0].place, Some(1));
+        assert!(
+            entries[0].flags.is_empty(),
+            "a warm-up is ordinary: {:?}",
+            entries[0].flags
+        );
+    }
+
+    #[test]
+    fn a_warm_up_through_the_finish_does_not_hide_the_real_finish() {
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![
+            crossing(&runner, &course.finish, -600),
+            crossing(&runner, &course.finish, 1_200),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(entries[0].status, ResultStatus::Finished);
+        assert_eq!(entries[0].finish_at, Some(at(1_200)));
+        assert_eq!(entries[0].gun_time_ms, Some(1_200_000));
+        assert_eq!(entries[0].place, Some(1));
+        assert!(entries[0].flags.is_empty(), "{:?}", entries[0].flags);
+    }
+
+    #[test]
+    fn a_later_pass_over_the_start_mat_does_not_shorten_a_chip_time() {
+        // An out-and-back course that brings the field back past the start mat. Counting the
+        // last start crossing instead of the first would take 15 minutes off this chip time,
+        // silently, in the direction nobody would complain about.
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![
+            crossing(&runner, &course.start, 5),
+            crossing(&runner, &course.start, 900),
+            crossing(&runner, &course.finish, 1_200),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &chip_policy());
+
+        assert_eq!(entries[0].chip_time_ms, Some(1_195_000));
+    }
+
+    #[test]
+    fn a_runner_on_the_start_mat_when_the_gun_goes_starts_at_the_gun_and_says_so() {
+        let course = course();
+        let runner = runner(&course, "101");
+        let warm_up = crossing(&runner, &course.start, -900);
+        let on_the_line = crossing(&runner, &course.start, -2);
+        let finish = crossing(&runner, &course.finish, 1_200);
+        let events = vec![warm_up.clone(), on_the_line.clone(), finish.clone()];
+
+        let entries = run(&course, &[runner], &events, &[], &chip_policy());
+
+        assert_eq!(
+            entries[0].start_at,
+            Some(GUN),
+            "the start is the gun, not the mat"
+        );
+        assert_eq!(
+            entries[0].chip_time_ms,
+            Some(1_200_000),
+            "equal to the gun time"
+        );
+        assert_eq!(entries[0].place, Some(1), "a real start, so a real place");
+        assert_eq!(entries[0].flags, vec![ResultFlag::StartReadBeforeGun]);
+        assert_eq!(
+            entries[0].timing_events,
+            vec![on_the_line.id, finish.id],
+            "the detection nearest the gun is the evidence the start rests on"
+        );
+    }
+
+    #[test]
+    fn a_finish_read_only_before_the_gun_is_not_a_finish() {
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![
+            crossing(&runner, &course.start, 5),
+            crossing(&runner, &course.finish, -600),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(entries[0].status, ResultStatus::Dnf);
+        assert_eq!(entries[0].finish_at, None);
+        assert_eq!(entries[0].gun_time_ms, None);
+        assert_eq!(entries[0].place, None);
+        assert_eq!(entries[0].flags, vec![ResultFlag::FinishReadBeforeGun]);
+    }
+
+    #[test]
+    fn a_crossing_at_the_instant_of_the_gun_counts() {
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![
+            crossing(&runner, &course.start, 0),
+            crossing(&runner, &course.finish, 1_200),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &chip_policy());
+
+        assert_eq!(entries[0].start_at, Some(GUN));
+        assert!(entries[0].flags.is_empty(), "{:?}", entries[0].flags);
+    }
+
+    #[test]
+    fn with_no_gun_recorded_nothing_bounds_which_crossings_count() {
+        // Without a gun there is no way to tell a warm-up from a start, so the earliest
+        // crossing still counts. `splitforge doctor` warns about a race with no gun
+        // (`config.gun_time`); this test pins the behavior that warning is about.
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![
+            crossing(&runner, &course.start, -900),
+            crossing(&runner, &course.start, 5),
+            crossing(&runner, &course.finish, 1_200),
+        ];
+        let policy = ScoringPolicy {
+            gun_time: None,
+            ..chip_policy()
+        };
+
+        let entries = run(&course, &[runner], &events, &[], &policy);
+
+        assert_eq!(entries[0].start_at, Some(at(-900)));
+        assert_eq!(entries[0].chip_time_ms, Some(2_100_000));
     }
 
     #[test]

@@ -46,8 +46,9 @@ its exit criterion, because a real stream of real reads is what those measuremen
 LLRP was never what made them true.
 
 **Open findings from the 2026-09-13 security review** are listed at the end, under
-[Security review](#security-review--2026-09-13). Five of them should be fixed before a real
-event.
+[Security review](#security-review--2026-09-13). Five were marked to fix before a real event.
+The scoring one is fixed ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)),
+and four remain.
 
 ---
 
@@ -221,7 +222,8 @@ measurements — stopped being held hostage to one.
 the ThingMagic M7e-Pico — but nothing has been ordered. The steps below that need no
 hardware did not wait for it, exactly as
 [ADR-0004](adr/0004-llrp-first-reader-adapter.md) argues for writing a parser against
-captures. There are seven of them, not the three this paragraph used to claim.
+captures. There are nine of them, not the three this paragraph once claimed or the seven it
+claimed later.
 
 **No hardware required** — meaning these can be *built* without the module. That is a
 different question from whether they are **done**, and the boxes answer the second one: a box
@@ -341,6 +343,26 @@ pair of facts rather than a contradiction.
       parser, and waiting for the decoder would have left it untested on hardware for no
       reason. **Unticked, and this one cannot be ticked from a desk at all**: the flag exists
       to be pointed at a device node, and `/dev/null` in a test is not one
+- [ ] **Start the stream.** Nothing tells the module to read. `Port` is `Box<dyn Read>`, so
+      the adapter can only listen. No code sends the `0x22` read command with `TAG_STREAMING`,
+      and no document describes a startup sequence or a module profile that starts reading on
+      power-up. User guide § 8.8.2 says the module streams *during asynchronous inventory*,
+      which the host has to start. As built, the first session on a real module would open the
+      port and hear nothing, and after `reader_silence_ms` the watchdog would record a
+      *suspected* gap. The bytes are already known: the opcode table and search flags are in
+      [vendor-documents.md](readers/vendor-documents.md#search-flags--serial_reader_imph-enum-tmr_sr_searchflag),
+      and `encode_command` exists. This can be built and tested at a desk. `Port` becomes
+      `Read + Write`. A start sequence runs on every connection, checks each response's opcode
+      and status, and requests only metadata flags `StreamDecoder` accepts, with the option
+      byte's `0x10` bit set, or the decoder refuses every report it produces. The sequence is
+      tested against fake ports that record what was written. **It also moves the session
+      anchor.** The guide defines the tag timestamp as relative to
+      *"the time the command to read was issued"*, but `SessionAnchor::now()` is taken when the
+      port opens. Because the module cannot detect a pulled cable and keeps streaming, a
+      reconnection that does not re-issue the command inherits timestamps from the previous
+      session. So the per-connection anchor under *Session-anchored timestamps* depends on this
+      step. **Unticked until a module answers**: like the parser, a command sequence
+      transcribed from the SDK is believed only when real hardware accepts it
 
 **Needs the module:**
 
@@ -550,7 +572,9 @@ Simple, transparent rules first. Complexity here is where scoring bugs live.
 
 - [x] One start checkpoint, one finish checkpoint
 - [x] Gun-time and chip-time calculation
-- [x] First valid finish per participant
+- [x] First valid finish per participant: valid meaning at or after the gun, which
+      [ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md) added after the
+      2026-09-13 security review found the earliest crossing was being counted instead
 - [x] Configurable duplicate window
 - [x] Statuses: `Finished`, `DNS`, `DNF`, `DQ`
 - [x] Immutable result revisions with policy snapshots
@@ -1195,7 +1219,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
 
 ### Fix before a real event
 
-- [ ] **Scoring takes each runner's earliest crossing of a mat, including crossings before
+- [x] **Scoring takes each runner's earliest crossing of a mat, including crossings before
       the gun, so a warm-up can silently change a chip time.** *Reproduced*, against
       `splitforge_results::score`. A runner who walked over the start mat 15 minutes early,
       crossed it again 5 s after the gun, and finished at 20:00 was scored a chip time of
@@ -1210,6 +1234,17 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       (for example, the last start crossing before the runner's own finish, and the first
       finish after the gun or after that start) and record the decision in an ADR beside
       ADR-0017. Where there was more than one candidate crossing, flag the result.
+      **Fixed by [ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)**, and not in
+      the way the example above suggested. The start is the *first* start crossing at or
+      after the gun, not the last, because a course that passes the start mat again would
+      silently shorten a chip time. Crossings before the gun are set aside, not deleted. A
+      warm-up that is not a runner's only evidence carries no flag. `start_read_before_gun`
+      and `finish_read_before_gun` mark the cases where it was the only evidence. With no gun
+      recorded, nothing changes. Seven tests in `splitforge-results` hold the rule. Four of
+      them (both warm-ups, the runner on the start mat at the gun, and the pre-gun-only
+      finish) fail against the scoring code at `b457991`. The other three pin behavior that
+      was already right and must stay right: a later pass over the start mat, a crossing at
+      the instant of the gun, and a race with no gun recorded.
 - [ ] **The sidecar is a write path into the append-only journal, and it is guarded less
       than the database.** *Reproduced.* A hand-written `SFJ1` line with a new id and chip
       `FORGED` was replayed into `raw_reads` by `SqliteJournal::open_recovering`, which is
@@ -1324,6 +1359,22 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       `Cargo.lock` passes if a semver-compatible fix exists, which is exactly the case the gate
       exists to catch. *Fix:* delete that step, and add `--locked` to the build, test, and
       clippy gates.
+
+### Decisions this review raised
+
+- [ ] **Is a runner who only warmed up a DNF or a DNS?** *From code.* Scoring makes a runner
+      DNF rather than DNS if any timing event names them, and
+      [ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md) deliberately left that
+      rule alone. So a crossing before the gun still counts as having been seen. A registered
+      runner who warms up through the finish arch and never starts is DNF, flagged
+      `finish_read_before_gun`. On a course with a start mat, ADR-0028's third rule already
+      treats a start read before the gun as a start at the gun, so DNF follows from that rule
+      there. The open part is a runner whose only pre-gun reads are at other mats. It shows
+      most clearly on a course with no start mat, where every warm-up through the finish
+      turns a DNS into a DNF. The difference matters wherever DNS and DNF are reported or
+      counted separately. *Decide:* whether "seen" should count only crossings at or after the
+      gun, plus a start read before it as ADR-0028 already allows. Record the answer in a new
+      ADR that follows ADR-0028, because an accepted ADR is not edited.
 
 ### Hygiene
 
