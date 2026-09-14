@@ -221,7 +221,8 @@ measurements — stopped being held hostage to one.
 the ThingMagic M7e-Pico — but nothing has been ordered. The steps below that need no
 hardware did not wait for it, exactly as
 [ADR-0004](adr/0004-llrp-first-reader-adapter.md) argues for writing a parser against
-captures. There are seven of them, not the three this paragraph used to claim.
+captures. There are nine of them, not the three this paragraph once claimed or the seven it
+claimed later.
 
 **No hardware required** — meaning these can be *built* without the module. That is a
 different question from whether they are **done**, and the boxes answer the second one: a box
@@ -341,6 +342,26 @@ pair of facts rather than a contradiction.
       parser, and waiting for the decoder would have left it untested on hardware for no
       reason. **Unticked, and this one cannot be ticked from a desk at all**: the flag exists
       to be pointed at a device node, and `/dev/null` in a test is not one
+- [ ] **Start the stream.** Nothing tells the module to read. `Port` is `Box<dyn Read>`, so
+      the adapter can only listen. No code sends the `0x22` read command with `TAG_STREAMING`,
+      and no document describes a startup sequence or a module profile that starts reading on
+      power-up. User guide § 8.8.2 says the module streams *during asynchronous inventory*,
+      which the host has to start. As built, the first session on a real module would open the
+      port and hear nothing, and after `reader_silence_ms` the watchdog would record a
+      *suspected* gap. The bytes are already known: the opcode table and search flags are in
+      [vendor-documents.md](readers/vendor-documents.md#search-flags--serial_reader_imph-enum-tmr_sr_searchflag),
+      and `encode_command` exists. This can be built and tested at a desk. `Port` becomes
+      `Read + Write`. A start sequence runs on every connection, checks each response's opcode
+      and status, and requests only metadata flags `StreamDecoder` accepts, with the option
+      byte's `0x10` bit set, or the decoder refuses every report it produces. The sequence is
+      tested against fake ports that record what was written. **It also moves the session
+      anchor.** The guide defines the tag timestamp as relative to
+      *"the time the command to read was issued"*, but `SessionAnchor::now()` is taken when the
+      port opens. Because the module cannot detect a pulled cable and keeps streaming, a
+      reconnection that does not re-issue the command inherits timestamps from the previous
+      session. So the per-connection anchor under *Session-anchored timestamps* depends on this
+      step. **Unticked until a module answers**: like the parser, a command sequence
+      transcribed from the SDK is believed only when real hardware accepts it
 
 **Needs the module:**
 
