@@ -28,8 +28,11 @@
 //! one-line fix for whoever holds the next capture; a wrong parse is a chip identifier nobody
 //! can trace.
 //!
-//! Three things are refused for that reason, and each names itself in the error:
+//! Four things are refused for that reason, and each names itself in the error:
 //!
+//! - **Any frame but a successful `0x22`.** The capture is opcode `0x22` with status `0x0000`.
+//!   A frame answering some other command, or reporting an error, can carry a payload that
+//!   walks cleanly as a tag report, and the checks below it never look at the header.
 //! - **A metadata flag above `0x0100`.** The 2023 layout has five more fields than the nine
 //!   this decoder walks, and a decoder that ignored an unknown high bit would not fail — it
 //!   would read the next field's bytes as this one's and return a plausible, wrong EPC.
@@ -41,6 +44,7 @@
 use splitforge_domain::{ChipId, ReaderId};
 use splitforge_reader::{ReaderMessage, ReaderTimestamp};
 
+use crate::command::OpCode;
 use crate::frame::Response;
 use crate::provider::{SessionAnchor, TagReportDecoder};
 
@@ -121,6 +125,22 @@ enum StreamResponse {
 /// Why a tag report could not be decoded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReportError {
+    /// The frame answers a command other than `0x22`.
+    #[error("the frame answers opcode {opcode:#04x}; a tag report answers 0x22")]
+    NotAReadResponse {
+        /// The opcode as it arrived.
+        opcode: u8,
+    },
+    /// The frame's status word is not success.
+    ///
+    /// Refused rather than read, because no capture shows what a failed `0x22` carries. The
+    /// module may well send one in an empty field, and if it does, this count is how that is
+    /// found out, and deciding it is not a fault is a change a capture can justify.
+    #[error("the frame reports status {status:#06x}; the only status a capture shows is 0x0000")]
+    UnsuccessfulStatus {
+        /// The status word as it arrived.
+        status: u16,
+    },
     /// The payload ended in the middle of a field.
     #[error("the report ended after {available} byte(s); {wanted} more were needed for {field}")]
     Truncated {
@@ -297,7 +317,21 @@ impl StreamDecoder {
     }
 
     /// Classifies a streaming response before any of its metadata is read.
-    fn classify(data: &[u8]) -> Result<StreamResponse, ReportError> {
+    fn classify(response: &Response<'_>) -> Result<StreamResponse, ReportError> {
+        // The header first. Everything after this reads the payload, and a payload that walks
+        // cleanly says nothing about which command it answers.
+        if response.opcode != OpCode::ReadTagIdMultiple.to_byte() {
+            return Err(ReportError::NotAReadResponse {
+                opcode: response.opcode,
+            });
+        }
+        if !response.is_ok() {
+            return Err(ReportError::UnsuccessfulStatus {
+                status: response.status,
+            });
+        }
+
+        let data = response.data;
         let option = data
             .get(offset::OPTION)
             .copied()
@@ -474,6 +508,10 @@ fn reader_timestamp(since_command_ms: Option<u32>, _anchor: &SessionAnchor) -> R
 }
 
 impl TagReportDecoder for StreamDecoder {
+    fn faults(&self) -> u64 {
+        self.errors
+    }
+
     fn decode(
         &mut self,
         response: &Response<'_>,
@@ -482,7 +520,7 @@ impl TagReportDecoder for StreamDecoder {
     ) {
         self.frames = self.frames.saturating_add(1);
 
-        let outcome = Self::classify(response.data).and_then(|kind| match kind {
+        let outcome = Self::classify(response).and_then(|kind| match kind {
             // Both are successful decodes that carry no tag, and neither is a fault: a status
             // report is reader statistics and a stream-end is the module saying it is done.
             StreamResponse::Status | StreamResponse::End => Ok(None),
@@ -538,12 +576,17 @@ mod tests {
 
     /// Wraps a payload in a valid response frame, so tests vary the payload and nothing else.
     fn framed(payload: &[u8]) -> Vec<u8> {
+        framed_as(0x22, 0x0000, payload)
+    }
+
+    /// Wraps a payload in a valid frame with the given opcode and status word.
+    fn framed_as(opcode: u8, status: u16, payload: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(RESPONSE_HEADER_LEN + payload.len() + 2);
         frame.push(SOH);
         frame.push(u8::try_from(payload.len()).expect("payloads here are small"));
-        frame.push(0x22);
-        frame.push(0);
-        frame.push(0);
+        frame.push(opcode);
+        frame.push((status >> 8) as u8);
+        frame.push((status & 0xFF) as u8);
         frame.extend_from_slice(payload);
         let crc = crc16(&frame[1..]);
         frame.push((crc >> 8) as u8);
@@ -635,6 +678,30 @@ mod tests {
         let mut decoder = decoder();
         assert!(feed(&mut decoder, &framed(&payload)).is_empty());
         assert_eq!(decoder.errors(), 0);
+    }
+
+    #[test]
+    fn only_a_successful_0x22_response_is_a_tag_report() {
+        // The 2026-09-13 review's reproduction: the captured payload, re-framed as opcode 0x29
+        // with status 0x0400, decoded into one read with no fault. The capture shows 0x22 with
+        // status 0x0000 and nothing else, so anything else is refused — the same rule this
+        // decoder already applies to the option byte and the flags word.
+        let payload = captured_payload();
+
+        for (opcode, status) in [(0x29_u8, 0x0000_u16), (0x22, 0x0400), (0x29, 0x0400)] {
+            let mut decoder = decoder();
+            let out = feed(&mut decoder, &framed_as(opcode, status, &payload));
+
+            assert!(
+                out.is_empty(),
+                "opcode {opcode:#04x} status {status:#06x} must not produce a read"
+            );
+            assert_eq!(
+                decoder.errors(),
+                1,
+                "opcode {opcode:#04x} status {status:#06x} must be counted as a fault"
+            );
+        }
     }
 
     #[test]
@@ -737,6 +804,8 @@ mod tests {
         // two source lines whose trailing backslash was dropped still compiles, and prints
         // the source file's indentation into the middle of the sentence.
         let errors = [
+            ReportError::NotAReadResponse { opcode: 0x29 },
+            ReportError::UnsuccessfulStatus { status: 0x0400 },
             ReportError::Truncated {
                 field: "the EPC",
                 wanted: 4,

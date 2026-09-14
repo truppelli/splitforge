@@ -47,7 +47,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use splitforge_domain::ReaderId;
-use splitforge_reader::{Disconnection, ReaderEvent, ReaderMessage, ReaderProvider};
+use splitforge_reader::{Disconnection, ReaderEvent, ReaderFaults, ReaderMessage, ReaderProvider};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
@@ -109,6 +109,14 @@ pub trait TagReportDecoder: Send {
         anchor: &SessionAnchor,
         out: &mut Vec<ReaderMessage>,
     );
+
+    /// Verified frames this decoder refused, since it was created.
+    ///
+    /// Reported to the service as [`ReaderFaults::decoding`]. Zero by default, which is the
+    /// truth for a decoder that refuses nothing.
+    fn faults(&self) -> u64 {
+        0
+    }
 }
 
 /// A decoder that reads nothing, and counts what it declined to read.
@@ -229,6 +237,23 @@ pub struct ThingMagicReader<P, D> {
     decoder: D,
     backoff: Backoff,
     capacity: usize,
+    /// Framing faults from connections that have ended. Each connection starts a fresh
+    /// [`Reassembler`], so the running total has to be kept here.
+    framing_before: u64,
+    /// The totals last sent, so a report goes out only when one changes.
+    faults_reported: ReaderFaults,
+}
+
+/// How a connection's read loop finished.
+enum Pumped {
+    /// The consumer dropped the channel, so there is nobody left to read for.
+    ConsumerGone,
+    /// The port ended, and reconnecting is the right response.
+    Ended {
+        /// Whether the connection proved itself before it ended. See
+        /// [`ThingMagicReader::established`].
+        established: bool,
+    },
 }
 
 impl<P, D> ThingMagicReader<P, D>
@@ -244,6 +269,8 @@ where
             decoder,
             backoff: Backoff::default(),
             capacity: 256,
+            framing_before: 0,
+            faults_reported: ReaderFaults::default(),
         }
     }
 
@@ -303,6 +330,11 @@ where
     /// to, in order to decide whether to reopen one — and used to keep that to itself, which
     /// left the service downstream with nothing to distinguish a dead reader from a quiet
     /// one. The knowledge now leaves the thread it was computed on.
+    ///
+    /// **Only a connection that proved itself resets the backoff.** Opening a port proves
+    /// nothing: a wrong device node or a loose cable opens and ends at once, and resetting on
+    /// every open kept that loop at the shortest delay forever, writing a pair of gap rows each
+    /// time.
     fn run(&mut self, sender: &mpsc::Sender<ReaderEvent>) {
         let mut failures: u32 = 0;
         let mut attempt: u64 = 0;
@@ -312,19 +344,23 @@ where
 
             match self.factory.open() {
                 Ok(port) => {
-                    failures = 0;
-                    if sender.blocking_send(ReaderEvent::Connected).is_err() {
-                        return;
-                    }
-                    if !self.pump(port, sender) {
+                    let Pumped::Ended { established } = self.pump(port, sender) else {
                         // The consumer is gone. A reader with nowhere to deliver should stop
                         // reading rather than buffer a race into memory.
                         return;
-                    }
+                    };
+                    failures = if established {
+                        0
+                    } else {
+                        failures.saturating_add(1)
+                    };
                     // `pump` returned because the connection ended rather than because the
                     // consumer left, so this is the induced disconnection the exit criterion
                     // is about — reported before the backoff sleep, not after it, so the gap
                     // is recorded as starting when the port died rather than seconds later.
+                    //
+                    // Sent for a connection that never proved itself too. If it follows an
+                    // outage, the gap is already open and opening it again writes nothing.
                     if sender
                         .blocking_send(ReaderEvent::Disconnected {
                             cause: Disconnection::Ended,
@@ -362,43 +398,105 @@ where
         }
     }
 
-    /// Reads one connection to its end.
+    /// Whether a connection has shown there is a module on the other end.
     ///
-    /// Returns `false` when the consumer has dropped the channel, and `true` when the port
-    /// ended and reconnecting is the right response.
-    fn pump(&mut self, mut port: Port, sender: &mpsc::Sender<ReaderEvent>) -> bool {
+    /// A verified frame shows it. So does staying up for [`Backoff::max`], for a module that
+    /// is there and has nothing to say yet. That threshold is the longest reconnect delay, so a
+    /// port that dies just after it still cannot churn faster than the capped backoff would
+    /// allow, and it adds no second number to justify.
+    ///
+    /// **The connection is announced here rather than when the port opens**, so that a run of
+    /// ports that open and die at once is one outage and one gap rather than two rows per
+    /// attempt. The cost is that a quiet module is reported connected up to `max` late.
+    fn established(&self, reassembler: &Reassembler, anchor: &SessionAnchor) -> bool {
+        reassembler.stats().frames > 0 || anchor.opened_at.elapsed() >= self.backoff.max
+    }
+
+    /// Reads one connection to its end.
+    fn pump(&mut self, mut port: Port, sender: &mpsc::Sender<ReaderEvent>) -> Pumped {
         // A fresh connection starts from no partial frame. Bytes held over from the previous
         // one would splice two sessions into a frame that was never transmitted.
         let mut reassembler = Reassembler::new();
         let anchor = SessionAnchor::now();
         let mut chunk = [0_u8; 512];
         let mut reads: Vec<ReaderMessage> = Vec::new();
+        let mut announced = false;
 
         loop {
-            let count = match port.read(&mut chunk) {
-                Ok(0) => return true,
-                Ok(count) => count,
+            let read = port.read(&mut chunk);
+            let decoder = &mut self.decoder;
+            let mut decode =
+                |response: &Response<'_>| decoder.decode(response, &anchor, &mut reads);
+
+            let ended = match read {
+                Ok(0) => true,
+                Ok(count) => {
+                    reassembler.feed(&chunk[..count], &mut decode);
+                    false
+                }
                 // A timeout means the module had nothing to say, which during a race is most
                 // of the time. Treating it as a disconnection would reopen the port between
                 // every pair of runners.
-                Err(error) if error.kind() == ErrorKind::TimedOut => continue,
+                //
+                // It does mean nothing is still arriving for a partial frame, so whatever the
+                // reassembler is holding is settled now rather than at the next runner.
+                Err(error) if error.kind() == ErrorKind::TimedOut => {
+                    reassembler.flush(&mut decode);
+                    false
+                }
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                Err(_) => return true,
+                Err(_) => true,
             };
 
-            let decoder = &mut self.decoder;
-            reassembler.feed(&chunk[..count], |response| {
-                decoder.decode(response, &anchor, &mut reads);
-            });
+            // Nothing more can arrive on a connection that has ended, so whole frames held
+            // behind a partial one are handed over rather than dropped with the buffer.
+            if ended {
+                reassembler.flush(&mut decode);
+            }
+
+            if !announced && self.established(&reassembler, &anchor) {
+                if sender.blocking_send(ReaderEvent::Connected).is_err() {
+                    return Pumped::ConsumerGone;
+                }
+                announced = true;
+            }
 
             for message in reads.drain(..) {
                 // Blocking is the backpressure: if the journal cannot keep up, the right
                 // response is to stop taking bytes off the port, not to grow a queue.
                 if sender.blocking_send(ReaderEvent::Read(message)).is_err() {
-                    return false;
+                    return Pumped::ConsumerGone;
                 }
             }
+
+            let framing = self.framing_before + reassembler.stats().errors();
+            if !self.report_faults(framing, sender) {
+                return Pumped::ConsumerGone;
+            }
+
+            if ended {
+                self.framing_before = framing;
+                return Pumped::Ended {
+                    established: announced,
+                };
+            }
         }
+    }
+
+    /// Sends the fault totals if either has changed. Returns `false` if the consumer is gone.
+    ///
+    /// After the reads, so a consumer that sees the count has already counted every read
+    /// that came out of the same bytes.
+    fn report_faults(&mut self, framing: u64, sender: &mpsc::Sender<ReaderEvent>) -> bool {
+        let faults = ReaderFaults {
+            framing,
+            decoding: self.decoder.faults(),
+        };
+        if faults == self.faults_reported {
+            return true;
+        }
+        self.faults_reported = faults;
+        sender.blocking_send(ReaderEvent::Faults(faults)).is_ok()
     }
 }
 
@@ -484,7 +582,9 @@ mod tests {
         loop {
             match receiver.recv().await.expect("the reader is still running") {
                 ReaderEvent::Read(message) => return message,
-                ReaderEvent::Connected | ReaderEvent::Disconnected { .. } => {}
+                ReaderEvent::Connected
+                | ReaderEvent::Disconnected { .. }
+                | ReaderEvent::Faults(_) => {}
             }
         }
     }
@@ -619,6 +719,140 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 1);
     }
 
+    /// A port that delivers one chunk and then times out, many times, before it ends.
+    ///
+    /// `ended` is set only when it finally ends, so a test can tell a read released by a
+    /// timeout from one released by the connection closing.
+    struct ChunkThenQuiet {
+        chunk: Option<Vec<u8>>,
+        timeouts: usize,
+        ended: Arc<AtomicUsize>,
+    }
+
+    impl Read for ChunkThenQuiet {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if let Some(chunk) = self.chunk.take() {
+                let count = chunk.len().min(buffer.len());
+                buffer[..count].copy_from_slice(&chunk[..count]);
+                return Ok(count);
+            }
+            if self.timeouts > 0 {
+                self.timeouts -= 1;
+                thread::sleep(Duration::from_millis(1));
+                return Err(io::Error::from(ErrorKind::TimedOut));
+            }
+            self.ended.store(1, Ordering::SeqCst);
+            Err(io::Error::from(ErrorKind::BrokenPipe))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quiet_line_releases_a_read_held_behind_a_false_header() {
+        // `0xFF` and a legal length, then a real frame far shorter than the length claims. The
+        // reassembler cannot tell whether the header is real, so it waits. A timeout is what
+        // tells it nothing more is coming, and the read must arrive then, with the port still
+        // open, rather than when the next runner crosses.
+        let mut chunk = vec![SOH, 200];
+        chunk.extend(response(0x22, &[0xAB, 0xCD]));
+        let ended = Arc::new(AtomicUsize::new(0));
+        let flag = Arc::clone(&ended);
+
+        let factory = move || -> io::Result<Port> {
+            Ok(Box::new(ChunkThenQuiet {
+                chunk: Some(chunk.clone()),
+                timeouts: 2_000,
+                ended: Arc::clone(&flag),
+            }) as Port)
+        };
+
+        let mut receiver = reader(factory).start();
+        let message = next_read(&mut receiver).await;
+        assert_eq!(message.chip, ChipId::new("ABCD"));
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            0,
+            "the read waited for the connection to end instead of for the line to go quiet"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_held_behind_a_false_header_survives_the_connection_ending() {
+        // The same bytes, and then the cable comes out. The frame is whole and verified; the
+        // buffer it was sitting in belongs to a connection that no longer exists, and it must
+        // not go with it.
+        let mut chunk = vec![SOH, 200];
+        chunk.extend(response(0x22, &[0x01, 0x02]));
+        let script = vec![chunk];
+        let factory = move || -> io::Result<Port> {
+            Ok(Box::new(ScriptedPort {
+                chunks: script.clone(),
+                index: 0,
+            }) as Port)
+        };
+
+        let mut receiver = reader(factory).start();
+        let message = next_read(&mut receiver).await;
+        assert_eq!(message.chip, ChipId::new("0102"));
+    }
+
+    #[tokio::test]
+    async fn fault_totals_leave_the_provider_thread() {
+        // Noise, then a frame that passes its CRC and that this decoder refuses. The service
+        // can only degrade health on counts it is told, and these used to be read only in
+        // tests.
+        struct Refuses;
+
+        impl TagReportDecoder for Refuses {
+            fn decode(
+                &mut self,
+                _response: &Response<'_>,
+                _anchor: &SessionAnchor,
+                _out: &mut Vec<ReaderMessage>,
+            ) {
+            }
+
+            fn faults(&self) -> u64 {
+                7
+            }
+        }
+
+        let mut chunk = vec![0x00, 0x11, 0x22];
+        chunk.extend(response(0x22, &[0x01]));
+        let script = vec![chunk];
+        let factory = move || -> io::Result<Port> {
+            Ok(Box::new(ScriptedPort {
+                chunks: script.clone(),
+                index: 0,
+            }) as Port)
+        };
+
+        let mut receiver: mpsc::Receiver<ReaderEvent> = Box::new(
+            ThingMagicReader::new(ReaderId::new("mat"), factory, Refuses)
+                .with_backoff(Backoff {
+                    first: Duration::from_millis(1),
+                    max: Duration::from_secs(1),
+                })
+                .with_capacity(16),
+        )
+        .start();
+
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Connected));
+        assert_eq!(
+            receiver.recv().await,
+            Some(ReaderEvent::Faults(ReaderFaults {
+                framing: 1,
+                decoding: 7
+            }))
+        );
+        assert_eq!(
+            receiver.recv().await,
+            Some(ReaderEvent::Disconnected {
+                cause: Disconnection::Ended
+            }),
+            "unchanged totals are not sent again"
+        );
+    }
+
     #[tokio::test]
     async fn the_lifecycle_is_reported_before_and_after_the_reads() {
         // One connection that delivers a frame and then breaks. The three events around it
@@ -696,6 +930,73 @@ mod tests {
         assert_eq!(
             receiver.recv().await.expect("the reconnection"),
             ReaderEvent::Connected
+        );
+    }
+
+    /// A port that opens and ends at once, as a wrong device node or a loose cable does.
+    fn a_port_that_ends_at_once() -> io::Result<Port> {
+        Ok(Box::new(io::empty()) as Port)
+    }
+
+    #[tokio::test]
+    async fn a_port_that_opens_and_ends_at_once_is_never_announced_as_connected() {
+        // The 2026-09-13 review's reproduction: a port whose `read` returns `Ok(0)` produced 29
+        // connections and 28 disconnections in two seconds, and every pair is two rows in an
+        // append-only table. A connection that never proved a reader was on the other end is
+        // not one, so the whole run is one outage and one gap.
+        //
+        // The ceiling is a second so that no scheduler pause, however long, can make one of
+        // these connections look established by having lasted.
+        let mut receiver: mpsc::Receiver<ReaderEvent> = Box::new(
+            ThingMagicReader::new(ReaderId::new("mat"), a_port_that_ends_at_once, StubDecoder)
+                .with_backoff(Backoff {
+                    first: Duration::from_millis(1),
+                    max: Duration::from_secs(1),
+                })
+                .with_capacity(16),
+        )
+        .start();
+
+        for _ in 0..5 {
+            assert_eq!(
+                receiver.recv().await,
+                Some(ReaderEvent::Disconnected {
+                    cause: Disconnection::Ended
+                }),
+                "a port that ends before anything arrives is still in the outage"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flapping_port_backs_off_instead_of_retrying_at_the_floor() {
+        // The other half of the same finding. `run` reset its failure count on every open, so a
+        // port that opened and died stayed at the first delay forever. Here that is 10–20 ms,
+        // which is twenty or more opens in the window below; backing off allows five.
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&opens);
+        let factory = move || -> io::Result<Port> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            a_port_that_ends_at_once()
+        };
+
+        let receiver = Box::new(
+            ThingMagicReader::new(ReaderId::new("mat"), factory, StubDecoder)
+                .with_backoff(Backoff {
+                    first: Duration::from_millis(20),
+                    max: Duration::from_secs(2),
+                })
+                .with_capacity(256),
+        )
+        .start();
+
+        thread::sleep(Duration::from_millis(400));
+        let opened = opens.load(Ordering::SeqCst);
+        drop(receiver);
+
+        assert!(
+            opened <= 6,
+            "{opened} opens in 400 ms: the delay is not growing"
         );
     }
 

@@ -182,6 +182,18 @@ pub struct ReaderHealth {
     /// and the gap between them is a monitored quantity."* A single counter incremented
     /// before the write would report reads that a power cut took.
     pub reads_persisted: u64,
+    /// Bytes from the reader that never formed a frame the transport could verify, since
+    /// the service started.
+    ///
+    /// Reported and never degrading on its own. A connection that opens partway through a
+    /// frame costs one, so a small number is the ordinary state of a serial line.
+    pub framing_faults: u64,
+    /// Frames that arrived intact and could not be decoded, since the service started.
+    ///
+    /// Not line noise, because the checksum passed. While this is above zero and
+    /// [`Self::reads_received`] is zero, health is degraded: the reader is talking and nothing
+    /// it says is being recorded.
+    pub decode_faults: u64,
     /// The gap this reader is in right now, if it is in one.
     ///
     /// `None` is the ordinary state and means the reader is producing — or that it never
@@ -204,6 +216,8 @@ impl ReaderHealth {
             state: None,
             reads_received: 0,
             reads_persisted: 0,
+            framing_faults: 0,
+            decode_faults: 0,
             open_gap: None,
         }
     }
@@ -401,6 +415,8 @@ mod tests {
             state: Some(ReaderState::Stopped),
             reads_received: 638,
             reads_persisted: 638,
+            framing_faults: 0,
+            decode_faults: 0,
             open_gap: None,
         };
 

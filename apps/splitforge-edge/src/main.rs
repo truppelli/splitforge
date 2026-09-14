@@ -66,7 +66,7 @@ use splitforge_domain::{
     ClockStep, DeviceClockState, GapDetection, RaceId, RawReadJournal, ReaderId,
     SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
 };
-use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderProvider};
+use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderFaults, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
 use splitforge_thingmagic::{SerialSettings, StreamDecoder, ThingMagicReader};
 use splitforge_timesource::ClockReading;
@@ -183,6 +183,8 @@ struct ReaderStatus {
     received: u64,
     /// Reads the journal has accepted and made durable.
     persisted: u64,
+    /// What the provider could not read, as it last reported.
+    faults: ReaderFaults,
     /// Why the read path stopped, when it stopped for a reason worth reporting.
     fault: Option<String>,
     /// Which reader is composed, and which race it is reading for.
@@ -231,11 +233,37 @@ impl ReaderStatus {
             state: None,
             received: 0,
             persisted: 0,
+            faults: ReaderFaults {
+                framing: 0,
+                decoding: 0,
+            },
             fault: None,
             watching: None,
             last_message: None,
             transport_down: false,
         }
+    }
+
+    /// Why this reader is talking and recording nothing, if it is.
+    ///
+    /// Frames arrived intact and none decoded, ever. That is a layout this service does not
+    /// understand, and it looks exactly like a quiet field unless something says so. Once one
+    /// read has decoded, later refusals are counted and do not degrade: a frame type nobody has
+    /// captured yet, arriving between runners, would otherwise flip health on and off all day
+    /// and teach an operator to ignore it.
+    fn undecodable(&self) -> Option<String> {
+        if self.faults.decoding == 0 || self.received > 0 {
+            return None;
+        }
+        let reader = self
+            .watching
+            .as_ref()
+            .map_or("the reader", |watching| watching.reader.as_str());
+        Some(format!(
+            "reader {reader} has sent {} frame(s) that arrived intact and could not be \
+             decoded, and none that could; nothing it reports is being recorded",
+            self.faults.decoding
+        ))
     }
 }
 
@@ -289,6 +317,8 @@ impl HealthSource for Device {
                     state: reader.state,
                     reads_received: reader.received,
                     reads_persisted: reader.persisted,
+                    framing_faults: reader.faults.framing,
+                    decode_faults: reader.faults.decoding,
                     // Filled in below, from the journal rather than from this struct. An
                     // open gap has to survive the restart that a power cut causes, so the
                     // rows are the authority and this process's memory is not.
@@ -298,6 +328,9 @@ impl HealthSource for Device {
                     // A reader that stopped because a write failed is a different fact from
                     // one that reached the end of its script, and only the first degrades.
                     health.degrade(format!("the read path stopped: {fault}"));
+                }
+                if let Some(reason) = reader.undecodable() {
+                    health.degrade(reason);
                 }
             }
             Err(_) => health.degrade("the reader's state is unreadable after an earlier failure"),
@@ -540,6 +573,12 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, inges
             }
             ReaderEvent::Disconnected { cause } => {
                 record_connection(device, Some(cause));
+                continue;
+            }
+            // Not a read and not proof of life: `last_message` stays where it is, so a reader
+            // that sends only what cannot be decoded is still silent to the watchdog.
+            ReaderEvent::Faults(faults) => {
+                device.update_reader(|status| status.faults = faults);
                 continue;
             }
         };
@@ -1260,6 +1299,7 @@ mod tests {
                 state: Some(ReaderState::Disconnected),
                 received: 0,
                 persisted: 0,
+                faults: ReaderFaults::default(),
                 fault: None,
                 watching: Some(Watching {
                     reader,
@@ -1374,6 +1414,138 @@ mod tests {
             .expect("read the gaps");
         assert_eq!(all.len(), 1, "five reports, one gap: {all:?}");
         assert_eq!(gap.detection, GapDetection::Confirmed);
+    }
+
+    /// Runs events through the read path exactly as a provider's channel would deliver them.
+    fn deliver(device: &Device, events: Vec<ReaderEvent>) {
+        let (sender, receiver) = tokio::sync::mpsc::channel(events.len().max(1));
+        for event in events {
+            sender
+                .try_send(event)
+                .expect("the channel has room for every event");
+        }
+        drop(sender);
+        read_into_journal(device, receiver, Ingest::default());
+    }
+
+    fn undecodable_reasons(device: &Device) -> Vec<String> {
+        device
+            .health()
+            .degraded_by
+            .into_iter()
+            .filter(|reason| reason.contains("could not be decoded"))
+            .collect()
+    }
+
+    #[test]
+    fn frames_that_arrive_intact_and_never_decode_degrade_health() {
+        // The review found these counts were read only in tests, so M3a's promise that a wrong
+        // assumption shows up as "no reads and a climbing error count" was a promise about a
+        // number nobody could see.
+        let (device, _directory) = a_device_watching_a_reader();
+
+        deliver(
+            &device,
+            vec![ReaderEvent::Faults(ReaderFaults {
+                framing: 4,
+                decoding: 0,
+            })],
+        );
+        let health = device.health();
+        assert_eq!(health.reader.framing_faults, 4);
+        assert!(
+            undecodable_reasons(&device).is_empty(),
+            "line noise alone is reported, not degraded on"
+        );
+
+        deliver(
+            &device,
+            vec![ReaderEvent::Faults(ReaderFaults {
+                framing: 4,
+                decoding: 12,
+            })],
+        );
+        let health = device.health();
+        assert_eq!(health.reader.decode_faults, 12);
+        assert!(health.is_degraded());
+        let reasons = undecodable_reasons(&device);
+        assert_eq!(reasons.len(), 1, "{:?}", health.degraded_by);
+        assert!(
+            reasons[0].contains("mat") && reasons[0].contains("12"),
+            "names the reader and the count: {:?}",
+            reasons[0]
+        );
+        assert!(
+            !reasons[0].contains("  "),
+            "collapsed line continuation: {:?}",
+            reasons[0]
+        );
+    }
+
+    #[test]
+    fn one_decoded_read_proves_the_layout_and_later_refusals_stop_degrading() {
+        let (device, _directory) = a_device_watching_a_reader();
+        let reader = device
+            .reader
+            .lock()
+            .expect("the reader's state")
+            .watching
+            .clone()
+            .expect("a reader is composed")
+            .reader;
+
+        deliver(
+            &device,
+            vec![
+                ReaderEvent::Faults(ReaderFaults {
+                    framing: 0,
+                    decoding: 3,
+                }),
+                ReaderEvent::Read(splitforge_reader::ReaderMessage {
+                    source: reader,
+                    antenna: Some(1),
+                    chip: splitforge_domain::ChipId::new("E200"),
+                    timestamp: splitforge_reader::ReaderTimestamp::Absent,
+                    rssi_dbm: None,
+                    raw_payload: vec![0x01],
+                }),
+                ReaderEvent::Faults(ReaderFaults {
+                    framing: 0,
+                    decoding: 9,
+                }),
+            ],
+        );
+
+        let health = device.health();
+        assert_eq!(health.reader.decode_faults, 9, "still reported");
+        assert_eq!(health.reader.reads_persisted, 1);
+        assert!(
+            undecodable_reasons(&device).is_empty(),
+            "a frame type nobody has captured, arriving between runners, must not flip health \
+             on and off all day: {:?}",
+            health.degraded_by
+        );
+    }
+
+    #[test]
+    fn a_fault_report_is_not_proof_the_reader_is_alive() {
+        // The watchdog's clock. A reader sending only what cannot be decoded is recording
+        // nothing, and the suspected gap that silence opens is the truth about that.
+        let (device, _directory) = a_device_watching_a_reader();
+        let stale = Instant::now() - std::time::Duration::from_secs(3_600);
+        device.update_reader(|status| status.last_message = Some(stale));
+
+        deliver(
+            &device,
+            vec![ReaderEvent::Faults(ReaderFaults {
+                framing: 1,
+                decoding: 1,
+            })],
+        );
+
+        let status = device.reader.lock().expect("the reader's state");
+        assert_eq!(status.last_message, Some(stale));
+        assert_eq!(status.received, 0);
     }
 
     #[test]

@@ -216,6 +216,23 @@ impl Disconnection {
     }
 }
 
+/// Input a provider received and could not turn into reads, counted since it started.
+///
+/// Two numbers, because they mean different things. Framing faults are the line: some are
+/// expected, and a connection that opens partway through a frame produces one. Decoding
+/// faults are the layout: the transport verified the frame arrived intact and the provider
+/// still could not read it, which is not noise. A decoding count climbing while no reads
+/// arrive is how a wrong assumption about the protocol shows itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReaderFaults {
+    /// Bytes that never formed a frame the transport could verify: a bad checksum, lost
+    /// synchronization, a length no frame may declare, or a partial frame nothing more
+    /// arrived for.
+    pub framing: u64,
+    /// Frames that arrived intact and that the provider's decoder refused.
+    pub decoding: u64,
+}
+
 /// What a provider reports.
 ///
 /// **A channel of reads alone cannot say the port died**, and that silence is the whole
@@ -244,6 +261,12 @@ pub enum ReaderEvent {
         /// Which of the two ways it happened.
         cause: Disconnection,
     },
+    /// What the provider could not read so far, sent when either count changes.
+    ///
+    /// Totals rather than increments, so the latest one is the whole answer. Neither a read
+    /// nor a sign of life: a reader sending bytes nobody can decode is recording nothing, and
+    /// the silence watchdog is right to say so.
+    Faults(ReaderFaults),
 }
 
 /// A source of reads.
