@@ -239,6 +239,19 @@ pub enum ResultFlag {
     /// The declaration stands — an operator watching someone cross with a dead chip is a
     /// primary record — but the entry says the evidence is missing.
     DeclaredFinishedWithoutFinishRead,
+    /// The participant's only start-line detections came before the gun, so their start is
+    /// the gun (ADR-0028).
+    ///
+    /// Usually a runner standing on the mat when it went off, in which case their chip time
+    /// really is their gun time. When many entries carry it at once, the gun was probably
+    /// recorded late.
+    StartReadBeforeGun,
+    /// The participant's only finish-line detections came before the gun, so they are not a
+    /// finish (ADR-0028).
+    ///
+    /// Usually a warm-up through the finish arch. The detection is set aside rather than
+    /// discarded, and this flag is how the entry says so.
+    FinishReadBeforeGun,
 }
 
 impl ResultFlag {
@@ -250,6 +263,8 @@ impl ResultFlag {
             Self::NoGunTime => "no_gun_time",
             Self::FinishBeforeStart => "finish_before_start",
             Self::DeclaredFinishedWithoutFinishRead => "declared_finished_without_finish_read",
+            Self::StartReadBeforeGun => "start_read_before_gun",
+            Self::FinishReadBeforeGun => "finish_read_before_gun",
         }
     }
 }
