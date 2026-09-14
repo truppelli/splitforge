@@ -36,6 +36,7 @@ this?" two years from now, the ADR is the answer.
 | [0026](0026-a-reader-gap-is-two-rows.md) | A reader gap is two append-only rows, paired by sequence number | Accepted |
 | [0027](0027-a-reader-reports-connection-events-on-the-read-channel.md) | A reader reports connection events on the same channel as its reads | Accepted |
 | [0028](0028-the-gun-decides-which-crossings-count.md) | The gun decides which crossings count | Accepted |
+| [0030](0030-the-serial-adapter-waits-for-proof.md) | The serial adapter waits for proof before it acts | Accepted |
 
 ## Process
 

@@ -47,8 +47,9 @@ LLRP was never what made them true.
 
 **Open findings from the 2026-09-13 security review** are listed at the end, under
 [Security review](#security-review--2026-09-13). Five were marked to fix before a real event.
-The scoring one is fixed ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)),
-and four remain.
+The scoring one is fixed ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)), so
+is the reassembler ([ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md)), and three
+remain.
 
 ---
 
@@ -286,10 +287,11 @@ pair of facts rather than a contradiction.
       295 ms, Gen2, GPIO `0x0F`, and a 96-bit EPC — **consuming to the payload's last byte
       exactly**, which is the assertion that fails first if any width or order is wrong, and
       which is now checked on every frame rather than only in a test. Everything that frame
-      does not demonstrate is refused: a flag above `0x0100`, a layout whose option byte does
-      not set `0x10`, a record leaving bytes over. Each is a counted decode fault, so a wrong
-      assumption surfaces as no reads and a climbing error count rather than as a plausible,
-      wrong chip id in an append-only table. **Still unticked**: one M6e frame is not a stream
+      does not demonstrate is refused: an opcode other than `0x22` or a non-zero status, a flag
+      above `0x0100`, a layout whose option byte does not set `0x10`, a record leaving bytes
+      over. Each is a counted decode fault, so a wrong assumption surfaces as no reads and a
+      climbing error count on `/health` rather than as a plausible, wrong chip id in an
+      append-only table. **Still unticked**: one M6e frame is not a stream
       from an M7e-Pico, and *"believed when a capture agrees"* is a weaker claim than the one
       this box is for
 - [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
@@ -1268,7 +1270,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       *Fix:* retry I/O errors with bounded backoff, or exit non-zero so systemd restarts the
       service and startup recovery replays the sidecar. Quarantine and count a single
       unstorable read instead of letting it stop the read path.
-- [ ] **The reassembler emits a frame embedded in an incomplete frame's payload, and throws
+- [x] **The reassembler emits a frame embedded in an incomplete frame's payload, and throws
       away the real one.** *Reproduced.* A 20-byte `0x22` payload containing a valid 1-byte
       frame was fed in two chunks, split just after the embedded frame. The reassembler
       emitted the inner frame, and the outer read was discarded as 19 bytes of noise. When the
@@ -1281,6 +1283,17 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       opcode that would have stopped them (see *Fix soon*). *Fix:* when the header is plausible, wait for
       `need_at_least` bytes (at most 255) before looking inside it. Test every cut point of a
       frame with an embedded frame.
+      **Fixed by [ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md).** The reassembler
+      waits on an incomplete header instead of searching inside it. Waiting alone would hold a
+      read behind a false header until the next runner, and this module's receipt time is its
+      timestamp. So `Reassembler::flush` settles what is held when the line is quiet for a read
+      timeout or the connection ends, and a read can be late by at most one timeout.
+      `a_frame_inside_a_payload_is_not_emitted_at_any_cut` tries every cut, and byte at a time.
+      It fails against the unfixed code, which is unchanged in this crate since `b457991`, at
+      cut 17. One existing test changed. `an_illegal_length_byte_is_not_waited_on` used `0xFF`
+      as the illegal length, and that byte also starts a legal header, so the test's frame was
+      found only by the search this removes. It now uses 249, and a new test pins the `0xFF`
+      case as held and then released.
 - [ ] **`chronyc` probably cannot reach chronyd under the shipped unit, so every read would
       be recorded as `unsynced` permanently.** *Unverified.* A non-root user reaches chronyd
       either through `/run/chrony` or through UDP on `127.0.0.1:323`.
@@ -1294,13 +1307,18 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
 
 ### Fix soon
 
-- [ ] **The tag-report decoder ignores the frame's opcode and status.** *Reproduced.* The
+- [x] **The tag-report decoder ignores the frame's opcode and status.** *Reproduced.* The
       captured payload, re-framed as opcode `0x29` with status `0x0400`, decoded into one
       read with no fault. `StreamDecoder::decode` checks only the option and response-type
       bytes. That goes against the crate's rule that anything the capture does not show is
       refused, because the capture shows `0x22` with status `0x0000`. *Fix:* refuse anything
       else as a counted fault.
-- [ ] **The reconnect loop never backs off once a port has opened.** *Reproduced.* A port
+      **Fixed.** Both are checked before the payload is read, and each refusal is a counted
+      fault. `only_a_successful_0x22_response_is_a_tag_report` fails against the unfixed code.
+      A module that sends a non-zero status in an empty field would now show as decode faults
+      until the first tag, and [ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md)
+      leaves that for a capture to settle.
+- [x] **The reconnect loop never backs off once a port has opened.** *Reproduced.* A port
       whose `read` returns `Ok(0)` produced 29 connections and 28 disconnections in 2 s. Each
       one writes a row to the append-only `reader_gap_events` table, fsynced while holding
       the lock the read path appends through. `ThingMagicReader::run` resets `failures` on
@@ -1308,6 +1326,13 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       device node, a loose USB cable, and the exact unverified branch M3a names: what an idle
       `/dev/ttyUSB0` read returns. *Fix:* reset the backoff only after the port has stayed up
       or produced a valid frame, and merge rapid flaps into a single gap.
+      **Fixed by [ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md)**, which also
+      changes when `Connected` is sent. A connection is announced, and the backoff reset, only
+      at its first verified frame or once it has stayed up for `Backoff::max`. One that ends
+      before either is part of the outage it followed, so a run of flaps is one gap. The cost
+      is that a quiet module is reported connected up to 5 s late. Two tests fail against the
+      unfixed code: a port that ends at once must never be announced, and a flapping port may
+      open at most six times in 400 ms, where the old loop opened 27.
 - [ ] **A torn sidecar tail swallows the next acknowledged read's backup copy.**
       *Reproduced.* After a simulated power cut left half a line, the next append was glued
       onto it. `survey` then reported `corrupt_lines: 1, missing_from_sidecar: 1`. Power loss
@@ -1327,12 +1352,21 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       restores cleanly, and migrations do not run again. No connection sets
       `PRAGMA trusted_schema=OFF`. *Fix:* compare `sqlite_master` with the schema the
       migrations produce, in `restore` and in `doctor`, and turn off trusted schema.
-- [ ] **Framing and decode fault counts never leave the provider thread.** *From code.*
+- [x] **Framing and decode fault counts never leave the provider thread.** *From code.*
       `Reassembler::stats()` and `StreamDecoder::errors()` are read only in tests, and a
       single `eprintln!` reports the first fault. So M3a's claim that a wrong assumption shows
       up as *"no reads and a climbing error count"* is not visible to an operator. *Fix:* carry
       both counts into `ReaderHealth`, and degrade health when faults climb while reads do
       not.
+      **Fixed by [ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md).**
+      `ReaderEvent::Faults` carries both totals to the edge, and `/health` reports them as
+      `framing_faults` and `decode_faults`. The degradation rule is narrower than the fix
+      above. Health degrades while there are decode faults and no read has decoded. Framing
+      faults never degrade it, because a connection that opens mid-frame costs one. Refusals
+      after the first decoded read are counted and do not degrade it either, or a frame type
+      nobody has captured yet, arriving between runners, would flip health all day. The tests
+      use types that did not exist at `b457991`, so there is nothing for them to fail against
+      there.
 - [ ] **`serve_on_socket` deletes whatever file is at the socket path.** *Reproduced.* A
       regular file named `event.db` at the socket path was deleted before the bind. A
       `--socket` typo in a drop-in could delete the event database. *Fix:* remove the path

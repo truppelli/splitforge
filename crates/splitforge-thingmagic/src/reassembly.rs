@@ -8,7 +8,7 @@
 //! what lets the connection lifecycle above it be tested against a fake port
 //! ([`crate::provider`]).
 //!
-//! # Two properties this has to hold
+//! # Three properties this has to hold
 //!
 //! **It always makes progress.** Every path either consumes bytes or asks for more, and no
 //! input can leave the cursor where it was. A reassembler that can stall is one that stops
@@ -17,6 +17,14 @@
 //! **It cannot grow without bound.** A frame is at most [`frame::MAX_FRAME_LEN`] bytes, so a
 //! buffer that is waiting on one never needs to hold more than that. Garbage does not
 //! accumulate, because a byte that cannot begin a frame is dropped rather than kept.
+//!
+//! **It never looks inside a frame it is waiting for.** A header with a legal length and too
+//! few bytes behind it is either the start of a real frame or a `0xFF` that happened to be
+//! followed by a small number. Nothing already in the buffer can tell those apart. Even a
+//! CRC-verified frame found inside the waiting one proves nothing, because it lies entirely
+//! within the bytes the waiting frame claims, so it could be that frame's payload. A tag's EPC
+//! is written by whoever wrote the tag, so that payload can be built on purpose. Only more
+//! bytes settle it, or the certainty that no more are coming, which is [`Reassembler::flush`].
 
 use crate::frame::{self, Decoded, FrameError, MAX_FRAME_LEN, Response};
 
@@ -37,6 +45,11 @@ pub struct Stats {
     pub bad_crc: u64,
     /// Length bytes above what a response may declare.
     pub data_too_long: u64,
+    /// Partial frames given up on because nothing more was coming for them.
+    ///
+    /// A connection that ends partway through a frame leaves one of these, and so does a
+    /// `0xFF` in noise that happened to be followed by a legal length.
+    pub abandoned: u64,
     /// Bytes thrown away while looking for the next plausible frame start.
     pub discarded_bytes: u64,
 }
@@ -45,8 +58,17 @@ impl Stats {
     /// Every error, however it presented.
     #[must_use]
     pub const fn errors(&self) -> u64 {
-        self.not_synchronized + self.bad_crc + self.data_too_long
+        self.not_synchronized + self.bad_crc + self.data_too_long + self.abandoned
     }
+}
+
+/// What to do with a candidate frame that has a legal length and too few bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Incomplete {
+    /// Hold it, and everything behind it, until more bytes arrive.
+    Wait,
+    /// Nothing more is coming, so it was never a frame.
+    GiveUp,
 }
 
 /// Holds partial frames between reads, and hands over whole ones.
@@ -92,26 +114,47 @@ impl Reassembler {
         F: FnMut(&Response<'_>),
     {
         self.buffer.extend_from_slice(bytes);
+        self.scan(&mut on_frame, Incomplete::Wait);
+    }
 
+    /// Settles everything held, because nothing more is coming for it.
+    ///
+    /// Call it when the line has been quiet for a whole read timeout, and when the connection
+    /// ends. A frame in flight does not pause. Its bytes follow one another at the line rate,
+    /// about a millisecond apart even at the module's slowest 9 600 baud, and a read timeout is
+    /// hundreds of milliseconds with no byte at all. So a partial frame that sat through one is
+    /// not waiting for the rest of itself. Whole frames found behind it are handed over, and
+    /// the buffer is empty afterwards.
+    ///
+    /// **This is what bounds the cost of waiting.** A false header claiming 200 bytes holds the
+    /// real frames behind it until 200 bytes have arrived, which in a burst is milliseconds. If
+    /// the burst ends first, those frames would otherwise sit in the buffer until the next
+    /// runner. Their receipt time is the authoritative timestamp for this module, so holding
+    /// them that long records them late. With this, the most they can be held is one read
+    /// timeout.
+    ///
+    /// **What it cannot tell apart**, and the choice made about it. A partial frame given up
+    /// on here is either a false header or a real frame that was cut off. If it was cut off
+    /// just after a frame embedded in its payload, that embedded frame is handed over. Holding
+    /// it back instead would lose every real frame behind every false header. The embedded
+    /// case needs a crafted EPC and a cut at that exact byte, and nobody can time a pulled
+    /// cable to a byte that lasts 87 µs. A real frame corrupted in transit has always been
+    /// scanned the same way, because a bad CRC is also a frame that turned out not to be one.
+    pub fn flush<F>(&mut self, mut on_frame: F)
+    where
+        F: FnMut(&Response<'_>),
+    {
+        self.scan(&mut on_frame, Incomplete::GiveUp);
+    }
+
+    fn scan<F>(&mut self, on_frame: &mut F, incomplete: Incomplete)
+    where
+        F: FnMut(&Response<'_>),
+    {
         // Counters are accumulated locally and written back at the end. A decoded frame
         // borrows `self.buffer`, so `self.stats` cannot be touched while one is alive.
         let mut cursor = 0_usize;
         let mut stats = Stats::default();
-
-        // Where to fall back to if nothing better turns up.
-        //
-        // `Incomplete` means two different things depending on how the cursor arrived. At a
-        // boundary reached by consuming whole frames it means exactly what it says: the rest
-        // of this frame has not been read yet, and waiting is correct. At a position reached
-        // by *resynchronizing* it is a guess — and a guess that waits is how one corrupt
-        // header swallows every frame behind it, because the bytes that would prove it wrong
-        // are the ones sitting unread behind the guess.
-        //
-        // So an incomplete candidate is remembered rather than waited on, and the scan goes
-        // on to the next one. If a later candidate turns out to be a real CRC-verified frame,
-        // the guess was wrong and its bytes were never a frame. If none does, the cursor
-        // comes back here and the bytes are held after all.
-        let mut held: Option<usize> = None;
 
         loop {
             let remaining = &self.buffer[cursor..];
@@ -121,55 +164,34 @@ impl Reassembler {
 
             match frame::decode(remaining) {
                 Ok(Decoded::Frame { response, consumed }) => {
-                    // A frame that passed its CRC settles everything skipped to reach it:
-                    // whatever those bytes looked like, they were not a frame.
-                    if let Some(start) = held.take() {
-                        stats.discarded_bytes += (cursor - start) as u64;
-                    }
                     stats.frames += 1;
                     on_frame(&response);
                     cursor += consumed;
+                    continue;
                 }
-                Ok(Decoded::Incomplete { .. }) => {
-                    // The *first* incomplete candidate is the one worth keeping: it is the
-                    // earliest place the rest of a frame could still arrive for.
-                    let start = *held.get_or_insert(cursor);
-                    match frame::resynchronize(remaining) {
-                        Some(skip) => cursor += skip,
-                        None => {
-                            cursor = start;
-                            break;
-                        }
-                    }
-                }
-                Err(error) => {
-                    match error {
-                        FrameError::NotSynchronized { .. } => stats.not_synchronized += 1,
-                        FrameError::BadCrc { .. } => stats.bad_crc += 1,
-                        FrameError::DataTooLong { .. } => stats.data_too_long += 1,
-                    }
-
-                    // Progress is guaranteed here, and that is the whole reason this is a
-                    // separate step rather than `cursor += 1`. `resynchronize` skips index
-                    // zero, so it returns an offset of at least one or nothing at all, and
-                    // nothing at all means the rest of the buffer holds no candidate and
-                    // can go.
-                    let skip = frame::resynchronize(remaining).unwrap_or(remaining.len());
-                    // Only bytes the cursor actually leaves behind are discarded. While a
-                    // candidate is held these may yet be retained, so they are counted when
-                    // a frame proves them dead rather than optimistically here.
-                    if held.is_none() {
-                        stats.discarded_bytes += skip as u64;
-                    }
-                    cursor += skip;
-                }
+                // `decode` has already refused a length no response may declare, so what is
+                // waited on here is at most `MAX_FRAME_LEN` bytes away from settling.
+                Ok(Decoded::Incomplete { .. }) => match incomplete {
+                    Incomplete::Wait => break,
+                    Incomplete::GiveUp => stats.abandoned += 1,
+                },
+                Err(error) => match error {
+                    FrameError::NotSynchronized { .. } => stats.not_synchronized += 1,
+                    FrameError::BadCrc { .. } => stats.bad_crc += 1,
+                    FrameError::DataTooLong { .. } => stats.data_too_long += 1,
+                },
             }
-        }
 
-        // A scan that ran off the end with a candidate still outstanding keeps it, which is
-        // the property that makes a frame split across two reads survive the split.
-        if let Some(start) = held {
-            cursor = cursor.min(start);
+            // Progress is guaranteed here, and that is the whole reason this is a separate
+            // step rather than `cursor += 1`. `resynchronize` skips index zero, so it returns
+            // an offset of at least one or nothing at all, and nothing at all means the rest
+            // of the buffer holds no candidate and can go.
+            //
+            // A header that turned out false is left one byte at a time, so a real frame that
+            // starts inside the bytes it claimed is still found.
+            let skip = frame::resynchronize(remaining).unwrap_or(remaining.len());
+            stats.discarded_bytes += skip as u64;
+            cursor += skip;
         }
 
         self.buffer.drain(..cursor);
@@ -177,6 +199,7 @@ impl Reassembler {
         self.stats.not_synchronized += stats.not_synchronized;
         self.stats.bad_crc += stats.bad_crc;
         self.stats.data_too_long += stats.data_too_long;
+        self.stats.abandoned += stats.abandoned;
         self.stats.discarded_bytes += stats.discarded_bytes;
     }
 
@@ -292,9 +315,9 @@ mod tests {
 
     #[test]
     fn an_illegal_length_byte_is_not_waited_on() {
-        // 0xFF cannot be a response's data length, so this is not a frame that might yet
+        // 249 is one more than a response may declare, so this is not a frame that might yet
         // complete — it is one that never will. Holding it would stall the stream.
-        let mut stream = vec![SOH, 0xFF, 0x22, 0x00, 0x00];
+        let mut stream = vec![SOH, 249, 0x22, 0x00, 0x00];
         stream.extend(response(0x07, &[0x01]));
 
         let mut reassembler = Reassembler::new();
@@ -303,10 +326,131 @@ mod tests {
     }
 
     #[test]
+    fn a_length_of_0xff_is_refused_and_is_also_the_start_of_another_header() {
+        // What the test above used to assert, with 0xFF as the illegal length. The length is
+        // still refused at once. But the refused byte is itself a SOH, and followed by 0x22 it
+        // is a legal header claiming 41 bytes. That is a candidate like any other, so the frame
+        // behind it waits. The old reassembler found the frame by looking inside the candidate,
+        // which is the behavior the 2026-09-13 review found unsafe.
+        let mut stream = vec![SOH, 0xFF, 0x22, 0x00, 0x00];
+        stream.extend(response(0x07, &[0x01]));
+
+        let mut reassembler = Reassembler::new();
+        assert!(feed(&mut reassembler, &stream).is_empty());
+        assert_eq!(reassembler.stats().data_too_long, 1);
+
+        let mut seen = Vec::new();
+        reassembler.flush(|response| seen.push(response.opcode));
+        assert_eq!(seen, vec![0x07], "held, not lost");
+    }
+
+    #[test]
     fn a_payload_full_of_start_bytes_is_not_mistaken_for_frames() {
         let bytes = response(0x22, &[SOH; 32]);
         let mut reassembler = Reassembler::new();
         assert_eq!(feed(&mut reassembler, &bytes), vec![0x22]);
+        assert_eq!(reassembler.stats().errors(), 0);
+    }
+
+    /// A 0x22 response whose payload carries a whole, valid 0x29 frame.
+    ///
+    /// The bytes of the inner frame are chosen by whoever wrote the tag's EPC, which is what
+    /// makes this a case to test rather than a coincidence to hope against.
+    fn a_frame_with_a_frame_inside() -> Vec<u8> {
+        let inner = response(0x29, &[0x5A]);
+        let mut payload = vec![0x00; 20];
+        payload[4..4 + inner.len()].copy_from_slice(&inner);
+        response(0x22, &payload)
+    }
+
+    #[test]
+    fn a_frame_inside_a_payload_is_not_emitted_at_any_cut() {
+        // The 2026-09-13 review's reproduction, at every cut rather than the one it found. A
+        // whole frame arriving in one feed was already covered by
+        // `a_payload_full_of_start_bytes_is_not_mistaken_for_frames`; a serial port delivers
+        // partial buffers as the ordinary case, and a cut just after the inner frame used to
+        // emit it and throw the real one away as noise.
+        let outer = a_frame_with_a_frame_inside();
+
+        for cut in 1..outer.len() {
+            let mut reassembler = Reassembler::new();
+            let mut seen = feed(&mut reassembler, &outer[..cut]);
+            seen.extend(feed(&mut reassembler, &outer[cut..]));
+            assert_eq!(seen, vec![0x22], "cut at {cut}");
+            assert_eq!(reassembler.pending(), 0, "cut at {cut}");
+        }
+
+        let mut reassembler = Reassembler::new();
+        let mut seen = Vec::new();
+        for byte in &outer {
+            seen.extend(feed(&mut reassembler, std::slice::from_ref(byte)));
+        }
+        assert_eq!(seen, vec![0x22], "byte at a time");
+    }
+
+    /// `SOH` and a legal length of 200, followed by far fewer than 200 bytes.
+    fn a_false_header() -> Vec<u8> {
+        vec![SOH, 200]
+    }
+
+    #[test]
+    fn a_false_header_holds_the_frames_behind_it_until_its_length_has_arrived() {
+        // The cost of not looking inside a waiting frame, and the proof that it is a delay
+        // rather than a loss. The header claims 207 bytes; once that many are in, its CRC fails
+        // and the real frames it was holding come out, in order.
+        let mut stream = a_false_header();
+        stream.extend(response(0x01, &[0x11]));
+
+        let mut reassembler = Reassembler::new();
+        assert!(feed(&mut reassembler, &stream).is_empty());
+        assert_eq!(reassembler.pending(), stream.len());
+
+        let rest = response(0x02, &[0x22; 200]);
+        assert_eq!(feed(&mut reassembler, &rest), vec![0x01, 0x02]);
+        assert_eq!(reassembler.pending(), 0);
+        assert_eq!(reassembler.stats().bad_crc, 1);
+    }
+
+    #[test]
+    fn flushing_releases_the_frames_a_false_header_was_holding() {
+        // The burst ended before the header's 207 bytes arrived. Without a flush these two
+        // frames would wait for the next runner and be recorded when that runner crossed.
+        let mut stream = a_false_header();
+        stream.extend(response(0x01, &[0x11]));
+        stream.extend(response(0x02, &[0x22]));
+
+        let mut reassembler = Reassembler::new();
+        assert!(feed(&mut reassembler, &stream).is_empty());
+
+        let mut seen = Vec::new();
+        reassembler.flush(|response| seen.push(response.opcode));
+        assert_eq!(seen, vec![0x01, 0x02]);
+        assert_eq!(reassembler.pending(), 0);
+        assert_eq!(reassembler.stats().abandoned, 1);
+    }
+
+    #[test]
+    fn flushing_a_real_partial_frame_gives_it_up_and_invents_nothing() {
+        // What a connection that ends mid-frame leaves: the bytes are counted and dropped, and
+        // the buffer a reconnection starts from is empty.
+        let outer = a_frame_with_a_frame_inside();
+        let mut reassembler = Reassembler::new();
+        assert!(feed(&mut reassembler, &outer[..4]).is_empty());
+
+        let mut seen = Vec::new();
+        reassembler.flush(|response| seen.push(response.opcode));
+        assert!(seen.is_empty(), "four bytes hold no whole frame: {seen:?}");
+        assert_eq!(reassembler.pending(), 0);
+        assert_eq!(reassembler.stats().abandoned, 1);
+        assert_eq!(reassembler.stats().frames, 0);
+    }
+
+    #[test]
+    fn flushing_after_a_whole_frame_changes_nothing() {
+        let mut reassembler = Reassembler::new();
+        assert_eq!(feed(&mut reassembler, &response(0x22, &[1, 2])), vec![0x22]);
+
+        reassembler.flush(|_| panic!("nothing is held, so nothing can come out"));
         assert_eq!(reassembler.stats().errors(), 0);
     }
 
