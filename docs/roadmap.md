@@ -45,6 +45,10 @@ nine, verbatim, and M5 depends on M3b. M3a informs M5's open measurements withou
 its exit criterion, because a real stream of real reads is what those measurements needed and
 LLRP was never what made them true.
 
+**Open findings from the 2026-09-13 security review** are listed at the end, under
+[Security review](#security-review--2026-09-13). Five of them should be fixed before a real
+event.
+
 ---
 
 ## Milestone 0 — Project charter
@@ -1172,6 +1176,194 @@ that ignores unknown fields keeps working.
 
 **Exit criterion:** an event times identically, and produces byte-identical exports, with
 integrations enabled and disabled.
+
+---
+
+## Security review — 2026-09-13
+
+A review of `main` at `b457991` against [SECURITY.md](../SECURITY.md)'s scope and the
+[threat model](threat-model.md). Each item says how it was established, because this roadmap
+treats that as part of the claim:
+
+- **Reproduced**: a throwaway test ran against a scratch copy of `b457991` in the CI
+  container and showed the behavior. None of those tests are committed. Each fix should land
+  with its own.
+- **From code**: read and traced, not executed.
+- **Unverified**: probably right, but it depends on a real system nobody here has run it on.
+
+A box is ticked when the fix is merged **and** its test fails on `b457991`.
+
+### Fix before a real event
+
+- [ ] **Scoring takes each runner's earliest crossing of a mat, including crossings before
+      the gun, so a warm-up can silently change a chip time.** *Reproduced*, against
+      `splitforge_results::score`. A runner who walked over the start mat 15 minutes early,
+      crossed it again 5 s after the gun, and finished at 20:00 was scored a chip time of
+      **35:00**, with no flag, and still placed. A runner who warmed up through the finish
+      arch 10 minutes before the gun got `finish_before_start`, no time, and no place. Their
+      real 20:00 finish was never considered. The timing model promises *"first valid finish
+      per participant"*, and ADR-0017 covers a finish that precedes its start, but neither
+      says which crossing counts when there is also a valid one later. The code picks the
+      earliest one per checkpoint with no lower bound, and a default chip assignment is valid
+      from 24 hours before the scheduled start, so warm-up reads are credited. This needs no
+      attacker, only a start mat near the warm-up area. *Fix:* decide which crossing counts
+      (for example, the last start crossing before the runner's own finish, and the first
+      finish after the gun or after that start) and record the decision in an ADR beside
+      ADR-0017. Where there was more than one candidate crossing, flag the result.
+- [ ] **The sidecar is a write path into the append-only journal, and it is guarded less
+      than the database.** *Reproduced.* A hand-written `SFJ1` line with a new id and chip
+      `FORGED` was replayed into `raw_reads` by `SqliteJournal::open_recovering`, which is
+      what `splitforge-edge` runs on every start. The per-line SHA-256 is unkeyed, so it
+      catches corruption and not tampering. `UMask=0007` makes the sidecar `0660`, so anyone in
+      the `splitforge` group can append to it. [deployment.md](deployment.md#who-can-do-what)
+      and `deploy/splitforge.sysusers.conf` describe that group as granting only the health
+      endpoint. It also grants read access to the whole roster (`event.db` is `0640`) and,
+      through replay, write access to evidence. `recorded_at` comes from the line, so a forged
+      read can be backdated. Replay is reported only on stderr, and nothing reaches
+      `audit_log`. *Fix:* create the sidecar `0640` (`OpenOptionsExt::mode`), write an audit
+      row for every replay with its count and id range, and correct both documents about
+      what the group grants.
+- [ ] **One failed append stops recording for the rest of the process's life, and the
+      process stays up, so `Restart=always` never fires.** *From code.*
+      `read_into_journal` in `apps/splitforge-edge/src/main.rs` returns on the first
+      `append` error. Health goes to 503, but every read the module streams after that is
+      dropped, and the module has no flow control to hold them. Triggers: a transient `ENOSPC`
+      or `EIO` on the SD card, `SQLITE_BUSY` lasting longer than the 5 s busy timeout, or at
+      M3b a single value the schema cannot store (an LLRP `Uptime` ≥ 2⁶³ fails `u64_to_i64`).
+      *Fix:* retry I/O errors with bounded backoff, or exit non-zero so systemd restarts the
+      service and startup recovery replays the sidecar. Quarantine and count a single
+      unstorable read instead of letting it stop the read path.
+- [ ] **The reassembler emits a frame embedded in an incomplete frame's payload, and throws
+      away the real one.** *Reproduced.* A 20-byte `0x22` payload containing a valid 1-byte
+      frame was fed in two chunks, split just after the embedded frame. The reassembler
+      emitted the inner frame, and the outer read was discarded as 19 bytes of noise. When the
+      whole outer frame arrives in one feed it decodes correctly, and that is the only case
+      the existing *"a payload that is itself a complete, valid frame"* test covers. On a
+      serial port, partial buffers are the normal case. The `Incomplete` branch of
+      `Reassembler::feed` scans ahead inside a header it has already accepted. Honest traffic
+      hits this about once per 2¹⁶ `0xFF` bytes that straddle a read boundary. An attacker who
+      writes a tag's EPC can place the bytes deliberately, and the decoder does not check the
+      opcode that would have stopped them (see *Fix soon*). *Fix:* when the header is plausible, wait for
+      `need_at_least` bytes (at most 255) before looking inside it. Test every cut point of a
+      frame with an embedded frame.
+- [ ] **`chronyc` probably cannot reach chronyd under the shipped unit, so every read would
+      be recorded as `unsynced` permanently.** *Unverified.* A non-root user reaches chronyd
+      either through `/run/chrony` or through UDP on `127.0.0.1:323`.
+      `ProtectSystem=strict` makes `/run/chrony` read-only, so chronyc cannot create its
+      reply socket there. `RestrictAddressFamilies=AF_UNIX` blocks the UDP fallback. The
+      result would be `daemon_unreachable`, and `state_for_evidence` maps that to `Unsynced`
+      on every journaled read, including on a GPS-locked Pi. The M5 observation used a stub
+      daemon, so it could not have caught this. Startup also awaits this subprocess, with no
+      timeout, before the reader is composed. *Check first:*
+      `sudo systemd-run --wait --pipe -p User=splitforge -p RestrictAddressFamilies=AF_UNIX -p ProtectSystem=strict chronyc -c tracking`.
+
+### Fix soon
+
+- [ ] **The tag-report decoder ignores the frame's opcode and status.** *Reproduced.* The
+      captured payload, re-framed as opcode `0x29` with status `0x0400`, decoded into one
+      read with no fault. `StreamDecoder::decode` checks only the option and response-type
+      bytes. That goes against the crate's rule that anything the capture does not show is
+      refused, because the capture shows `0x22` with status `0x0000`. *Fix:* refuse anything
+      else as a counted fault.
+- [ ] **The reconnect loop never backs off once a port has opened.** *Reproduced.* A port
+      whose `read` returns `Ok(0)` produced 29 connections and 28 disconnections in 2 s. Each
+      one writes a row to the append-only `reader_gap_events` table, fsynced while holding
+      the lock the read path appends through. `ThingMagicReader::run` resets `failures` on
+      every successful `open`, so the delay stays at 50–100 ms. The triggers include a wrong
+      device node, a loose USB cable, and the exact unverified branch M3a names: what an idle
+      `/dev/ttyUSB0` read returns. *Fix:* reset the backoff only after the port has stayed up
+      or produced a valid frame, and merge rapid flaps into a single gap.
+- [ ] **A torn sidecar tail swallows the next acknowledged read's backup copy.**
+      *Reproduced.* After a simulated power cut left half a line, the next append was glued
+      onto it. `survey` then reported `corrupt_lines: 1, missing_from_sidecar: 1`. Power loss
+      mid-write is O1, the most likely failure in the register. After every such power cut,
+      the first read recorded has only one copy until the next restart backfills it, and
+      `doctor` keeps reporting the corrupt line. *Fix:* in `Sidecar::open`, append a newline
+      if the file does not end in one.
+- [ ] **CSV exports do not neutralize spreadsheet formulas.** *From code.* `results_csv` and
+      the crossings export write names as given, and names come from public registration.
+      The results CSV is built to be opened in Excel (see Milestone 6), so a runner registered
+      as `=HYPERLINK(…)` becomes a live formula on the organizer's machine. *Fix:* prefix
+      cells that start with `=` `+` `-` `@`, tab, or carriage return. That changes values in a
+      stable contract, so decide it under `RESULTS_VERSION`'s rules.
+- [ ] **`backup restore` trusts the snapshot's schema.** *From code.* `verify` checks
+      `integrity_check` and the maximum migration version and nothing else. A snapshot whose
+      `*_no_update` or `*_no_delete` triggers were dropped, or that adds triggers of its own,
+      restores cleanly, and migrations do not run again. No connection sets
+      `PRAGMA trusted_schema=OFF`. *Fix:* compare `sqlite_master` with the schema the
+      migrations produce, in `restore` and in `doctor`, and turn off trusted schema.
+- [ ] **Framing and decode fault counts never leave the provider thread.** *From code.*
+      `Reassembler::stats()` and `StreamDecoder::errors()` are read only in tests, and a
+      single `eprintln!` reports the first fault. So M3a's claim that a wrong assumption shows
+      up as *"no reads and a climbing error count"* is not visible to an operator. *Fix:* carry
+      both counts into `ReaderHealth`, and degrade health when faults climb while reads do
+      not.
+- [ ] **`serve_on_socket` deletes whatever file is at the socket path.** *Reproduced.* A
+      regular file named `event.db` at the socket path was deleted before the bind. A
+      `--socket` typo in a drop-in could delete the event database. *Fix:* remove the path
+      only if it is a socket, and refuse to start otherwise.
+- [ ] **Audit attribution is whatever `--actor` says.** *From code.* It defaults to
+      `operator`, and since the CLI runs as `sudo -u splitforge`, no OS identity is recorded.
+      [Threat model § 5](threat-model.md#5-design-decisions-that-follow-from-this-model)
+      relies on detecting insider fabrication afterward, and that detection depends on
+      attribution. *Fix:* record `SUDO_USER` and the uid beside the claimed actor.
+- [ ] **A manual finish replaces a chip finish, and nothing in the published result says
+      so.** *Reproduced.* Scoring the same runner with a chip finish at 20:00 alone, then with
+      a manual entry at 18:20 added, gave identical rows apart from the time. Both had
+      place 1 and no flags. `score` chooses the earliest event regardless of
+      `TimingEventOrigin`. `ResultEntry` keeps only the event ids, and no export column or
+      `ResultFlag` shows where a time came from. The audit trail records the `manual add`,
+      but a CSV reader or a `results diff` cannot see that a published time was typed in.
+      `manual add --reason ""` is also accepted (from code), even though `results declare`
+      refuses an empty reason and the CLI help calls it *"Required"*. *Fix:* add a
+      `manual_start`/`manual_finish` flag. Flag it more strongly when a manual entry beats a
+      chip crossing at the same checkpoint. Refuse a blank reason the way `declare` does.
+- [ ] **The CI advisory gate audits a different lockfile from the one that ships.** *From
+      code.* `cargo generate-lockfile` in `.github/workflows/ci.yml` re-resolves every
+      dependency before `cargo audit` runs. A vulnerable version pinned in the committed
+      `Cargo.lock` passes if a semver-compatible fix exists, which is exactly the case the gate
+      exists to catch. *Fix:* delete that step, and add `--locked` to the build, test, and
+      clippy gates.
+
+### Hygiene
+
+- [ ] **Health runs blocking SQLite on an async worker, under the lock the read path writes
+      through.** *From code, not measured.* Every request runs `COUNT(*)` over `raw_reads`
+      while holding `stores`. S10 says the read path does not go through the API, and that
+      is true, but they share a mutex. *Fix:* use `spawn_blocking`, keep the read count
+      cheaply (for example as `MAX(seq)`), and give health its own read-only connection.
+- [ ] **Recovery, `doctor`, and the bundle load the whole journal into memory.** *From code.*
+      `Sidecar::scan` reads the entire file, `compare` builds a set of every id, and
+      `doctor` and `bundle` call `read_all`. On a 1 GB Pi, an out-of-memory crash during
+      startup recovery would become a `Restart=always` crash loop that records nothing.
+      *Fix:* stream these reads, and measure them with the full-day journal M3a is meant to
+      produce.
+- [ ] **The edge, API, and CLI crates do not deny `unwrap` and `expect`.** *From code.* There
+      are no violations today, but `splitforge-edge` is the binary CONTRIBUTING's *"no
+      `unwrap`/`expect` on any path reachable during an event"* rule matters most for.
+- [ ] **`backup create` builds `VACUUM INTO '<path>'` by escaping a string.** *From code.* A
+      non-UTF-8 path goes through `to_string_lossy`, so the snapshot is written under a
+      different name, and the requested path is then opened as an empty database. *Fix:* bind
+      the path as a parameter (`VACUUM INTO ?1`).
+- [ ] **Supply-chain pins.** *From code.* Third-party Actions are referenced by mutable tag,
+      and the workflow sets no `permissions:`. `docker/Dockerfile` pipes the cargo-binstall
+      install script from its `main` branch into bash, and installs unpinned `cargo-deny` and
+      `cargo-audit` on a floating `rust:1` base. *Fix:* pin Actions by SHA and tools by
+      version, and set `permissions: contents: read`.
+- [ ] **Stale text tells an operator the wrong thing.** *From code.* When started with
+      `--serial`, the edge still logs *"it has no tag-report decoder, so it will record
+      connection gaps and no reads"*, but `StreamDecoder` is composed. M3a's *Compose the
+      module* bullet above still names `UndecodedReports`. [deployment.md](deployment.md#operating)
+      still says the service *"does not write to the journal at all"*.
+
+**Checked and held**, so nobody repeats the work: every SQL statement except the `VACUUM
+INTO` above binds its parameters. There is no `unsafe`. Frame length is bounded by the wire
+format. `Cursor::take` in the tag decoder cannot index out of bounds. The API binds no port.
+The bundle's allowlisted checks interpolate only counts, race names, and reader ids.
+`manual add` and `results declare` look up the bib and checkpoint inside the selected race
+and cannot credit another race's participant. The CLI's
+world-readable umask is already recorded as a known gap in
+[deployment.md](deployment.md#who-can-do-what), so it is not repeated here.
 
 ---
 
