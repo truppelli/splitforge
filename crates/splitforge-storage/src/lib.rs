@@ -81,6 +81,14 @@ pub enum StorageError {
     #[error("sidecar journal: {0}")]
     Sidecar(String),
 
+    /// A read holds a value the schema cannot represent, such as an integer above `i64::MAX`.
+    ///
+    /// Checked before the sidecar is written, so a read refused this way is in neither file.
+    /// Writing it to the sidecar first would leave a line that every later recovery fails to
+    /// replay.
+    #[error("the read cannot be stored: {0}")]
+    Unstorable(String),
+
     /// The database was created by a newer build than this one.
     #[error("database schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew {
@@ -95,6 +103,7 @@ impl From<StorageError> for splitforge_domain::JournalError {
     fn from(error: StorageError) -> Self {
         match error {
             StorageError::Decode(message) => Self::Corrupt(message),
+            StorageError::Unstorable(message) => Self::Unstorable(message),
             StorageError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(ref message)))
                 if message.contains("append-only") =>
             {

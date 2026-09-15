@@ -947,13 +947,7 @@ impl ConfigStore {
         subject: Option<&str>,
         detail: Option<&str>,
     ) -> Result<(), StorageError> {
-        let now = to_micros(OffsetDateTime::now_utc())?;
-        self.conn.execute(
-            "INSERT INTO audit_log (at_us, actor, action, subject, detail_json, recorded_at_us)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![now, actor, action, subject, detail, now],
-        )?;
-        Ok(())
+        crate::connection::insert_audit(&self.conn, actor, action, subject, detail)
     }
 
     /// The audit trail, newest first.

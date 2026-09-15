@@ -382,7 +382,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let config = load_config(&store, race.race.as_deref())?;
             // The writing path, so recovery runs here. A mechanism exercised only during a
             // disaster is a mechanism whose first real execution is during a disaster.
-            let (mut journal, recovery) = SqliteJournal::open_recovering(&database)
+            let (mut journal, recovery) = SqliteJournal::open_recovering(&database, &actor)
                 .with_context(|| format!("opening journal at {}", database.display()))?;
             if recovery.repaired_anything() {
                 emit(&operate::RecoveryView::of(&recovery), format)?;
@@ -543,7 +543,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             .with_context(|| format!("opening journal at {}", database.display()))?;
 
-            let recovery = journal.reconcile()?;
+            let recovery = journal.reconcile(&actor)?;
             let mut store = open_store(&database)?;
             store.record_audit(
                 &actor,

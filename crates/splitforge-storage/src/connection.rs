@@ -120,6 +120,27 @@ fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Appends one row to the audit trail on `conn`.
+///
+/// Shared by both connection holders, and taking a plain connection so a [`rusqlite::Transaction`]
+/// can pass itself. That is what lets the journal write its audit row inside the transaction
+/// the audited change is in, so neither can land without the other.
+pub(crate) fn insert_audit(
+    conn: &Connection,
+    actor: &str,
+    action: &str,
+    subject: Option<&str>,
+    detail: Option<&str>,
+) -> Result<(), StorageError> {
+    let now = to_micros(OffsetDateTime::now_utc())?;
+    conn.execute(
+        "INSERT INTO audit_log (at_us, actor, action, subject, detail_json, recorded_at_us)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![now, actor, action, subject, detail, now],
+    )?;
+    Ok(())
+}
+
 /// Microseconds since the Unix epoch. Integers sort correctly, survive round-tripping
 /// exactly, and match LLRP's native resolution.
 pub(crate) fn to_micros(value: OffsetDateTime) -> Result<i64, StorageError> {

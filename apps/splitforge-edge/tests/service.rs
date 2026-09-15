@@ -51,7 +51,7 @@ async fn simulate(database: &Path) {
     let config = store.load(race.id).expect("load the race configuration");
 
     let (mut journal, _recovery) =
-        SqliteJournal::open_recovering(database).expect("open the journal");
+        SqliteJournal::open_recovering(database, "test").expect("open the journal");
     let report =
         splitforge_cli::into_journal(&config, FIXTURE, &mut journal, SEED, Speed::Immediate)
             .await

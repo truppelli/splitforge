@@ -938,6 +938,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rusqlite",
  "serde_json",
  "splitforge-api",
  "splitforge-cli",

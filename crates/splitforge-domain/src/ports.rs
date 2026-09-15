@@ -24,6 +24,13 @@ pub enum JournalError {
     /// A stored row could not be decoded back into a [`RawRead`].
     #[error("stored read could not be decoded: {0}")]
     Corrupt(String),
+    /// The read holds a value this journal cannot represent.
+    ///
+    /// Refused before anything is written, so no copy of it exists anywhere in the journal.
+    /// Unlike [`Self::Backend`], retrying cannot succeed: the same read will be refused the
+    /// same way every time.
+    #[error("the read cannot be stored: {0}")]
+    Unstorable(String),
 }
 
 /// Append-only storage for raw reads.

@@ -71,11 +71,13 @@ Environment=RUST_BACKTRACE=1
 # raw read in plain text (ADR-0018). StateDirectoryMode=0750 stops a stranger *listing* the
 # directory; this stops them reading a file whose path they guessed.
 #
-# What it produces, measured rather than assumed: the sidecar 0660, and the database, WAL,
-# and shared-memory files 0640 — SQLite asks the kernel for 0644 and a umask can only take
-# bits away, never add group-write. So the group can read the event but not write it, and
-# operating the CLI against a database the *service* created means running as this account.
-# docs/deployment.md says so, and says why the ordinary flow avoids it.
+# What it produces: the database, WAL, and shared-memory files 0640, because SQLite asks the
+# kernel for 0644 and a umask can only take bits away. The sidecar is 0640 too, and not
+# because of this line: it asks for 0640 itself. Left to the umask it came out 0660, and
+# every start replays the sidecar into the journal, so group-write on it was write access
+# to evidence. So the group can read the event, roster and reads included, and cannot write
+# any of it. Operating the CLI against a database the *service* created means running as
+# this account. docs/deployment.md says so, and says why the ordinary flow avoids it.
 UMask=0007
 
 # --- Hardening -------------------------------------------------------------------------
