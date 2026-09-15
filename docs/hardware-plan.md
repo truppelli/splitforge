@@ -441,10 +441,11 @@ DevicePolicy=closed
 DeviceAllow=char-ttyUSB rw
 ```
 
-**`RestrictAddressFamilies=AF_UNIX` stays.** A serial adapter opens a file, not a socket, so
-this phase widens no network surface whatsoever. It is M3b's LLRP reader that will have to add
-`AF_INET` deliberately and fail `unit_file.rs` until it does. Of the two adapters, the serial
-one is the *less* privileged — worth recording in the ADR.
+**The network directives stay as they are.** A serial adapter opens a file, not a socket, so
+this phase widens no network surface whatsoever. The unit already allows IPv4 to this device
+only, for `chronyc` ([ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md)). It is
+M3b's LLRP reader that will have to widen `IPAddressAllow` deliberately and fail `unit_file.rs`
+until it does. Of the two adapters, the serial one is the *less* privileged.
 
 `ttyUSB0` renumbers on re-enumeration, so add `deploy/99-splitforge-reader.rules` for a stable
 name and the right group, which also means the service account never needs adding to

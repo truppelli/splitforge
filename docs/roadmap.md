@@ -47,12 +47,12 @@ LLRP was never what made them true.
 
 **Open findings from the 2026-09-13 security review** are listed at the end, under
 [Security review](#security-review--2026-09-13). Five were marked to fix before a real event.
-Four are fixed: scoring ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)), the
-reassembler ([ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md)), the sidecar as a
-write path, and a failed append stopping the read path
-([ADR-0031](adr/0031-a-failed-write-is-retried-and-an-unstorable-read-is-set-aside.md)). The
-one that remains, `chronyc` under the shipped unit, needs a Linux machine running systemd and
-chrony to check.
+All five are fixed: scoring ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)),
+the reassembler ([ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md)), the sidecar as a
+write path, a failed append stopping the read path
+([ADR-0031](adr/0031-a-failed-write-is-retried-and-an-unstorable-read-is-set-aside.md)), and
+`chronyc` under the shipped unit
+([ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md)).
 
 ---
 
@@ -372,8 +372,9 @@ pair of facts rather than a contradiction.
 **Needs the module:**
 
 - [ ] `PrivateDevices=no` / `DevicePolicy=closed` / `DeviceAllow=char-ttyUSB rw` in the unit,
-      plus a udev rule for a stable device name. `RestrictAddressFamilies=AF_UNIX` **stays** —
-      a serial adapter opens a file, not a socket
+      plus a udev rule for a stable device name. The network directives **stay** as
+      [ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md) left them — a serial
+      adapter opens a file, not a socket
 - [ ] Measure what M5 could not: whether the SD card honors `fsync`, what the second sync per
       reader report costs on real flash, what a full day's journal weighs, and what happens to
       a write in flight when the power goes
@@ -556,9 +557,10 @@ which is exactly as open as Q9 was. Every criterion below is M3's, verbatim.
 - A network outage cannot erase already persisted reads
 - Measure CPU, memory, write latency, and recovery behavior on the Pi
 
-This is the milestone that has to widen `RestrictAddressFamilies` to `AF_INET`, failing
+This is the milestone that has to widen `IPAddressAllow` to its reader's address, failing
 `apps/splitforge-edge/tests/unit_file.rs` until it does so deliberately — which is exactly the
-review a quietly added listener would skip.
+review a quietly added connection would skip. `AF_INET` itself is already allowed, to this
+device only, for `chronyc` ([ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md)).
 
 **Exit criterion:** a reader runs for several hours while every read is preserved through
 deliberately induced network failures and service restarts, and the count of reads the
@@ -1002,8 +1004,12 @@ binary's own `--help` output rather than against constants restated in the test:
   nothing for the rest of the event.
 - **`RestrictAddressFamilies=AF_UNIX`.** [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md)
   enforced by the kernel rather than by review, including against a dependency, which no
-  source-reading test can see. **M3b** needs `AF_INET` and will have to add it deliberately,
-  failing that test until it does. M3a does not: a serial adapter opens a file, not a socket,
+  source-reading test can see. **Since widened by
+  [ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md)** to `AF_UNIX AF_INET`
+  with `IPAddressDeny=any` and `IPAddressAllow=localhost`, because with `AF_UNIX` alone
+  `chronyc` could not reach `chronyd` and every read was stamped `unsynced`. The kernel still
+  keeps the network out. **M3b** needs its reader's address in `IPAddressAllow` and will have
+  to add it deliberately, failing that test until it does. M3a does not: a serial adapter opens a file, not a socket,
   so of the two adapters the one arriving first is the *less* privileged
   ([ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md)). What M3a widens instead is
   `PrivateDevices`, which as it stands gives the service a private `/dev` that
@@ -1327,7 +1333,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       as the illegal length, and that byte also starts a legal header, so the test's frame was
       found only by the search this removes. It now uses 249, and a new test pins the `0xFF`
       case as held and then released.
-- [ ] **`chronyc` probably cannot reach chronyd under the shipped unit, so every read would
+- [x] **`chronyc` probably cannot reach chronyd under the shipped unit, so every read would
       be recorded as `unsynced` permanently.** *Unverified.* A non-root user reaches chronyd
       either through `/run/chrony` or through UDP on `127.0.0.1:323`.
       `ProtectSystem=strict` makes `/run/chrony` read-only, so chronyc cannot create its
@@ -1337,6 +1343,24 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       daemon, so it could not have caught this. Startup also awaits this subprocess, with no
       timeout, before the reader is composed. *Check first:*
       `sudo systemd-run --wait --pipe -p User=splitforge -p RestrictAddressFamilies=AF_UNIX -p ProtectSystem=strict chronyc -c tracking`.
+      **Reproduced, and fixed by
+      [ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md).** Checked on Debian
+      bookworm, which Raspberry Pi OS is built on (systemd 252, chrony 4.3), in a systemd
+      container with the shipped unit and binary. `/health` reported
+      `"measurement":"daemon_unreachable"`, and root's `chronyc` on the same machine got an
+      answer. The cause was half the one suspected. `RestrictAddressFamilies=AF_UNIX` alone
+      breaks it. `ProtectSystem=strict` does not matter, because `/run/chrony` is
+      `0700 _chrony` and chrony serves its Unix socket only to root and its own user, so this
+      account only ever had the UDP path. The unit now allows `AF_UNIX AF_INET`, with
+      `IPAddressDeny=any` and `IPAddressAllow=localhost`. Under it, `/health` reports
+      `measured`, `ntp_synced`. An outbound connection off the device is refused, and a
+      listener on `0.0.0.0` answers over loopback and not over the device's network address.
+      `SocketBindDeny=any` would have kept "binds no port" too, and it is silently ignored:
+      Debian's systemd is built without the BPF framework, and a listener opened under it
+      accepted connections. So the kernel no longer refuses a loopback listener, and the
+      source test in `splitforge-api` still does. The exposure level moves from 1.0 to 1.1.
+      `chronyc` bounds itself, at 7 s against a daemon that never replies, and
+      `splitforge-timesource` now stops it at 10 s regardless.
 
 ### Fix soon
 

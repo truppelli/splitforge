@@ -42,10 +42,11 @@
 //!
 //! ## Calling this from an async context
 //!
-//! [`read_tracking`] blocks, and `chronyc` blocks for as long as it takes to give up on a
-//! daemon that is not answering. That is fine for a one-shot command and wrong for anything
-//! serving requests, so `splitforge-edge` samples it on its own interval inside
-//! `spawn_blocking` and caches the answer rather than calling it per request.
+//! [`read_tracking`] blocks while `chronyc` gives up on a daemon that is not answering, which
+//! took 7 s against a silent one, and never longer than [`CHRONYC_TIMEOUT`]. That is fine for
+//! a one-shot command and wrong for anything serving requests, so `splitforge-edge` samples
+//! it on its own interval inside `spawn_blocking` and caches the answer rather than calling
+//! it per request.
 
 // No panicking on any path reachable during an event: a corrupt frame, a missing
 // field, or an out-of-range value must become an error the caller can act on, never a
@@ -54,7 +55,9 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::io;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use splitforge_domain::{ClockTracking, DeviceClockState, parse_chrony_tracking};
 
@@ -210,25 +213,76 @@ pub fn classify(succeeded: bool, stdout: &str, stderr: &str) -> ClockReading {
     }
 }
 
+/// The longest `chronyc` may run before it is abandoned.
+///
+/// `chronyc` bounds itself. Against a daemon that receives the request and never replies, it
+/// gave up after 7 s with its default timeout and retries (measured on chrony 4.3). When the
+/// daemon is stopped or cannot be reached at all, it fails in tens of milliseconds. This
+/// ceiling sits above those 7 s, so it never cuts off an answer `chronyc` would have given,
+/// and it covers a `chronyc` that hangs for any other reason. `splitforge-edge` waits for its
+/// first sample before it starts reading, and without a ceiling that wait had no end.
+pub const CHRONYC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a running `chronyc` is checked on. It usually finishes within two of these.
+const POLL: Duration = Duration::from_millis(20);
+
 /// Asks the daemon. Returns a reading either way; never fails.
 ///
 /// A clock check that returned `Err` would make `doctor` fail on every machine without
 /// chrony, which is the opposite of useful — the absence of an answer is itself one of the
 /// answers.
 ///
-/// **Blocks.** See [the note on async callers](self#calling-this-from-an-async-context).
+/// **Blocks, for at most [`CHRONYC_TIMEOUT`].** See
+/// [the note on async callers](self#calling-this-from-an-async-context).
 #[must_use]
 pub fn read_tracking() -> ClockReading {
-    match Command::new(CHRONYC).args(["-c", "tracking"]).output() {
-        Ok(output) => classify(
+    let mut command = Command::new(CHRONYC);
+    command.args(["-c", "tracking"]);
+
+    match run_bounded(command, CHRONYC_TIMEOUT) {
+        Ok(Some(output)) => classify(
             output.status.success(),
             &String::from_utf8_lossy(&output.stdout),
             &String::from_utf8_lossy(&output.stderr),
         ),
+        Ok(None) => ClockReading::DaemonUnreachable {
+            detail: format!(
+                "chronyc did not finish within {} s and was stopped",
+                CHRONYC_TIMEOUT.as_secs()
+            ),
+        },
         Err(error) if error.kind() == io::ErrorKind::NotFound => ClockReading::NoDaemonTool,
         Err(error) => ClockReading::Unreadable {
             detail: shorten(&error.to_string()),
         },
+    }
+}
+
+/// Runs `command` to completion, or kills it once `timeout` has passed.
+///
+/// `Ok(None)` means it was killed. Output is collected after the process exits, which is
+/// safe for `chronyc`'s one line: a command writing more than a pipe holds would block
+/// before exiting and be reported as a timeout instead.
+fn run_bounded(mut command: Command, timeout: Duration) -> io::Result<Option<Output>> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(Some);
+        }
+        if Instant::now() >= deadline {
+            // Both can fail only if the process has just exited on its own, in which case
+            // there is nothing left to stop.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(POLL);
     }
 }
 
@@ -357,5 +411,53 @@ mod tests {
             | ClockReading::DaemonUnreachable { .. }
             | ClockReading::Unreadable { .. } => {}
         }
+    }
+
+    // The ceiling on `chronyc`, exercised with commands every Unix CI image has.
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_does_not_finish_is_stopped_at_the_ceiling() {
+        // The wait the edge has before it starts reading. Unbounded, a hung chronyc would
+        // hold the read path back for as long as it hung.
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let started = Instant::now();
+
+        let outcome = run_bounded(command, Duration::from_millis(200)).expect("sleep runs");
+
+        assert!(
+            outcome.is_none(),
+            "a command still running at the ceiling is stopped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stopped at the ceiling, not when the command chose to finish: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_finishes_hands_back_what_it_printed() {
+        let mut command = Command::new("echo");
+        command.arg("50505300,PPS");
+
+        let output = run_bounded(command, Duration::from_secs(5))
+            .expect("echo runs")
+            .expect("echo finishes long before the ceiling");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "50505300,PPS"
+        );
+    }
+
+    #[test]
+    fn a_command_that_is_not_installed_is_not_found() {
+        let command = Command::new("splitforge-no-such-program");
+        let error = run_bounded(command, Duration::from_secs(1)).expect_err("nothing to run");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 }
