@@ -47,9 +47,12 @@ LLRP was never what made them true.
 
 **Open findings from the 2026-09-13 security review** are listed at the end, under
 [Security review](#security-review--2026-09-13). Five were marked to fix before a real event.
-The scoring one is fixed ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)), so
-is the reassembler ([ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md)), and three
-remain.
+Four are fixed: scoring ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md)), the
+reassembler ([ADR-0030](adr/0030-the-serial-adapter-waits-for-proof.md)), the sidecar as a
+write path, and a failed append stopping the read path
+([ADR-0031](adr/0031-a-failed-write-is-retried-and-an-unstorable-read-is-set-aside.md)). The
+one that remains, `chronyc` under the shipped unit, needs a Linux machine running systemd and
+chrony to check.
 
 ---
 
@@ -1247,7 +1250,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       finish) fail against the scoring code at `b457991`. The other three pin behavior that
       was already right and must stay right: a later pass over the start mat, a crossing at
       the instant of the gun, and a race with no gun recorded.
-- [ ] **The sidecar is a write path into the append-only journal, and it is guarded less
+- [x] **The sidecar is a write path into the append-only journal, and it is guarded less
       than the database.** *Reproduced.* A hand-written `SFJ1` line with a new id and chip
       `FORGED` was replayed into `raw_reads` by `SqliteJournal::open_recovering`, which is
       what `splitforge-edge` runs on every start. The per-line SHA-256 is unkeyed, so it
@@ -1260,7 +1263,19 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       `audit_log`. *Fix:* create the sidecar `0640` (`OpenOptionsExt::mode`), write an audit
       row for every replay with its count and id range, and correct both documents about
       what the group grants.
-- [ ] **One failed append stops recording for the rest of the process's life, and the
+      **Fixed.** The sidecar asks for `0640` when it is created, whatever the umask, so it is
+      also no longer world-readable when the CLI creates it. Every replay writes a
+      `journal.replay` audit row in the same transaction as the reads. The row records the
+      count, the first and last ids in file order, and the earliest and latest `recorded_at`
+      the lines claimed. Read ids are random UUIDs, so an id range means nothing, and the
+      time span is where a backdated line shows. `deployment.md`, the sysusers file and the
+      unit's comment now say the group grants read access to the roster and every read, and
+      write access to none of it. `splitforge recover` already wrote a `journal.recover` row;
+      the gap was the replay the edge runs on every start. Both tests fail against the unfixed
+      code, which is unchanged here since `b457991`. The file came out `0644` in the CI
+      container, and a replayed `FORGED` line left no audit row. A sidecar created before this
+      change keeps its mode, and `deployment.md` says how to fix one.
+- [x] **One failed append stops recording for the rest of the process's life, and the
       process stays up, so `Restart=always` never fires.** *From code.*
       `read_into_journal` in `apps/splitforge-edge/src/main.rs` returns on the first
       `append` error. Health goes to 503, but every read the module streams after that is
@@ -1270,6 +1285,24 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       *Fix:* retry I/O errors with bounded backoff, or exit non-zero so systemd restarts the
       service and startup recovery replays the sidecar. Quarantine and count a single
       unstorable read instead of letting it stop the read path.
+      **Fixed by [ADR-0031](adr/0031-a-failed-write-is-retried-and-an-unstorable-read-is-set-aside.md),
+      with retry rather than exit.** Checking the exit option against the code found it would
+      have made the unstorable case worse. The sidecar stores an uptime of 2⁶³ µs or more as
+      JSON, so that append succeeded, and the database refused the insert. Replay is one
+      transaction, so every later start would fail on that line and exit: a crash loop that
+      records nothing. A retry had a trap of its own. When only the database half fails, the
+      retry writes the sidecar line again, and `raw_reads.id` is unique. So:
+      - A failed append is retried with the same read, from 100 ms doubling to 5 s, for as
+        long as it takes, and `/health` says so while it does.
+      - A read the schema cannot hold is refused before either file is written. It is set
+        aside on the audit trail as `journal.unstorable`, with every field, and counted in
+        `reads_set_aside`, which keeps health degraded. Recording continues.
+      - Replay takes each id once, and counts a line the database cannot hold as damage.
+      - A poisoned journal lock exits, so systemd restarts the service and recovery runs.
+      Five tests fail against the unfixed code. A write held off by a lock past the 5 s busy
+      timeout was never stored, and neither was a normal read behind one with an unstorable
+      uptime. That uptime was also left in the sidecar. A sidecar line with that value stopped
+      recovery, and so did a line written twice.
 - [x] **The reassembler emits a frame embedded in an incomplete frame's payload, and throws
       away the real one.** *Reproduced.* A 20-byte `0x22` payload containing a valid 1-byte
       frame was fed in two chunks, split just after the embedded frame. The reassembler

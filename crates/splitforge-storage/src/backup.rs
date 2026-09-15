@@ -405,7 +405,7 @@ mod tests {
             "the snapshot alone knows about one read"
         );
 
-        let (recovered, recovery) = SqliteJournal::open_recovering(&live).expect("recover");
+        let (recovered, recovery) = SqliteJournal::open_recovering(&live, "test").expect("recover");
         assert_eq!(
             recovery.replayed_into_database, 2,
             "the sidecar supplies exactly the reads the snapshot predates"

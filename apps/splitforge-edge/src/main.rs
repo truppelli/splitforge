@@ -63,8 +63,8 @@ use splitforge_api::{
 };
 use splitforge_cli::{ScriptedReader, Speed};
 use splitforge_domain::{
-    ClockStep, DeviceClockState, GapDetection, RaceId, RawReadJournal, ReaderId,
-    SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
+    ClockStep, DeviceClockState, GapDetection, JournalError, RaceId, RawRead, RawReadJournal,
+    ReaderId, SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
 };
 use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderFaults, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
@@ -183,9 +183,11 @@ struct ReaderStatus {
     received: u64,
     /// Reads the journal has accepted and made durable.
     persisted: u64,
+    /// Reads the journal refused for good and the audit trail holds instead.
+    set_aside: u64,
     /// What the provider could not read, as it last reported.
     faults: ReaderFaults,
-    /// Why the read path stopped, when it stopped for a reason worth reporting.
+    /// Why the read in hand is not stored yet, while the read path is retrying it.
     fault: Option<String>,
     /// Which reader is composed, and which race it is reading for.
     ///
@@ -233,6 +235,7 @@ impl ReaderStatus {
             state: None,
             received: 0,
             persisted: 0,
+            set_aside: 0,
             faults: ReaderFaults {
                 framing: 0,
                 decoding: 0,
@@ -317,6 +320,7 @@ impl HealthSource for Device {
                     state: reader.state,
                     reads_received: reader.received,
                     reads_persisted: reader.persisted,
+                    reads_set_aside: reader.set_aside,
                     framing_faults: reader.faults.framing,
                     decode_faults: reader.faults.decoding,
                     // Filled in below, from the journal rather than from this struct. An
@@ -325,9 +329,19 @@ impl HealthSource for Device {
                     open_gap: None,
                 };
                 if let Some(fault) = reader.fault.as_ref() {
-                    // A reader that stopped because a write failed is a different fact from
-                    // one that reached the end of its script, and only the first degrades.
-                    health.degrade(format!("the read path stopped: {fault}"));
+                    // Present only while a write is failing, and cleared by the one that
+                    // lands. Reads are queuing behind it and the reader will soon stop being
+                    // read, so this is the most urgent line the endpoint can carry.
+                    health.degrade(format!("reads are not being stored: {fault}; retrying"));
+                }
+                if reader.set_aside > 0 {
+                    // Not cleared, because nothing undoes it: each is a read that reached
+                    // the device and is not in the journal. The audit trail has them.
+                    health.degrade(format!(
+                        "{} read(s) held a value the journal cannot store and are not in it; \
+                         each is on the audit trail as journal.unstorable",
+                        reader.set_aside
+                    ));
                 }
                 if let Some(reason) = reader.undecodable() {
                     health.degrade(reason);
@@ -557,9 +571,10 @@ impl Device {
 /// able to exit on SIGTERM without waiting for a reader that may never send again — a read
 /// caught in flight by that exit is covered by the sidecar, which is what the sidecar is for.
 ///
-/// A failed write stops the loop rather than skipping the read. A timer that cannot persist
-/// evidence must say so and stop, not keep counting into a journal that is missing rows —
-/// and stopping is visible, both as `ReaderState::Stopped` and as a degraded `/health`.
+/// **A failed write is retried, and the loop never moves past a read it could have stored**
+/// ([ADR-0031](../../../docs/adr/0031-a-failed-write-is-retried-and-an-unstorable-read-is-set-aside.md)).
+/// It used to stop instead, so the process stayed up while every later read was dropped, and
+/// `Restart=always` never fired. See [`store`] for the one kind of read it does move past.
 fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, ingest: Ingest) {
     while let Some(event) = receiver.blocking_recv() {
         let message = match event {
@@ -603,32 +618,122 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, inges
             device.clock_state_for_evidence(),
         );
 
-        let outcome =
-            match device.stores.lock() {
-                Ok(mut stores) => stores.journal.append(&read).map(|_| ()).map_err(|error| {
-                    format!("read {} could not be made durable: {error}", read.id)
-                }),
-                Err(_) => Err("the device state is unreadable after an earlier failure".to_owned()),
-            };
-
-        match outcome {
+        match store(device, &read) {
             // Only now. Everything above this line can still fail; nothing below it can
             // un-write the read.
-            Ok(()) => device.update_reader(|status| status.persisted += 1),
-            Err(fault) => {
-                eprintln!("splitforge-edge: the read path stopped — {fault}");
-                device.update_reader(|status| {
-                    status.state = Some(ReaderState::Stopped);
-                    status.fault = Some(fault);
-                });
-                return;
-            }
+            Stored::Journaled => device.update_reader(|status| status.persisted += 1),
+            Stored::SetAside => device.update_reader(|status| status.set_aside += 1),
         }
     }
 
     // The channel closed: the reader has nothing more to send. For a scripted scenario that
     // is the ordinary end of a run, which is why it carries no fault beside it.
     device.update_reader(|status| status.state = Some(ReaderState::Stopped));
+}
+
+/// The delay before the first retry of a failed append.
+///
+/// Short, because the commonest cause worth retrying, a database lock held by another
+/// connection, has usually cleared by then. A `SQLITE_BUSY` has already waited out the
+/// five-second busy timeout before it reaches here, so this adds little to that case.
+const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The ceiling the retry delay doubles to.
+///
+/// A disk that has been freed, or a lock that has been released, is written to within this
+/// long. Nothing is lost by waiting less: while the read path retries, the channel fills and
+/// the provider stops taking bytes off the port, which is the back-pressure architecture § 4
+/// describes whatever the delay is.
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Who the service is, on the audit trail.
+const SERVICE_ACTOR: &str = "splitforge-edge";
+
+/// How a read left the read path.
+enum Stored {
+    /// In the journal and the sidecar.
+    Journaled,
+    /// Refused for good, and recorded on the audit trail instead.
+    SetAside,
+}
+
+/// Appends `read`, retrying until it is stored or refused for good.
+///
+/// **A failure is retried with the same read**, from `RETRY_FIRST` doubling to `RETRY_MAX`,
+/// and for as long as it takes. A full disk, a failing card, and a lock held past the busy
+/// timeout are all conditions that can end, and the journal is never the thing that gives up
+/// on a read (architecture § 4). Health is degraded while it retries and recovers when a write
+/// lands. If only the database half of an append failed, the retry writes the sidecar line a
+/// second time, and replay takes each id once.
+///
+/// **A read the journal cannot represent is set aside**, because retrying it would stop the
+/// read path exactly as giving up did. It is recorded on the audit trail with every field it
+/// carried, counted, and the loop moves on.
+///
+/// **A poisoned lock ends the process.** Something panicked while holding it, nothing in this
+/// process can make it usable again, and exiting is what lets `Restart=always` start one whose
+/// recovery replays the sidecar. Retrying it would be the silent stop this replaced.
+fn store(device: &Device, read: &RawRead) -> Stored {
+    let mut delay = RETRY_FIRST;
+    let mut failures = 0_u32;
+
+    loop {
+        let Ok(mut stores) = device.stores.lock() else {
+            eprintln!(
+                "splitforge-edge: the journal is unreadable after an earlier failure; exiting \
+                 so the service restarts and recovers from the sidecar"
+            );
+            std::process::exit(1);
+        };
+
+        let error = match stores.journal.append(read) {
+            Ok(_) => {
+                drop(stores);
+                if failures > 0 {
+                    eprintln!(
+                        "splitforge-edge: read {} was stored after {failures} failed attempt(s)",
+                        read.id
+                    );
+                    device.update_reader(|status| status.fault = None);
+                }
+                return Stored::Journaled;
+            }
+            Err(JournalError::Unstorable(reason)) => {
+                let recorded = stores
+                    .journal
+                    .record_unstorable(read, &reason, SERVICE_ACTOR);
+                drop(stores);
+                // Every one is logged. They cannot arrive often, and each is a read that is
+                // not in the journal.
+                match recorded {
+                    Ok(()) => eprintln!(
+                        "splitforge-edge: {reason}; it was set aside on the audit trail as \
+                         journal.unstorable and recording continues"
+                    ),
+                    Err(error) => eprintln!(
+                        "splitforge-edge: {reason}; it could not be set aside on the audit \
+                         trail either ({error}), and recording continues"
+                    ),
+                }
+                return Stored::SetAside;
+            }
+            Err(error) => error,
+        };
+        drop(stores);
+
+        failures = failures.saturating_add(1);
+        let fault = format!("read {} could not be made durable: {error}", read.id);
+        // Said once per outage rather than per attempt. At the ceiling that is one line every
+        // five seconds for as long as the disk stays full, and the health endpoint already
+        // carries the current reason.
+        if failures == 1 {
+            eprintln!("splitforge-edge: {fault}; retrying until it is stored");
+        }
+        device.update_reader(|status| status.fault = Some(fault));
+
+        std::thread::sleep(delay);
+        delay = delay.saturating_mul(2).min(RETRY_MAX);
+    }
 }
 
 /// Records a change in whether the reader is connected, as evidence rather than as a flag.
@@ -917,7 +1022,7 @@ async fn main() -> Result<()> {
     // Opening the journal reconciles it against the write-ahead sidecar (ADR-0018), which
     // is why this is the writer's entry point even though nothing here writes yet: a
     // service starting after a crash is exactly when reads need replaying.
-    let (journal, recovery) = SqliteJournal::open_recovering(&args.database)
+    let (journal, recovery) = SqliteJournal::open_recovering(&args.database, SERVICE_ACTOR)
         .with_context(|| format!("opening the journal at {}", args.database.display()))?;
     let config = ConfigStore::open(&args.database)
         .with_context(|| format!("opening the configuration at {}", args.database.display()))?;
@@ -1259,6 +1364,7 @@ async fn serve(_socket: &std::path::Path, _device: Arc<Device>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use splitforge_reader::ReaderTimestamp;
 
     /// A device on a temporary 5K, with a reader composed and nothing behind it.
     ///
@@ -1284,7 +1390,7 @@ mod tests {
             .clone();
 
         let (journal, _recovery) =
-            SqliteJournal::open_recovering(&database).expect("open the journal");
+            SqliteJournal::open_recovering(&database, "test").expect("open the journal");
 
         let device = Device {
             database,
@@ -1299,6 +1405,7 @@ mod tests {
                 state: Some(ReaderState::Disconnected),
                 received: 0,
                 persisted: 0,
+                set_aside: 0,
                 faults: ReaderFaults::default(),
                 fault: None,
                 watching: Some(Watching {
@@ -1482,6 +1589,158 @@ mod tests {
         );
     }
 
+    /// A read from the fixture's reader, with whatever the reader said about time.
+    fn a_read(device: &Device, chip: &str, timestamp: ReaderTimestamp) -> ReaderEvent {
+        let source = device
+            .reader
+            .lock()
+            .expect("the reader's state")
+            .watching
+            .clone()
+            .expect("a reader is composed")
+            .reader;
+        ReaderEvent::Read(splitforge_reader::ReaderMessage {
+            source,
+            antenna: Some(1),
+            chip: splitforge_domain::ChipId::new(chip),
+            timestamp,
+            rssi_dbm: None,
+            raw_payload: vec![0x01],
+        })
+    }
+
+    fn journaled(device: &Device) -> u64 {
+        device
+            .stores
+            .lock()
+            .expect("the stores")
+            .journal
+            .count()
+            .expect("count the journal")
+    }
+
+    #[test]
+    fn a_write_that_fails_is_retried_rather_than_ending_the_read_path() {
+        // The 2026-09-13 review, from code: `read_into_journal` returned on the first failed
+        // append, and the process stayed up, so `Restart=always` never fired and every read
+        // after it was dropped. The trigger here is the one it named first that needs no
+        // hardware: SQLITE_BUSY lasting longer than the 5 s busy timeout.
+        let (device, _directory) = a_device_watching_a_reader();
+
+        let (locked, release) = std::sync::mpsc::channel::<()>();
+        let database = device.database.clone();
+        let blocker = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(database).expect("a second connection");
+            connection
+                .execute_batch("BEGIN IMMEDIATE")
+                .expect("take the write lock");
+            locked.send(()).expect("say the lock is held");
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            connection.execute_batch("ROLLBACK").expect("release it");
+        });
+        release.recv().expect("the lock is held");
+
+        let events = vec![a_read(&device, "E200", ReaderTimestamp::Absent)];
+        std::thread::scope(|scope| {
+            let reading = scope.spawn(|| deliver(&device, events));
+
+            // While it retries, health says so. The read path holds no lock between attempts,
+            // which is what lets the endpoint answer at all.
+            let deadline = Instant::now() + std::time::Duration::from_secs(20);
+            let reason = loop {
+                let degraded = device.health().degraded_by;
+                if let Some(reason) = degraded
+                    .into_iter()
+                    .find(|reason| reason.contains("not being stored"))
+                {
+                    break reason;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "health never said reads were not being stored"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+            assert!(!reason.contains("  "), "collapsed continuation: {reason:?}");
+
+            reading.join().expect("the read path finished");
+        });
+        blocker.join().expect("the blocker finished");
+
+        let status = device.reader.lock().expect("the reader's state");
+        assert_eq!(
+            status.persisted, 1,
+            "the read was stored once the lock let go"
+        );
+        assert!(
+            status.fault.is_none(),
+            "a write that lands clears the fault"
+        );
+        drop(status);
+        assert_eq!(journaled(&device), 1);
+    }
+
+    #[test]
+    fn a_read_the_journal_cannot_store_does_not_stop_the_reads_behind_it() {
+        // The other trigger the review named: one value the schema cannot hold. An uptime at
+        // or above 2^63 microseconds will never fit a signed SQLite integer, so retrying it
+        // forever would stop the read path as surely as giving up did.
+        let (device, _directory) = a_device_watching_a_reader();
+
+        let events = vec![
+            a_read(
+                &device,
+                "E200",
+                ReaderTimestamp::Uptime { micros: u64::MAX },
+            ),
+            a_read(&device, "E201", ReaderTimestamp::Absent),
+        ];
+        deliver(&device, events);
+
+        let status = device.reader.lock().expect("the reader's state");
+        assert_eq!(status.persisted, 1, "the read behind it was stored");
+        assert_eq!(status.set_aside, 1);
+        drop(status);
+        assert_eq!(journaled(&device), 1);
+
+        // Not silent, and not dependent on a log line surviving.
+        let trail = device
+            .stores
+            .lock()
+            .expect("the stores")
+            .config
+            .audit_trail(10)
+            .expect("read the audit trail");
+        let set_aside: Vec<_> = trail
+            .iter()
+            .filter(|entry| entry.action == "journal.unstorable")
+            .collect();
+        assert_eq!(set_aside.len(), 1, "{trail:?}");
+        assert_eq!(set_aside[0].actor, SERVICE_ACTOR);
+        let detail = set_aside[0].detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("E200"),
+            "the read is identifiable: {detail}"
+        );
+        assert!(
+            detail.contains(&u64::MAX.to_string()),
+            "the value that could not be stored is kept exactly: {detail}"
+        );
+
+        let health = device.health();
+        assert_eq!(health.reader.reads_set_aside, 1);
+        let reasons: Vec<_> = health
+            .degraded_by
+            .iter()
+            .filter(|reason| reason.contains("journal.unstorable"))
+            .collect();
+        assert_eq!(reasons.len(), 1, "{:?}", health.degraded_by);
+        assert!(
+            !reasons[0].contains("  "),
+            "collapsed continuation: {reasons:?}"
+        );
+    }
+
     #[test]
     fn one_decoded_read_proves_the_layout_and_later_refusals_stop_degrading() {
         let (device, _directory) = a_device_watching_a_reader();
@@ -1662,7 +1921,7 @@ mod tests {
     /// A `Device` for a database the caller already configured.
     fn a_device_on(database: &std::path::Path) -> Arc<Device> {
         let (journal, _recovery) =
-            SqliteJournal::open_recovering(database).expect("open the journal");
+            SqliteJournal::open_recovering(database, "test").expect("open the journal");
         let config = ConfigStore::open(database).expect("reopen the configuration");
         Arc::new(Device {
             database: database.to_path_buf(),

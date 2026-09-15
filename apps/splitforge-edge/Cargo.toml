@@ -43,6 +43,9 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 workspace = true
 
 [dev-dependencies]
+# To hold a write lock on the event database from a second connection, which is how a test
+# makes the read path's append fail the way a busy database really does.
+rusqlite.workspace = true
 serde_json.workspace = true
 # The tests spawn the real service binary, but build its fixture database through library
 # calls — `splitforge-cli` is a dependency above, so they reach for it directly. Shelling out

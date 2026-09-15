@@ -159,9 +159,9 @@ pub enum ReaderState {
     /// [`Self::Stopped`] because the provider is still trying: this one is expected to
     /// change on its own, and that one is not.
     Disconnected,
-    /// Finished or given up. A simulated reader reaching the end of its script is the
-    /// ordinary case; a read path that stopped because a write failed is not, and that one
-    /// also degrades the status with a reason.
+    /// The reader has nothing more to send. A simulated reader reaching the end of its script
+    /// is the ordinary case. A failed write does not lead here: the read path retries it, and
+    /// reports that in [`Health::degraded_by`] while it does.
     Stopped,
 }
 
@@ -182,6 +182,13 @@ pub struct ReaderHealth {
     /// and the gap between them is a monitored quantity."* A single counter incremented
     /// before the write would report reads that a power cut took.
     pub reads_persisted: u64,
+    /// Reads the journal refused for good, because they hold a value it cannot represent.
+    ///
+    /// Each is on the audit trail as `journal.unstorable`, and none is in the journal. With
+    /// this, the gap between [`Self::reads_received`] and [`Self::reads_persisted`] is what
+    /// is still in flight plus this, rather than a number that only ever grows. Above zero,
+    /// health is degraded for the rest of the process's life.
+    pub reads_set_aside: u64,
     /// Bytes from the reader that never formed a frame the transport could verify, since
     /// the service started.
     ///
@@ -216,6 +223,7 @@ impl ReaderHealth {
             state: None,
             reads_received: 0,
             reads_persisted: 0,
+            reads_set_aside: 0,
             framing_faults: 0,
             decode_faults: 0,
             open_gap: None,
@@ -415,6 +423,7 @@ mod tests {
             state: Some(ReaderState::Stopped),
             reads_received: 638,
             reads_persisted: 638,
+            reads_set_aside: 0,
             framing_faults: 0,
             decode_faults: 0,
             open_gap: None,

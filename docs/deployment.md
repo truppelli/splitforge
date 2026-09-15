@@ -82,6 +82,19 @@ sudo usermod -aG splitforge alice
 curl -s --unix-socket /run/splitforge/api.sock http://localhost/health   # no sudo needed
 ```
 
+**The group grants more than health, and it is read access.** `/var/lib/splitforge` is
+`0750` and the files the service creates in it are `0640`, so a member can read the event
+database, with every participant's name, and the write-ahead sidecar, with every raw read.
+Add people to the group on that understanding. What it does not grant is writing any of it.
+That includes the sidecar, which the service creates `0640` itself rather than leaving to the
+umask. Every start replays the sidecar into the append-only journal, and each replay is
+written to the audit trail as `journal.replay`, so write access to that file would be write
+access to evidence.
+
+A sidecar created by a build before this change is `0660`, because the mode only applies
+when the file is created. Check with `ls -l /var/lib/splitforge` and fix it with
+`sudo chmod 640 /var/lib/splitforge/event.db.reads.jsonl`.
+
 **Operating the event** — importing a roster, publishing results, taking a backup — is the
 CLI writing to the database directly, and needs write access to it. In the ordinary flow
 the operator configures the event before the service ever runs, so the database is a file
@@ -94,7 +107,8 @@ sudo -u splitforge splitforge --database /var/lib/splitforge/event.db doctor
 
 > **Known gap.** Files the CLI creates follow the invoking shell's umask, which on a default
 > Raspberry Pi OS install is `0022` — world-readable. The service's own `UMask=0007` does not
-> apply to it. Until the CLI's packaging is settled, put `umask 007` in the operator
+> apply to it. The sidecar is the exception, because it asks for `0640` whoever creates it.
+> The database is not. Until the CLI's packaging is settled, put `umask 007` in the operator
 > account's shell profile. This is one of the reasons the field guide is still open.
 
 ## Changing the defaults

@@ -122,12 +122,17 @@ impl SqliteJournal {
     /// exercised. A mechanism that only ever runs during a disaster is a mechanism whose
     /// first real execution is during a disaster.
     ///
+    /// `actor` is recorded on the audit row a replay writes; see [`SqliteJournal::reconcile`].
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError`] if the journal cannot be opened or the repair fails.
-    pub fn open_recovering(path: impl AsRef<Path>) -> Result<(Self, RecoveryReport), StorageError> {
+    pub fn open_recovering(
+        path: impl AsRef<Path>,
+        actor: &str,
+    ) -> Result<(Self, RecoveryReport), StorageError> {
         let mut journal = Self::open(path)?;
-        let report = journal.reconcile()?;
+        let report = journal.reconcile(actor)?;
         Ok((journal, report))
     }
 
@@ -173,10 +178,18 @@ impl SqliteJournal {
     ///
     /// Idempotent: running it twice repairs nothing the second time.
     ///
+    /// **A replay is written to the audit trail, in the same transaction as the reads**, as
+    /// `journal.replay` by `actor`. Replay is a way for reads to enter the append-only journal
+    /// that is not the read path, and its digest cannot tell a line written on purpose from one
+    /// written by the service. The row cannot prove a line honest. It makes the route visible:
+    /// how many reads came in this way, the first and last ids, and the span of `recorded_at`
+    /// the lines claimed, which is where a backdated line shows. A backfill is not audited,
+    /// because it copies reads the journal already holds and adds no evidence.
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError`] if either side cannot be read or written.
-    pub fn reconcile(&mut self) -> Result<RecoveryReport, StorageError> {
+    pub fn reconcile(&mut self, actor: &str) -> Result<RecoveryReport, StorageError> {
         let Some(comparison) = self.compare()? else {
             return Ok(RecoveryReport::default());
         };
@@ -196,6 +209,13 @@ impl SqliteJournal {
             for record in &replay {
                 insert_one(&tx, &record.read, record.recorded_at)?;
             }
+            connection::insert_audit(
+                &tx,
+                actor,
+                "journal.replay",
+                None,
+                Some(&replay_detail(&replay, &status)),
+            )?;
             tx.commit()?;
             report.replayed_into_database = replay.len() as u64;
         }
@@ -226,10 +246,18 @@ impl SqliteJournal {
             stored_ids.insert(row.get::<_, String>(0)?);
         }
 
+        // Each id once, the first line that carries it. `raw_reads.id` is unique, so a second
+        // copy would fail the replay transaction and every start after it. A retried append
+        // writes one: the sidecar half succeeded, the database half did not, and the retry
+        // writes the line again.
+        let mut replaying = HashSet::new();
         let replay: Vec<SidecarRead> = scan
             .records
             .iter()
-            .filter(|record| !stored_ids.contains(&record.read.id.to_string()))
+            .filter(|record| {
+                let id = record.read.id.to_string();
+                !stored_ids.contains(&id) && replaying.insert(id)
+            })
             .cloned()
             .collect();
 
@@ -269,6 +297,52 @@ impl SqliteJournal {
     /// Returns [`StorageError`] if the migration table cannot be read.
     pub fn schema_version(&self) -> Result<i64, StorageError> {
         connection::schema_version(&self.conn)
+    }
+
+    /// Records a read this journal refused as [`StorageError::Unstorable`], on the audit trail.
+    ///
+    /// The read reached the device and is not in `raw_reads`. That must not be silent, and it
+    /// must not depend on a log line surviving. The row is `journal.unstorable`, its subject is
+    /// the reader, and its detail carries every field of the read, the raw payload in hex, and
+    /// why it was refused, so the read can be examined and entered by hand if it matters.
+    /// Values the schema cannot hold are plain JSON numbers here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the row cannot be written.
+    pub fn record_unstorable(
+        &mut self,
+        read: &RawRead,
+        reason: &str,
+        actor: &str,
+    ) -> Result<(), StorageError> {
+        let rfc3339 = |at: OffsetDateTime| {
+            at.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        };
+        let detail = serde_json::json!({
+            "id": read.id.to_string(),
+            "source": read.source.as_str(),
+            "antenna": read.antenna,
+            "chip": read.chip.as_str(),
+            "reader_timestamp": read.reader_timestamp.and_then(rfc3339),
+            "reader_uptime_us": read.reader_uptime_us,
+            "received_at": rfc3339(read.received_at),
+            "received_at_monotonic_ns": read.received_at_monotonic_ns,
+            "rssi_dbm": read.rssi_dbm,
+            "device_clock_state": clock_state_to_str(read.device_clock_state),
+            "clock_offset_ms": read.clock_offset_ms,
+            "raw_payload_hex": hex_lower(&read.raw_payload),
+            "reason": reason,
+        })
+        .to_string();
+        connection::insert_audit(
+            &self.conn,
+            actor,
+            "journal.unstorable",
+            Some(read.source.as_str()),
+            Some(&detail),
+        )
     }
 
     /// Records one observed wall-clock discontinuity.
@@ -692,6 +766,13 @@ impl SqliteJournal {
     fn insert_all(&mut self, reads: &[RawRead]) -> Result<Vec<StoredRawRead>, StorageError> {
         let recorded_at = OffsetDateTime::now_utc();
 
+        // Before either file sees the batch. The sidecar would accept a value the database
+        // refuses, and the line it wrote would then fail every recovery that tried to replay
+        // it. Refusing first keeps the two agreeing about every read, including this one.
+        for read in reads {
+            storable(read)?;
+        }
+
         // Write-ahead. The sidecar is appended and fsynced *before* the database
         // transaction opens, which is what makes it a superset of the journal at every
         // instant rather than a copy that races it. If the process dies between here and
@@ -958,6 +1039,53 @@ pub(crate) fn fallback_from_str(text: &str) -> Result<FallbackReason, StorageErr
     }
 }
 
+/// Whether every value in `read` fits the column it is stored in.
+///
+/// The conversions [`insert_one`] performs, run without a database, so a read can be refused
+/// before anything is written. Only the fields with a narrower column than their type can fail.
+pub(crate) fn storable(read: &RawRead) -> Result<(), StorageError> {
+    let refuse = |field: &str, why: &str| {
+        StorageError::Unstorable(format!("read {}: {field} {why}", read.id))
+    };
+    if let Some(at) = read.reader_timestamp {
+        to_micros(at).map_err(|_| refuse("reader_timestamp", "is outside the storable range"))?;
+    }
+    to_micros(read.received_at)
+        .map_err(|_| refuse("received_at", "is outside the storable range"))?;
+    if read
+        .reader_uptime_us
+        .is_some_and(|value| i64::try_from(value).is_err())
+    {
+        return Err(refuse("reader_uptime_us", "exceeds i64::MAX"));
+    }
+    if read
+        .received_at_monotonic_ns
+        .is_some_and(|value| i64::try_from(value).is_err())
+    {
+        return Err(refuse("received_at_monotonic_ns", "exceeds i64::MAX"));
+    }
+    Ok(())
+}
+
+/// The audit detail for a replay: what came in, and the span of time it claimed.
+fn replay_detail(replay: &[SidecarRead], found: &SidecarStatus) -> String {
+    let rfc3339 = |at: OffsetDateTime| {
+        at.format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default()
+    };
+    let recorded = replay.iter().map(|record| record.recorded_at);
+    serde_json::json!({
+        "replayed": replay.len(),
+        "first_id": replay.first().map(|record| record.read.id.to_string()),
+        "last_id": replay.last().map(|record| record.read.id.to_string()),
+        "earliest_recorded_at": recorded.clone().min().map(rfc3339),
+        "latest_recorded_at": recorded.max().map(rfc3339),
+        "corrupt_lines": found.corrupt_lines,
+        "torn_tail_bytes": found.torn_tail_bytes,
+    })
+    .to_string()
+}
+
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64, StorageError> {
     i64::try_from(value).map_err(|_| StorageError::Decode(format!("{field} exceeds i64 range")))
 }
@@ -1148,7 +1276,7 @@ mod tests {
         }
         assert!(!path.exists());
 
-        let (recovered, report) = SqliteJournal::open_recovering(&path).expect("recover");
+        let (recovered, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
         assert_eq!(report.replayed_into_database, 3);
         assert_eq!(report.backfilled_into_sidecar, 0);
         assert_eq!(report.found.missing_from_database, 3);
@@ -1194,7 +1322,7 @@ mod tests {
         assert_eq!(status.missing_from_database, 0);
         assert!(!status.is_clean());
 
-        let (recovered, report) = SqliteJournal::open_recovering(&path).expect("recover");
+        let (recovered, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
         assert_eq!(report.backfilled_into_sidecar, 2);
         assert_eq!(report.replayed_into_database, 0);
         assert!(
@@ -1213,10 +1341,10 @@ mod tests {
         }
         std::fs::remove_file(sidecar::path_for(&path)).expect("remove sidecar");
 
-        let (mut journal, first) = SqliteJournal::open_recovering(&path).expect("recover");
+        let (mut journal, first) = SqliteJournal::open_recovering(&path, "test").expect("recover");
         assert!(first.repaired_anything());
 
-        let second = journal.reconcile().expect("reconcile again");
+        let second = journal.reconcile("test").expect("reconcile again");
         assert!(
             !second.repaired_anything(),
             "recovery must be idempotent, or running it twice doubles the evidence"
@@ -1246,6 +1374,140 @@ mod tests {
             journal.survey().expect("survey").missing_from_database,
             1,
             "and the divergence must still be there to report"
+        );
+    }
+
+    /// Writes `reads` straight to the sidecar beside `database`, the way a crash between the
+    /// sidecar append and the commit leaves them, or the way a hand-written line arrives.
+    fn only_in_the_sidecar(database: &Path, reads: &[RawRead]) {
+        let mut sidecar = Sidecar::open(sidecar::path_for(database)).expect("open the sidecar");
+        sidecar
+            .append(reads, OffsetDateTime::UNIX_EPOCH + Duration::days(19_700))
+            .expect("append to the sidecar");
+    }
+
+    #[test]
+    fn a_replay_into_the_journal_is_on_the_audit_trail() {
+        // The 2026-09-13 review's reproduction: a hand-written line with a new id and chip
+        // FORGED was replayed into raw_reads on start, and nothing reached audit_log. The
+        // digest is unkeyed, so replay cannot tell a forged line from a real one. What it can
+        // do is leave a record that evidence entered the journal by this route.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let forged = sample_read("FORGED", 0);
+        only_in_the_sidecar(&path, &[forged.clone(), sample_read("B", 1)]);
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
+        assert_eq!(report.replayed_into_database, 2);
+        drop(journal);
+
+        let trail = crate::ConfigStore::open(&path)
+            .expect("open the configuration")
+            .audit_trail(10)
+            .expect("read the audit trail");
+        let replays: Vec<_> = trail
+            .iter()
+            .filter(|entry| entry.action == "journal.replay")
+            .collect();
+        assert_eq!(replays.len(), 1, "one replay, one row: {trail:?}");
+        let detail = replays[0]
+            .detail
+            .as_deref()
+            .expect("a replay row has detail");
+        assert!(detail.contains("\"replayed\":2"), "{detail}");
+        assert!(detail.contains(&forged.id.to_string()), "{detail}");
+    }
+
+    #[test]
+    fn a_read_the_database_cannot_hold_never_reaches_the_sidecar() {
+        // SQLite integers are signed. An uptime at or above 2^63 was written to the sidecar,
+        // which stores it as JSON, and then refused by the database. That left a line every
+        // later start would fail to replay.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let mut unstorable = sample_read("E200", 0);
+        unstorable.reader_uptime_us = Some(u64::MAX);
+
+        {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            let error = journal
+                .append(&unstorable)
+                .expect_err("the database cannot hold it");
+            assert!(
+                matches!(error, JournalError::Unstorable(_)),
+                "a caller has to be able to tell this from a failure worth retrying: {error}"
+            );
+            let status = journal.survey().expect("survey");
+            assert!(
+                status.is_clean(),
+                "the refused read must not be in the sidecar either: {status:?}"
+            );
+        }
+
+        let (mut journal, _) =
+            SqliteJournal::open_recovering(&path, "test").expect("the next start still recovers");
+        journal
+            .append(&sample_read("E201", 1))
+            .expect("and still records");
+    }
+
+    #[test]
+    fn a_sidecar_line_the_database_cannot_hold_does_not_stop_recovery() {
+        // A line like that already on disk, from a build that wrote one or from a hand that
+        // did. Refusing to recover the reads around it would be the crash loop the sidecar's
+        // own rule forbids: a damaged line is counted and skipped.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let mut unstorable = sample_read("BAD", 1);
+        unstorable.reader_uptime_us = Some(u64::MAX);
+        only_in_the_sidecar(
+            &path,
+            &[sample_read("A", 0), unstorable, sample_read("C", 2)],
+        );
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test")
+            .expect("one bad line must not stop recovery");
+        assert_eq!(report.replayed_into_database, 2);
+        assert_eq!(report.found.corrupt_lines, 1);
+        assert_eq!(journal.count().expect("count"), 2);
+    }
+
+    #[test]
+    fn a_read_in_the_sidecar_twice_is_replayed_once() {
+        // A retried append writes the sidecar line again when only the database half failed.
+        // `raw_reads.id` is unique, so replaying both copies failed the whole replay, and
+        // every start after it.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let read = sample_read("A", 0);
+        only_in_the_sidecar(&path, &[read.clone(), read]);
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test")
+            .expect("a duplicate line must not stop recovery");
+        assert_eq!(report.replayed_into_database, 1);
+        assert_eq!(journal.count().expect("count"), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sidecar_is_writable_by_its_owner_and_nobody_else() {
+        // The review found it created 0660 under the service's UMask=0007, so anyone in the
+        // splitforge group could append a line that the next start replays into evidence.
+        // Asked for explicitly rather than left to the umask, which the CLI does not share.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let _journal = SqliteJournal::open(&path).expect("open");
+
+        let mode = std::fs::metadata(sidecar::path_for(&path))
+            .expect("the sidecar exists")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o037,
+            0,
+            "group may read, and may not write; others get nothing: {mode:o}"
         );
     }
 

@@ -104,14 +104,24 @@ pub(crate) struct Sidecar {
 
 impl Sidecar {
     /// Opens (creating if absent) the sidecar at `path`.
+    ///
+    /// **Created `0640` on Unix, whatever the umask.** Every start replays what this file
+    /// holds into the append-only journal, and the per-line digest is unkeyed, so it catches
+    /// damage and not a line written on purpose. Write access to this file is write access to
+    /// evidence. Left to the umask, the service's `UMask=0007` made it `0660` and let anyone
+    /// in the `splitforge` group append a read. The mode applies only when the file is
+    /// created; an existing sidecar keeps the permissions it has.
     pub(crate) fn open(path: PathBuf) -> Result<Self, StorageError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| {
-                StorageError::Sidecar(format!("opening {}: {error}", path.display()))
-            })?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o640);
+        }
+        let file = options.open(&path).map_err(|error| {
+            StorageError::Sidecar(format!("opening {}: {error}", path.display()))
+        })?;
         Ok(Self { path, file })
     }
 
@@ -313,7 +323,7 @@ impl SidecarRecord {
             }
         };
 
-        Ok(SidecarRead {
+        let recovered = SidecarRead {
             recorded_at: from_micros(self.recorded_at_us)?,
             read: RawRead {
                 id: RawReadId::from_uuid(uuid),
@@ -330,7 +340,14 @@ impl SidecarRecord {
                 clock_offset_ms: self.clock_offset_ms,
                 raw_payload: hex_decode(&self.raw_payload_hex)?,
             },
-        })
+        };
+
+        // A line the database cannot hold is damage like any other, counted and skipped. A
+        // recovery that stopped on it would stop recovering every read around it, on every
+        // start. Nothing this build writes can fail here, because the same check runs before
+        // an append, so a line that does came from an older build or from a hand.
+        crate::journal::storable(&recovered.read)?;
+        Ok(recovered)
     }
 }
 
