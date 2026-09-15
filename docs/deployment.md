@@ -156,9 +156,12 @@ short version:
 - **It never stops restarting.** `Restart=always` plus `StartLimitIntervalSec=0`. systemd's
   default gives up permanently after 5 starts in 10 seconds; a timer that has given up
   records nothing for the rest of the event.
-- **It cannot open a network socket.** `RestrictAddressFamilies=AF_UNIX` makes ADR-0021 a
-  kernel rule rather than a code review. Milestone 3 will widen this for the reader,
-  deliberately.
+- **It cannot reach the network, or be reached from it.** `IPAddressDeny=any` with
+  `IPAddressAllow=localhost` makes ADR-0021 a kernel rule rather than a code review.
+  `RestrictAddressFamilies=AF_UNIX AF_INET` allows IPv4 only because `chronyd` answers this
+  account over UDP to `127.0.0.1` and nothing else
+  ([ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md)). Milestone 3b will widen
+  `IPAddressAllow` to its reader's address, deliberately.
 - **Nothing it writes is world-readable.** `UMask=0007`. The database holds participant
   names and the sidecar holds every raw read in plain text
   ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md)).
@@ -204,6 +207,21 @@ ls: cannot access '/run/splitforge': No such file or directory
 $ systemd-analyze security splitforge-edge.service | tail -1
 → Overall exposure level for splitforge-edge.service: 1.0 OK :-)
 ```
+
+That transcript predates [ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md).
+Under the unit as it is now, on Debian bookworm with systemd 252 and chrony 4.3, the exposure
+level is **1.1**, and `/health` reports the time source as it should:
+
+```console
+$ curl -s --unix-socket /run/splitforge/api.sock http://localhost/health   # abridged
+{"status":"ok","degraded_by":[],...,"clock_source":{"measurement":"measured","state":"ntp_synced"}}
+
+$ systemd-analyze security splitforge-edge.service | tail -1
+→ Overall exposure level for splitforge-edge.service: 1.1 OK :-)
+```
+
+With `RestrictAddressFamilies=AF_UNIX` alone, the same health line read
+`{"measurement":"daemon_unreachable","state":null}`, and every read was stamped `unsynced`.
 
 Every mode above is the one the unit produces, not the one it intends. The first run of this
 service under systemd created `event.db` and `event.db.reads.jsonl` **world-readable**, which

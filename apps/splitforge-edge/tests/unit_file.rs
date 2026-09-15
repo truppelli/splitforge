@@ -215,18 +215,32 @@ fn the_service_never_stops_restarting() {
 }
 
 #[test]
-fn the_kernel_is_what_stops_this_service_binding_a_port() {
+fn the_kernel_keeps_this_service_off_the_network() {
     // ADR-0021 says the API binds no port. `crates/splitforge-api/tests/socket.rs` proves
-    // the crate contains no listener; this proves the deployment could not open one even
-    // if it did — including from a dependency, which no source-reading test can see.
+    // the crate contains no listener; this proves the deployment keeps the network out even
+    // if something opened one, including a dependency, which no source-reading test can see.
+    //
+    // ADR-0032 widened the families from AF_UNIX to AF_UNIX AF_INET, because chronyd answers
+    // this account only over UDP to localhost. So the guarantee is now the IP filter:
+    // nothing off the device reaches the service, and the service reaches nothing off it.
     let unit = Unit::load();
-    let families = unit.one("RestrictAddressFamilies");
 
     assert_eq!(
-        families, "AF_UNIX",
-        "the service should be able to open Unix sockets and nothing else. Milestone 3 \
-         adds a reader over TCP and will need AF_INET here — deliberately, and reviewed \
-         as the security decision it is."
+        unit.one("RestrictAddressFamilies"),
+        "AF_UNIX AF_INET",
+        "Unix sockets, and IPv4 for chronyc on localhost. Anything wider is a security \
+         decision: Milestone 3b's reader is one, and needs its own review (ADR-0032)."
+    );
+    assert_eq!(
+        unit.one("IPAddressDeny"),
+        "any",
+        "without this, AF_INET is the whole network rather than this device"
+    );
+    assert_eq!(
+        unit.one("IPAddressAllow"),
+        "localhost",
+        "chronyd listens on localhost. Milestone 3b widens this to its reader's address, \
+         deliberately."
     );
 }
 

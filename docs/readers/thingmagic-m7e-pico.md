@@ -238,9 +238,11 @@ DevicePolicy=closed
 DeviceAllow=char-ttyUSB rw
 ```
 
-**`RestrictAddressFamilies=AF_UNIX` stays.** A serial adapter opens a file, not a socket, so
-this widens no network surface whatsoever. It is M3b's LLRP reader that has to add `AF_INET`
-deliberately and fail `apps/splitforge-edge/tests/unit_file.rs` until it does.
+**The network directives stay as they are.** A serial adapter opens a file, not a socket, so
+this widens no network surface whatsoever. The unit already allows IPv4 to this device only,
+for `chronyc` ([ADR-0032](../adr/0032-the-service-speaks-ip-to-this-device-only.md)). It is
+M3b's LLRP reader that has to widen `IPAddressAllow` deliberately and fail
+`apps/splitforge-edge/tests/unit_file.rs` until it does.
 
 **`ttyUSB0` renumbers on re-enumeration**, so a udev rule gives it a stable name and the right
 group — which also means the service account never needs adding to `dialout`:

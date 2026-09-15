@@ -86,11 +86,27 @@ UMask=0007
 # with equipment nobody vetted. None of this prevents the attacks that matter most, but it
 # bounds what a defect in this process can reach.
 
-# ADR-0021, enforced by the kernel instead of by review. The API listens on a Unix socket
-# and binds no port; with this line a TCP listener added by mistake cannot open one at all.
-# Milestone 3 connects to a reader over TCP and will have to widen this deliberately —
-# which is exactly the review a quietly added listener would otherwise skip.
-RestrictAddressFamilies=AF_UNIX
+# ADR-0021, enforced by the kernel instead of by review, and ADR-0032 on why the service may
+# now speak IP to this device and to nothing else.
+#
+# The API listens on a Unix socket and binds no port. AF_INET is here for chronyc: chronyd
+# answers a user that is neither root nor its own only over UDP to 127.0.0.1:323, and every
+# read this service writes carries the clock state chronyc reports. With AF_UNIX alone that
+# answer was "506 Cannot talk to daemon" on every sample, so every read was stamped unsynced,
+# on a clock that was fine. Observed under this unit on Debian bookworm, systemd 252, chrony
+# 4.3.
+#
+# The two IPAddress lines keep the network out. Nothing off this device can reach a socket
+# the service holds, and the service can reach nothing off the device, which is the exposure
+# ADR-0021 exists to refuse. What the kernel no longer refuses is a listener on loopback; the
+# source test in splitforge-api still does. SocketBindDeny= would refuse it, and it is
+# silently ignored by Debian's systemd, which is built without the BPF framework.
+#
+# Milestone 3b connects to a reader over TCP and will have to widen IPAddressAllow to that
+# reader's address, deliberately, which is the review a quietly added connection would skip.
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
 
 # The service runs unprivileged and needs no capability at all — it opens files in two
 # directories systemd already created for it, and one socket. An empty bounding set means a
