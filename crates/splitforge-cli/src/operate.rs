@@ -541,6 +541,7 @@ pub(crate) fn export_crossings(
         chips: &chips,
         antennas: &config.antennas,
         manual: &manual,
+        gun_time: config.gun_time(),
     });
 
     let report = crate::report::DerivationReport::build(config, reads.len(), &derivation);

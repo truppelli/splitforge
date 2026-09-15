@@ -524,7 +524,8 @@ pub struct AcceptedReadView {
     /// `null` is a flagged crossing, not a discarded one: the chip is not on this roster,
     /// which is usually a roster error rather than a phantom read.
     pub participant: Option<ParticipantId>,
-    /// Which crossing of this checkpoint this was, for this participant.
+    /// Which crossing of this checkpoint this was, for this participant, counted from the gun.
+    /// `0` is a crossing that was over before the gun (ADR-0029).
     pub lap: Option<u16>,
     /// How many raw reads made up the burst behind this crossing.
     pub burst_reads: usize,

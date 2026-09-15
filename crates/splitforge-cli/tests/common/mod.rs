@@ -96,6 +96,7 @@ pub fn derive_from(config: &RaceConfig, reads: &[StoredRawRead]) -> Derivation {
         chips: &chips,
         antennas: &config.antennas,
         manual: &[],
+        gun_time: config.gun_time(),
     })
 }
 

@@ -254,6 +254,7 @@ pub(crate) fn scoreboard(
         chips: &chips,
         antennas: &config.antennas,
         manual: &manual,
+        gun_time: config.gun_time(),
     });
 
     let declarations = store.declarations(config.race.id)?;
