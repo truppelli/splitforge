@@ -198,7 +198,12 @@ pub struct TimingEvent {
     /// When.
     #[serde(with = "time::serde::rfc3339")]
     pub at: OffsetDateTime,
-    /// Which lap this crossing represents, starting at 1.
+    /// Which lap this crossing represents.
+    ///
+    /// Counted from the gun when one is in force: every crossing that was over before it is
+    /// lap 0, and the first whose reads were still arriving when it went, or came after, is
+    /// lap 1 (ADR-0029). So [`Self::at`] can be a moment before the gun on lap 1. With no gun,
+    /// the first crossing is lap 1.
     pub lap: u16,
     /// What produced it.
     pub origin: TimingEventOrigin,

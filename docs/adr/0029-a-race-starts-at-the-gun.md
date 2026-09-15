@@ -44,11 +44,19 @@ the scheduled start):
    - *Seen after it* means any crossing at or after the gun, at any checkpoint. That covers a
      runner the start mat missed, who is still a starter.
    - A crossing before the gun anywhere other than the start line proves nothing.
-2. **Laps count from the gun.** Every crossing before the gun is lap 0, and the first crossing
-   at or after it is lap 1. Manual entries follow the same rule.
-3. **The minimum lap is not measured across the gun.** A crossing before the gun cannot make one
-   after it a re-read. Between two crossings on the same side of the gun, the minimum lap
-   applies as before.
+2. **Laps count from the gun.** Every crossing that was over before the gun is lap 0, and the
+   first crossing on the race side of it is lap 1. Manual entries follow the same rule.
+   - *On the race side* means the crossing's reads were still arriving when the gun went: its
+     **last** read came at or after the gun. A runner standing on the mat when the race starts
+     is on lap 1, and a warm-up that ended before the gun is lap 0. A manual entry is one
+     instant, so it is on the race side when it is at or after the gun.
+   - *Not the credited read.* Under the default selection rule the credited read is the burst's
+     first, so a runner on the mat at the gun is credited a moment before it. Numbering by that
+     instant gave them lap 0 and the runner a step behind lap 1 for the same start. The credited
+     instant is unchanged, and still what scoring uses.
+3. **The minimum lap is not measured across the gun.** A crossing that was over before the gun
+   cannot make one on the race side a re-read. Between two crossings on the same side of the
+   gun, the minimum lap applies as before.
 4. **The gun filters nothing.** Every read before it is still grouped, selected, accepted, and
    turned into a timing event, as ADR-0015 requires. Derivation now knows the gun
    (`DerivationInput::gun_time`), and it uses it only to number laps and to bound the minimum
@@ -88,7 +96,9 @@ act. A race nobody started still falls back to its scheduled start, per ADR-0015
   standing on the line when it went off. The entry carries `start_read_before_gun`, so it can
   be found and declared DNS.
 - **Lap 0 is a value consumers will see.** The crossings export shows `0` in the lap column for
-  a crossing before the gun, which is the plainest way to say "before the race".
+  a crossing that was over before the gun, which is the plainest way to say "before the race".
+  Its credited time can still be a moment before the gun on lap 1, for a runner who was on the
+  mat when it went.
 - Re-scoring a race published under the old rule can move a runner from DNF to DNS. Published
   revisions do not change, and `results diff` shows the move.
 
@@ -98,9 +108,10 @@ act. A race nobody started still falls back to its scheduled start, per ADR-0015
 |---|---|
 | Any crossing proves a start (the previous behavior) | Every warm-up turns a DNS into a DNF, which is not what the promoter saw at the line |
 | Only a start-mat crossing proves a start | A runner the start mat missed who then ran three laps would be a DNS |
+| Judge a crossing's side of the gun by its credited instant | The credited read is usually the burst's first, so a runner on the mat at the gun was lap 0 and the runner a step behind lap 1 for the same start. The four-lap criterium fixture caught it: its first rider crosses at the gun and came out one lap behind the other five |
 | Leave pre-gun crossings without a lap number (`Option<u16>`) | Changes the shape of `TimingEvent` and every consumer, to carry the same information lap 0 already carries |
 | Drop crossings before the gun from derivation | A filter on evidence, which ADR-0015 rejected |
-| A start window (a start read within N minutes before the gun counts) | Needs a number nobody has measured. Revisit with waves, which need a boundary per wave anyway |
+| A start window (a crossing within N minutes before the gun counts as the start) | Needs a number nobody has measured. For laps, a burst's last read already says whether the runner was on the mat when the gun went. Revisit with waves, which need a boundary per wave anyway |
 
 ## References
 

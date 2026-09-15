@@ -31,9 +31,9 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use splitforge_domain::{
-    AcceptedRead, AntennaMap, CheckpointId, ChipId, ChipRegistry, Derivation, ManualEntry,
-    ParticipantId, RawReadId, RejectedRead, RejectionReason, SelectionRule, StoredRawRead,
-    TimingEvent, TimingPolicy,
+    AcceptedRead, AcceptedReadId, AntennaMap, CheckpointId, ChipId, ChipRegistry, Derivation,
+    ManualEntry, ParticipantId, RawReadId, RejectedRead, RejectionReason, SelectionRule,
+    StoredRawRead, TimingEvent, TimingPolicy,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -55,6 +55,13 @@ pub struct DerivationInput<'a> {
     /// Manual entries never suppress a read and a read never suppresses an entry: both
     /// produce timing events, and the scoring rules decide which one counts.
     pub manual: &'a [ManualEntry],
+    /// When the race started: `RaceConfig::gun_time()`, or `None` with no gun in force.
+    ///
+    /// **Used only to number laps and to bound the minimum lap**
+    /// ([ADR-0029](../../../docs/adr/0029-a-race-starts-at-the-gun.md)). It filters nothing:
+    /// every read before it is still grouped, selected, accepted, and turned into a timing
+    /// event, as [ADR-0015](../../../docs/adr/0015-race-start-records-the-gun.md) requires.
+    pub gun_time: Option<OffsetDateTime>,
 }
 
 /// Derives crossings, suppressions, and timing events from raw reads.
@@ -89,6 +96,10 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
     }
 
     let mut accepted = Vec::new();
+    // Which crossings are on the race side of the gun, for numbering laps once the evidence
+    // is merged. Kept beside the crossings rather than on them, because it is a fact about
+    // this derivation's gun and not about the crossing.
+    let mut race_sides: BTreeMap<AcceptedReadId, bool> = BTreeMap::new();
     for ((chip, checkpoint), mut group) in groups {
         // Sort by authoritative time, then by insertion sequence. Reader timestamps can
         // legitimately arrive out of order relative to receipt, and seq breaks ties
@@ -99,7 +110,8 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
             i64::try_from(input.policy.min_interval_ms_for(checkpoint)).unwrap_or(i64::MAX),
         );
         let rule = input.policy.selection_rule_for(checkpoint);
-        let mut last_credited_at: Option<OffsetDateTime> = None;
+        // When the previous crossing was credited, and whether it was on the race side.
+        let mut last_credited: Option<(OffsetDateTime, bool)> = None;
 
         for burst in split_into_bursts(&group, window) {
             let Some(chosen) = select(&burst, rule) else {
@@ -122,19 +134,24 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
             };
 
             let at = chosen.read.authoritative_timestamp();
+            let race_side = on_the_race_side(&burst, input.gun_time);
 
             // A lap credited faster than physically plausible is a re-read, not a
             // superhuman lap.
-            let lap_violation =
-                input
-                    .policy
-                    .min_lap_ms
-                    .zip(last_credited_at)
-                    .and_then(|(min_lap_ms, previous)| {
-                        let elapsed = (at - previous).whole_milliseconds();
-                        (elapsed < i128::from(min_lap_ms))
-                            .then(|| (min_lap_ms, i64::try_from(elapsed).unwrap_or(i64::MAX)))
-                    });
+            //
+            // Not measured across the gun (ADR-0029). A warm-up is not the start of a lap, so
+            // it cannot make the start crossing after it a re-read. On a course whose start
+            // line is its lap line, that rule used to reject the runner's start.
+            let lap_violation = input
+                .policy
+                .min_lap_ms
+                .zip(last_credited)
+                .filter(|(_, (_, previous_race_side))| *previous_race_side || !race_side)
+                .and_then(|(min_lap_ms, (previous, _))| {
+                    let elapsed = (at - previous).whole_milliseconds();
+                    (elapsed < i128::from(min_lap_ms))
+                        .then(|| (min_lap_ms, i64::try_from(elapsed).unwrap_or(i64::MAX)))
+                });
             if let Some((min_lap_ms, actual_ms)) = lap_violation {
                 for stored in &burst {
                     rejected.push(RejectedRead {
@@ -174,7 +191,8 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
                 }
             }
 
-            last_credited_at = Some(at);
+            last_credited = Some((at, race_side));
+            race_sides.insert(crossing.id, race_side);
             accepted.push(crossing);
         }
     }
@@ -190,22 +208,31 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
         Manual(&'a ManualEntry),
     }
 
-    let mut sources: Vec<(OffsetDateTime, ParticipantId, CheckpointId, Source<'_>)> = Vec::new();
+    let mut sources: Vec<(
+        OffsetDateTime,
+        ParticipantId,
+        CheckpointId,
+        bool,
+        Source<'_>,
+    )> = Vec::new();
     for crossing in &accepted {
         if let Some(participant) = crossing.participant {
             sources.push((
                 crossing.at,
                 participant,
                 crossing.checkpoint,
+                race_sides.get(&crossing.id).copied().unwrap_or(true),
                 Source::Crossing(crossing),
             ));
         }
     }
     for entry in input.manual {
+        // One instant, so it is on the race side exactly when it is at or after the gun.
         sources.push((
             entry.at,
             entry.participant,
             entry.checkpoint,
+            input.gun_time.is_none_or(|gun| entry.at >= gun),
             Source::Manual(entry),
         ));
     }
@@ -220,22 +247,31 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
         };
         left.0
             .cmp(&right.0)
-            .then_with(|| key(&left.3).cmp(&key(&right.3)))
+            .then_with(|| key(&left.4).cmp(&key(&right.4)))
     });
 
     // Lap numbers count per participant, not per chip: a participant who swaps a failed
     // chip mid-race is still on the same lap.
+    //
+    // And from the gun (ADR-0029). Every crossing that was over before the gun is lap 0, and
+    // the first on the race side is lap 1, so a warm-up over the lap line does not push the
+    // runner's first real lap to lap 2. With no gun, laps count from the first crossing.
     let mut lap_counters: BTreeMap<(ParticipantId, CheckpointId), u16> = BTreeMap::new();
     let mut timing_events = Vec::new();
-    for (at, participant, checkpoint, source) in sources {
-        let lap = lap_counters.entry((participant, checkpoint)).or_insert(0);
-        *lap = lap.saturating_add(1);
+    for (at, participant, checkpoint, race_side, source) in sources {
+        let lap = if !race_side {
+            0
+        } else {
+            let counter = lap_counters.entry((participant, checkpoint)).or_insert(0);
+            *counter = counter.saturating_add(1);
+            *counter
+        };
         timing_events.push(match source {
             Source::Crossing(crossing) => {
-                TimingEvent::from_accepted(participant, checkpoint, at, *lap, crossing.id)
+                TimingEvent::from_accepted(participant, checkpoint, at, lap, crossing.id)
             }
             Source::Manual(entry) => {
-                TimingEvent::from_manual(participant, checkpoint, at, *lap, entry.id)
+                TimingEvent::from_manual(participant, checkpoint, at, lap, entry.id)
             }
         });
     }
@@ -247,6 +283,23 @@ pub fn derive(input: &DerivationInput<'_>) -> Derivation {
         rejected,
         timing_events,
     }
+}
+
+/// Whether a crossing belongs to the race: its reads were still arriving when the gun went.
+///
+/// **Judged by the burst's last read, not by the credited one** (ADR-0029). Under the default
+/// rule the credited read is the burst's first, so a runner standing on the mat when the race
+/// starts is credited a moment before the gun. Numbering laps by that instant gave them lap 0,
+/// and the runner a step behind lap 1, for the same start. A crossing whose last read came
+/// before the gun was over before the race began, and that is a warm-up. A read at the gun's
+/// instant is on the race side, as it is for scoring (ADR-0028). With no gun, every crossing
+/// belongs to the race.
+fn on_the_race_side(burst: &[&StoredRawRead], gun: Option<OffsetDateTime>) -> bool {
+    gun.is_none_or(|gun| {
+        burst
+            .last()
+            .is_some_and(|last| last.read.authoritative_timestamp() >= gun)
+    })
 }
 
 /// Splits chronologically ordered reads into bursts.
@@ -385,6 +438,7 @@ mod tests {
             chips: &fixture.chips,
             antennas: &fixture.antennas,
             manual: &[],
+            gun_time: None,
         })
     }
 
@@ -655,6 +709,7 @@ mod tests {
             chips: &fixture.chips,
             antennas: &fixture.antennas,
             manual,
+            gun_time: None,
         })
     }
 
@@ -824,5 +879,254 @@ mod tests {
             derivation.timing_events[0].id, derivation.timing_events[1].id,
             "identical claims by two people must not collapse into one event"
         );
+    }
+
+    // ADR-0029: laps count from the gun, and the minimum lap is not measured across it.
+
+    /// The gun in these tests: one minute after the first read.
+    const GUN_MS: i64 = 60_000;
+
+    /// Derives with the gun at [`GUN_MS`].
+    fn run_from_gun(
+        reads: &[StoredRawRead],
+        manual: &[ManualEntry],
+        policy: &TimingPolicy,
+        fixture: &Fixture,
+    ) -> Derivation {
+        derive(&DerivationInput {
+            reads,
+            policy,
+            chips: &fixture.chips,
+            antennas: &fixture.antennas,
+            manual,
+            gun_time: Some(at(GUN_MS)),
+        })
+    }
+
+    fn laps(derivation: &Derivation) -> Vec<u16> {
+        derivation
+            .timing_events
+            .iter()
+            .map(|event| event.lap)
+            .collect()
+    }
+
+    /// A lap line crossed in a warm-up, then at the start, then after one lap.
+    fn warm_up_then_two_crossings() -> Vec<StoredRawRead> {
+        vec![
+            stored(1, CHIP, 0, Some(-55)),
+            stored(2, CHIP, GUN_MS + 5_000, Some(-55)),
+            stored(3, CHIP, GUN_MS + 185_000, Some(-55)),
+        ]
+    }
+
+    #[test]
+    fn laps_count_from_the_gun_and_a_warm_up_is_lap_0() {
+        // Counted from each runner's first crossing, the warm-up was lap 1 and the first real
+        // lap was recorded as lap 2.
+        let fixture = fixture();
+        let derivation = run_from_gun(
+            &warm_up_then_two_crossings(),
+            &[],
+            &TimingPolicy::default(),
+            &fixture,
+        );
+
+        assert_eq!(laps(&derivation), vec![0, 1, 2], "{derivation:?}");
+    }
+
+    #[test]
+    fn the_gun_filters_nothing() {
+        // The warm-up is still a crossing and still a timing event. It is only numbered.
+        let fixture = fixture();
+        let derivation = run_from_gun(
+            &warm_up_then_two_crossings(),
+            &[],
+            &TimingPolicy::default(),
+            &fixture,
+        );
+
+        assert_eq!(derivation.accepted.len(), 3);
+        assert_eq!(derivation.timing_events.len(), 3);
+        assert_eq!(derivation.timing_events[0].at, at(0));
+    }
+
+    #[test]
+    fn a_warm_up_cannot_make_the_start_crossing_a_re_read() {
+        // A criterium whose start line is its lap line, with a two-minute minimum lap. The
+        // warm-up 60 s before the gun made the start crossing 5 s after it look like a re-read
+        // 65 s later, and the runner's start was rejected.
+        let fixture = fixture();
+        let policy = TimingPolicy {
+            min_interval_ms: 1_000,
+            min_lap_ms: Some(120_000),
+            ..TimingPolicy::default()
+        };
+        let reads = vec![
+            stored(1, CHIP, 0, Some(-55)),
+            stored(2, CHIP, GUN_MS + 5_000, Some(-55)),
+        ];
+
+        let derivation = run_from_gun(&reads, &[], &policy, &fixture);
+
+        assert!(
+            derivation.rejected.is_empty(),
+            "the start crossing was rejected: {:?}",
+            derivation.rejected
+        );
+        assert_eq!(laps(&derivation), vec![0, 1]);
+    }
+
+    #[test]
+    fn the_minimum_lap_still_applies_on_each_side_of_the_gun() {
+        let fixture = fixture();
+        let policy = TimingPolicy {
+            min_interval_ms: 1_000,
+            min_lap_ms: Some(30_000),
+            ..TimingPolicy::default()
+        };
+        let reads = vec![
+            // Two warm-up passes 10 s apart: the second is a re-read.
+            stored(1, CHIP, 0, Some(-55)),
+            stored(2, CHIP, 10_000, Some(-55)),
+            // Two race passes 10 s apart: the second is a re-read.
+            stored(3, CHIP, GUN_MS + 5_000, Some(-55)),
+            stored(4, CHIP, GUN_MS + 15_000, Some(-55)),
+        ];
+
+        let derivation = run_from_gun(&reads, &[], &policy, &fixture);
+
+        assert_eq!(derivation.accepted.len(), 2, "{derivation:?}");
+        assert_eq!(derivation.rejected.len(), 2);
+        assert!(
+            derivation
+                .rejected
+                .iter()
+                .all(|rejected| matches!(rejected.reason, RejectionReason::BelowMinLap { .. }))
+        );
+        assert_eq!(laps(&derivation), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_crossing_at_the_instant_of_the_gun_is_lap_1() {
+        // Consistent with ADR-0028, where a crossing at the gun's instant counts.
+        let fixture = fixture();
+        let reads = vec![
+            stored(1, CHIP, 0, Some(-55)),
+            stored(2, CHIP, GUN_MS, Some(-55)),
+        ];
+
+        let derivation = run_from_gun(&reads, &[], &TimingPolicy::default(), &fixture);
+
+        assert_eq!(laps(&derivation), vec![0, 1]);
+    }
+
+    /// One chip's reads from `from_ms` to `to_ms`, 100 ms apart: a burst, as a mat sees it.
+    fn reads_from(first_seq: u64, from_ms: i64, to_ms: i64) -> Vec<StoredRawRead> {
+        (from_ms..=to_ms)
+            .step_by(100)
+            .zip(first_seq..)
+            .map(|(millis, seq)| stored(seq, CHIP, millis, Some(-55)))
+            .collect()
+    }
+
+    fn one_second_window() -> TimingPolicy {
+        TimingPolicy {
+            min_interval_ms: 1_000,
+            ..TimingPolicy::default()
+        }
+    }
+
+    #[test]
+    fn a_runner_on_the_mat_when_the_gun_goes_is_on_lap_1() {
+        // The case the promoter's rule is built on, and the one the credited instant gets
+        // wrong. The burst's first read is credited 300 ms before the gun, and its reads are
+        // still arriving when the gun goes. Numbered by the credited instant this was lap 0,
+        // while a runner a step behind was lap 1 for the same start: the four-lap criterium
+        // fixture's first rider crosses at exactly the gun and came out one lap behind the
+        // other five.
+        let fixture = fixture();
+        let mut reads = vec![stored(1, CHIP, 0, Some(-55))];
+        reads.extend(reads_from(2, GUN_MS - 300, GUN_MS + 200));
+        reads.push(stored(20, CHIP, GUN_MS + 270_000, Some(-55)));
+
+        let derivation = run_from_gun(&reads, &[], &one_second_window(), &fixture);
+
+        assert_eq!(derivation.accepted.len(), 3, "{derivation:?}");
+        assert_eq!(
+            derivation.timing_events[1].at,
+            at(GUN_MS - 300),
+            "the credited instant is still the first read"
+        );
+        assert_eq!(laps(&derivation), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn a_crossing_over_before_the_gun_is_a_warm_up() {
+        // The other side of the same line: the last read came 100 ms before the gun.
+        let fixture = fixture();
+        let mut reads = reads_from(1, GUN_MS - 500, GUN_MS - 100);
+        reads.push(stored(20, CHIP, GUN_MS + 5_000, Some(-55)));
+
+        let derivation = run_from_gun(&reads, &[], &one_second_window(), &fixture);
+
+        assert_eq!(laps(&derivation), vec![0, 1], "{derivation:?}");
+    }
+
+    #[test]
+    fn a_warm_up_cannot_make_a_start_on_the_mat_a_re_read() {
+        let fixture = fixture();
+        let policy = TimingPolicy {
+            min_lap_ms: Some(120_000),
+            ..one_second_window()
+        };
+        let mut reads = vec![stored(1, CHIP, 0, Some(-55))];
+        reads.extend(reads_from(2, GUN_MS - 300, GUN_MS + 200));
+
+        let derivation = run_from_gun(&reads, &[], &policy, &fixture);
+
+        assert!(
+            !derivation
+                .rejected
+                .iter()
+                .any(|rejected| matches!(rejected.reason, RejectionReason::BelowMinLap { .. })),
+            "the start on the mat was rejected as a re-read: {:?}",
+            derivation.rejected
+        );
+        assert_eq!(laps(&derivation), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_manual_entry_follows_the_same_rule() {
+        let fixture = fixture();
+        let before = manual_at(&fixture, 0);
+        let reads = vec![stored(1, CHIP, GUN_MS + 5_000, Some(-55))];
+
+        let derivation = run_from_gun(
+            &reads,
+            std::slice::from_ref(&before),
+            &TimingPolicy::default(),
+            &fixture,
+        );
+
+        assert_eq!(laps(&derivation), vec![0, 1]);
+        assert_eq!(
+            derivation.timing_events[0].origin,
+            TimingEventOrigin::Manual {
+                manual_entry: before.id
+            }
+        );
+    }
+
+    #[test]
+    fn with_no_gun_laps_count_from_the_first_crossing() {
+        let fixture = fixture();
+        let derivation = run(
+            &warm_up_then_two_crossings(),
+            &TimingPolicy::default(),
+            &fixture,
+        );
+
+        assert_eq!(laps(&derivation), vec![1, 2, 3]);
     }
 }

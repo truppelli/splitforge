@@ -1065,6 +1065,7 @@ fn derivation_report(database: &Path, selector: Option<&str>) -> Result<Derivati
         chips: &chips,
         antennas: &config.antennas,
         manual: &manual,
+        gun_time: config.gun_time(),
     });
 
     Ok(DerivationReport::build(&config, reads.len(), &derivation))

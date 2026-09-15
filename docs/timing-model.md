@@ -183,8 +183,10 @@ moment. `first_above_rssi` exists for that case and needs on-site calibration.
 - `min_lap_ms` per course — a lap credited faster than this is rejected as a re-read, not
   an impossibly fast lap. It is not measured across the gun, so a warm-up cannot make a start
   crossing a re-read
-- Laps count from the gun. A crossing before it is lap 0, and the first crossing at or after it
-  is lap 1. With no gun recorded, laps count from the first crossing
+- Laps count from the gun. A crossing that was over before it is lap 0, and the first crossing
+  whose reads were still arriving when it went, or came after, is lap 1. So a runner standing
+  on the mat at the start is on lap 1, even though their credited read is a moment before the
+  gun. With no gun recorded, laps count from the first crossing
   ([ADR-0029](adr/0029-a-race-starts-at-the-gun.md))
 - Checkpoint sequence — a course declares its expected checkpoint order; out-of-sequence
   events are recorded and **flagged**, never silently dropped
