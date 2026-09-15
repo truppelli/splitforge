@@ -123,12 +123,18 @@ pub fn score(input: &ScoringInput<'_>) -> Result<Vec<ResultEntry>, ScoringError>
             .add(event, input.policy.gun_time);
     }
 
-    // Any crossing anywhere proves they started, even if the start mat missed them. That
-    // includes a crossing before the gun: ADR-0028 changes which crossings count as a start
-    // or a finish, not what makes a runner a DNF rather than a DNS.
-    let mut seen_anywhere: BTreeMap<ParticipantId, ()> = BTreeMap::new();
+    // Who started, which is what separates a DNF from a DNS (ADR-0029). A runner started if
+    // they were at the start line when the race started, or were seen anywhere on the course
+    // after it: a crossing after the gun proves a start even when the start mat missed it.
+    // A crossing before the gun proves nothing, except at the start line itself, where
+    // ADR-0028 already treats it as a start at the gun. With no gun, any crossing counts.
+    let mut started: BTreeMap<ParticipantId, ()> = BTreeMap::new();
     for event in input.timing_events {
-        seen_anywhere.insert(event.participant, ());
+        let during_the_race = input.policy.gun_time.is_none_or(|gun| event.at >= gun);
+        let at_the_start_line = start == Some(event.checkpoint);
+        if during_the_race || at_the_start_line {
+            started.insert(event.participant, ());
+        }
     }
 
     let declared = latest_declarations(input.declarations);
@@ -148,7 +154,7 @@ pub fn score(input: &ScoringInput<'_>) -> Result<Vec<ResultEntry>, ScoringError>
                 participant,
                 at_start,
                 at_finish,
-                seen_anywhere.contains_key(&participant.id),
+                started.contains_key(&participant.id),
                 declared.get(&participant.id).copied(),
                 input.policy,
             )
@@ -242,7 +248,7 @@ fn build_entry(
     participant: &Participant,
     at_start: Crossings<'_>,
     at_finish: Crossings<'_>,
-    seen_anywhere: bool,
+    started: bool,
     declaration: Option<&StatusDeclaration>,
     policy: &ScoringPolicy,
 ) -> ResultEntry {
@@ -319,7 +325,7 @@ fn build_entry(
         None => {
             let derived = if finish_at.is_some() {
                 ResultStatus::Finished
-            } else if seen_anywhere {
+            } else if started {
                 ResultStatus::Dnf
             } else {
                 ResultStatus::Dns
@@ -795,6 +801,91 @@ mod tests {
 
         assert_eq!(entries[0].start_at, Some(at(-900)));
         assert_eq!(entries[0].chip_time_ms, Some(2_100_000));
+    }
+
+    // ADR-0029: a runner started if they were at the start line when the race started, or
+    // were seen on the course after it.
+
+    /// A checkpoint that is neither start nor finish. Scoring does not place anyone on it,
+    /// but a crossing of it is still a sighting.
+    fn split(course: &Course) -> Checkpoint {
+        Checkpoint {
+            id: CheckpointId::new(),
+            race: course.race,
+            name: "turnaround".to_owned(),
+            kind: CheckpointKind::Split,
+            sequence: 2,
+        }
+    }
+
+    #[test]
+    fn a_runner_who_only_warmed_up_through_the_finish_did_not_start() {
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![crossing(&runner, &course.finish, -600)];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(
+            entries[0].status,
+            ResultStatus::Dns,
+            "never at the line, never on the course"
+        );
+        assert_eq!(entries[0].flags, vec![ResultFlag::FinishReadBeforeGun]);
+    }
+
+    #[test]
+    fn a_crossing_before_the_gun_away_from_the_start_line_is_not_a_start() {
+        let course = course();
+        let turnaround = split(&course);
+        let runner = runner(&course, "101");
+        let events = vec![crossing(&runner, &turnaround, -300)];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(entries[0].status, ResultStatus::Dns);
+    }
+
+    #[test]
+    fn a_sighting_after_the_gun_proves_a_start_the_start_mat_missed() {
+        let course = course();
+        let turnaround = split(&course);
+        let runner = runner(&course, "101");
+        let events = vec![crossing(&runner, &turnaround, 600)];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(entries[0].status, ResultStatus::Dnf);
+    }
+
+    #[test]
+    fn a_runner_at_the_start_line_when_the_gun_goes_has_started() {
+        // Consistent with ADR-0028: a start read only before the gun is a start at the gun.
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![crossing(&runner, &course.start, -2)];
+
+        let entries = run(&course, &[runner], &events, &[], &chip_policy());
+
+        assert_eq!(entries[0].status, ResultStatus::Dnf);
+        assert_eq!(entries[0].start_at, Some(GUN));
+        assert_eq!(entries[0].flags, vec![ResultFlag::StartReadBeforeGun]);
+    }
+
+    #[test]
+    fn with_no_gun_recorded_any_crossing_means_a_runner_started() {
+        let course = course();
+        let turnaround = split(&course);
+        let runner = runner(&course, "101");
+        let events = vec![crossing(&runner, &turnaround, -300)];
+        let policy = ScoringPolicy {
+            gun_time: None,
+            ..gun_policy()
+        };
+
+        let entries = run(&course, &[runner], &events, &[], &policy);
+
+        assert_eq!(entries[0].status, ResultStatus::Dnf);
     }
 
     #[test]

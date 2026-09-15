@@ -1429,7 +1429,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
 
 ### Decisions this review raised
 
-- [ ] **Is a runner who only warmed up a DNF or a DNS?** *From code.* Scoring makes a runner
+- [x] **Is a runner who only warmed up a DNF or a DNS?** *From code.* Scoring makes a runner
       DNF rather than DNS if any timing event names them, and
       [ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md) deliberately left that
       rule alone. So a crossing before the gun still counts as having been seen. A registered
@@ -1442,6 +1442,16 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       counted separately. *Decide:* whether "seen" should count only crossings at or after the
       gun, plus a start read before it as ADR-0028 already allows. Record the answer in a new
       ADR that follows ADR-0028, because an accepted ADR is not edited.
+      **Decided by the race promoter's requirement and recorded in
+      [ADR-0029](adr/0029-a-race-starts-at-the-gun.md).** The promoter starts the race, every
+      runner is noted at the starting line when it starts, and each lap is recorded from
+      there. So a runner started if they were at the start line when the race started or were
+      seen on the course after it; a warm-up alone makes a DNS. Checking the code against that
+      found two more places ignoring the gun, both in derivation. Laps counted from a runner's
+      first crossing, so a warm-up made the first real lap lap 2. And the minimum lap reached
+      back across the gun, so a warm-up could get a criterium start crossing rejected as a
+      re-read. Laps now count from the gun, with crossings before it as lap 0, and the minimum
+      lap is not measured across it.
 
 ### Hygiene
 

@@ -32,7 +32,9 @@ use crate::policy::TimingPolicy;
 pub enum ResultStatus {
     /// Crossed the finish line. The only status that receives a place.
     Finished,
-    /// Did not start. Registered, but no crossing anywhere on the course.
+    /// Did not start. Registered, but not at the start line when the race started and not
+    /// seen anywhere on the course after it (ADR-0029). With no gun recorded: no crossing at
+    /// all.
     Dns,
     /// Did not finish. Started, but never reached the finish.
     Dnf,

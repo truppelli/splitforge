@@ -181,7 +181,11 @@ moment. `first_above_rssi` exists for that case and needs on-site calibration.
 
 - `min_interval_ms` per checkpoint — suppresses the same crossing
 - `min_lap_ms` per course — a lap credited faster than this is rejected as a re-read, not
-  an impossibly fast lap
+  an impossibly fast lap. It is not measured across the gun, so a warm-up cannot make a start
+  crossing a re-read
+- Laps count from the gun. A crossing before it is lap 0, and the first crossing at or after it
+  is lap 1. With no gun recorded, laps count from the first crossing
+  ([ADR-0029](adr/0029-a-race-starts-at-the-gun.md))
 - Checkpoint sequence — a course declares its expected checkpoint order; out-of-sequence
   events are recorded and **flagged**, never silently dropped
 - Expected lap count — used for completion status, not for discarding reads
@@ -243,7 +247,9 @@ Deliberately minimal (see [roadmap](roadmap.md) Milestone 4):
 - Gun time and chip time
 - First valid finish per participant: the first finish crossing at or after the gun. A crossing
   before the gun is set aside, not deleted ([ADR-0028](adr/0028-the-gun-decides-which-crossings-count.md))
-- Statuses: `Finished`, `DNS`, `DNF`, `DQ`
+- Statuses: `Finished`, `DNS`, `DNF`, `DQ`. A runner started, and so is a DNF rather than a
+  DNS, if they were at the start line when the race started or were seen on the course after
+  it ([ADR-0029](adr/0029-a-race-starts-at-the-gun.md))
 - Overall placement by the configured timing policy
 
 Explicitly **not** in the first version: age-group scoring, waves, complex course
