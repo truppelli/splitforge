@@ -198,6 +198,13 @@ pub enum Disconnection {
     /// This is the disconnection an observer actually induces, and the one Milestone 3a's
     /// exit criterion is about.
     Ended,
+    /// A connection opened and the reader did not start reading when told to.
+    ///
+    /// Something answers on the port, and what answered refused a command that starting a
+    /// read needs, or never answered it: a region it will not take, a firmware still in its
+    /// bootloader, a baud rate that reaches something else. The detail beside the gap cannot
+    /// say which, so the service log names the command and the status.
+    NotStarted,
 }
 
 impl Disconnection {
@@ -212,6 +219,7 @@ impl Disconnection {
         match self {
             Self::NotOpened => "the reader's port could not be opened",
             Self::Ended => "the connection to the reader ended",
+            Self::NotStarted => "the reader did not start reading when told to",
         }
     }
 }

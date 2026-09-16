@@ -68,7 +68,9 @@ use splitforge_domain::{
 };
 use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderFaults, ReaderProvider};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
-use splitforge_thingmagic::{SerialSettings, StreamDecoder, ThingMagicReader};
+use splitforge_thingmagic::{
+    Region, SerialSettings, StartSequence, StreamDecoder, ThingMagicReader,
+};
 use splitforge_timesource::ClockReading;
 use tokio::sync::mpsc::Receiver;
 
@@ -114,7 +116,11 @@ struct Args {
     #[arg(long, value_name = "SPEED", default_value = "immediate")]
     simulate_speed: Speed,
 
-    /// Read from a ThingMagic serial module on this device path.
+    /// Read from a ThingMagic serial module on this device path. Requires `--region`.
+    ///
+    /// Every connection tells the module to read: it stops any stream the last connection left
+    /// running, selects Gen2 and the region, turns the module's read filter off, and starts a
+    /// stream. A module that refuses a step is recorded as a gap that did not start.
     ///
     /// Reads are decoded by a parser anchored on one captured frame from real hardware, and
     /// **it refuses to guess**: a report whose layout it has not seen becomes a counted
@@ -124,8 +130,22 @@ struct Args {
     /// **The installed unit cannot use this.** `deploy/splitforge-edge.service` passes no
     /// arguments and sets `PrivateDevices=yes`, which gives the service a private `/dev`
     /// with no serial node in it. This is a bench flag until both change deliberately.
-    #[arg(long, value_name = "PATH", conflicts_with = "simulate")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "simulate",
+        requires = "region"
+    )]
     serial: Option<String>,
+
+    /// The regulatory region the module transmits in, for `--serial`: `na`, `eu`, `eu3`, and
+    /// the rest of the names in `splitforge_thingmagic::Region`.
+    ///
+    /// **There is no default.** The module is one SKU pre-configured for many regions, and
+    /// which one is legal depends on where the device is. The service sets it on every
+    /// connection rather than trusting whatever the module last held.
+    #[arg(long, value_name = "REGION", requires = "serial")]
+    region: Option<Region>,
 
     /// Bits per second for `--serial`. The module's own default is 115200.
     #[arg(long, value_name = "BAUD", default_value_t = 115_200)]
@@ -1080,10 +1100,16 @@ async fn main() -> Result<()> {
     // passes no arguments.
     match (args.serial.as_deref(), args.simulate.as_deref()) {
         (Some(path), _) => {
+            // `requires` makes this unreachable from the command line; the check keeps it
+            // unreachable without an `unwrap`.
+            let Some(region) = args.region else {
+                anyhow::bail!("--serial {path} needs --region");
+            };
             compose_serial_reader(
                 &device,
                 path,
                 args.serial_baud,
+                region,
                 args.reader.as_deref(),
                 &args.database,
             )?;
@@ -1207,6 +1233,7 @@ fn compose_serial_reader(
     device: &Arc<Device>,
     path: &str,
     baud: u32,
+    region: Region,
     reader: Option<&str>,
     database: &std::path::Path,
 ) -> Result<()> {
@@ -1273,16 +1300,21 @@ fn compose_serial_reader(
     };
 
     eprintln!(
-        "splitforge-edge: SERIAL reader {:?} on {path} at {baud} baud — it has no tag-report \
-         decoder, so it will record connection gaps and no reads",
-        reader_id.as_str()
+        "splitforge-edge: SERIAL reader {:?} on {path} at {baud} baud, region {}. Each \
+         connection starts a Gen2 stream, and reports are decoded by a parser that counts what \
+         it cannot read instead of guessing",
+        reader_id.as_str(),
+        region.name()
     );
 
-    let provider: Box<dyn ReaderProvider> = Box::new(ThingMagicReader::new(
-        reader_id.clone(),
-        splitforge_thingmagic::serial(settings),
-        StreamDecoder::new(reader_id.clone()),
-    ));
+    let provider: Box<dyn ReaderProvider> = Box::new(
+        ThingMagicReader::new(
+            reader_id.clone(),
+            splitforge_thingmagic::serial(settings),
+            StreamDecoder::new(reader_id.clone()),
+        )
+        .with_start(StartSequence::gen2(region)),
+    );
     let receiver = provider.start();
 
     device.update_reader(|status| {
@@ -1811,12 +1843,21 @@ mod tests {
     fn the_detail_beside_a_gap_names_which_way_it_failed() {
         // Two different diagnoses. One says look for a cable, the other says something that
         // was working stopped — and an operator reads the second very differently.
-        assert_ne!(
-            Disconnection::NotOpened.detail(),
-            Disconnection::Ended.detail()
+        let causes = [
+            Disconnection::NotOpened,
+            Disconnection::Ended,
+            Disconnection::NotStarted,
+        ];
+        let mut details: Vec<&str> = causes.iter().map(|cause| cause.detail()).collect();
+        details.sort_unstable();
+        details.dedup();
+        assert_eq!(
+            details.len(),
+            causes.len(),
+            "three diagnoses, three sentences"
         );
 
-        for cause in [Disconnection::NotOpened, Disconnection::Ended] {
+        for cause in causes {
             let detail = cause.detail();
             // The defect that has shipped four times in this repository: a message written
             // across two source lines whose trailing backslash was dropped still compiles,
@@ -1937,8 +1978,15 @@ mod tests {
         let (_directory, database) = a_configured_database();
         let device = a_device_on(&database);
 
-        let error = compose_serial_reader(&device, "/dev/null", 115_200, Some("nope"), &database)
-            .expect_err("an unknown reader cannot be composed");
+        let error = compose_serial_reader(
+            &device,
+            "/dev/null",
+            115_200,
+            Region::Na,
+            Some("nope"),
+            &database,
+        )
+        .expect_err("an unknown reader cannot be composed");
         let message = format!("{error}");
 
         assert!(message.contains("nope"), "{message}");
@@ -1969,8 +2017,9 @@ mod tests {
         }
         let device = a_device_on(&database);
 
-        let error = compose_serial_reader(&device, "/dev/null", 115_200, None, &database)
-            .expect_err("two readers and no --reader cannot be resolved");
+        let error =
+            compose_serial_reader(&device, "/dev/null", 115_200, Region::Na, None, &database)
+                .expect_err("two readers and no --reader cannot be resolved");
         let message = format!("{error}");
 
         // A gap is recorded *against a reader*, so guessing which one would put evidence on
@@ -1991,8 +2040,15 @@ mod tests {
         // starts, reports a lifecycle, and reconnects — which is all this asserts. What it
         // must not do is guess a reader or claim a connection the composition root has not
         // been told about.
-        compose_serial_reader(&device, "/dev/null", 115_200, Some("mat"), &database)
-            .expect("the fixture's reader composes");
+        compose_serial_reader(
+            &device,
+            "/dev/null",
+            115_200,
+            Region::Na,
+            Some("mat"),
+            &database,
+        )
+        .expect("the fixture's reader composes");
 
         let status = device.reader.lock().expect("the reader's state");
         assert_eq!(status.kind, ReaderKind::Serial);
@@ -2027,9 +2083,29 @@ mod tests {
         ])
         .expect_err("--serial and --simulate are mutually exclusive");
 
-        let serial = Args::try_parse_from(["splitforge-edge", "--serial", "/dev/ttyUSB0"])
-            .expect("--serial alone parses");
+        Args::try_parse_from(["splitforge-edge", "--serial", "/dev/ttyUSB0"])
+            .expect_err("a module transmits, so --serial needs a region and there is no default");
+        Args::try_parse_from(["splitforge-edge", "--region", "na"])
+            .expect_err("a region with nothing to set it on is a mistake worth refusing");
+        Args::try_parse_from([
+            "splitforge-edge",
+            "--serial",
+            "/dev/ttyUSB0",
+            "--region",
+            "open",
+        ])
+        .expect_err("OPEN is not a region the service offers");
+
+        let serial = Args::try_parse_from([
+            "splitforge-edge",
+            "--serial",
+            "/dev/ttyUSB0",
+            "--region",
+            "na",
+        ])
+        .expect("--serial with a region parses");
         assert_eq!(serial.serial.as_deref(), Some("/dev/ttyUSB0"));
+        assert_eq!(serial.region, Some(Region::Na));
         assert_eq!(
             serial.serial_baud, 115_200,
             "the module's own default, so an operator who omits it gets what the guide says"

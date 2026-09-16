@@ -6,14 +6,22 @@
 //! ports that fail exactly when a test wants them to, rather than against hardware nobody
 //! has yet.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::time::Duration;
 
-/// An open port, read as a plain byte stream.
+/// A byte stream in both directions.
+///
+/// The module never initiates (user guide § 7): nothing streams until the host tells it to,
+/// so a port the adapter can only listen on is one that hears nothing.
+pub trait Duplex: Read + Write + Send {}
+
+impl<T: Read + Write + Send> Duplex for T {}
+
+/// An open port, read and written as a plain byte stream.
 ///
 /// Boxed rather than generic because a factory returns a *new* one on every reconnect, and
 /// the concrete type is of no interest to anything above this module.
-pub type Port = Box<dyn Read + Send>;
+pub type Port = Box<dyn Duplex>;
 
 /// Opens a port, once per connection attempt.
 ///

@@ -40,6 +40,7 @@ this?" two years from now, the ADR is the answer.
 | [0030](0030-the-serial-adapter-waits-for-proof.md) | The serial adapter waits for proof before it acts | Accepted |
 | [0031](0031-a-failed-write-is-retried-and-an-unstorable-read-is-set-aside.md) | A failed write is retried, and a read the journal cannot store is set aside | Accepted |
 | [0032](0032-the-service-speaks-ip-to-this-device-only.md) | The service may speak IP, to this device and nothing else | Accepted |
+| [0033](0033-each-connection-starts-the-stream.md) | Each connection starts the stream, with the command the decoder is anchored on | Accepted |
 
 ## Process
 

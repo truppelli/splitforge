@@ -230,6 +230,21 @@ is left: a module on a bench with nothing in front of it and a terminal capturin
 is a change in which queue it waits in, not an answer, and `DEFAULT_SILENCE_THRESHOLD_MS` still
 carries no measurement behind it.
 
+**The prerequisite is very likely met, by a frame nobody was looking at — 2026-09-15.** Building
+the start command ([ADR-0033](adr/0033-each-connection-starts-the-stream.md)) turned up a frame
+that is not a status report at all. MercuryAPI's streaming receive path says the module sends a
+*"tag not found response"* *"after every async ON cycle"*, with status `0x0400`. SparkFun's parser
+treats that empty `0x22` as a keep-alive, *"Sent once per second"*. One second is the search
+timeout the start command asks for ([finding 17](readers/vendor-documents.md#17-an-empty-field-produces-a-frame-at-the-end-of-every-search-cycle)).
+So the module very likely does speak into a quiet field, periodically, without asking for status
+reports at all.
+
+The decoder now counts those frames and no longer calls them faults. **They are not yet treated
+as proof of life**, so the silence threshold is unchanged. The first bench session can settle
+it: start the stream with nothing in the field, and time the end-of-cycle frames. If they arrive
+once a second, this question stops being a race policy, and the threshold becomes a small
+multiple of the period.
+
 ---
 
 ## Resolved

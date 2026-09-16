@@ -80,9 +80,10 @@ pub mod frame;
 pub mod port;
 pub mod provider;
 pub mod reassembly;
+pub mod start;
 pub mod tag_report;
 
-pub use command::{OpCode, antenna_ports, search_flag};
+pub use command::{Command, OpCode, Region, UnknownRegion, antenna_ports, search_flag};
 pub use crc::crc16;
 pub use frame::{
     COMMAND_HEADER_LEN, CRC_LEN, Decoded, EncodeError, FrameError, MAX_COMMAND_DATA_LEN,
@@ -92,4 +93,5 @@ pub use frame::{
 pub use port::{Port, PortFactory, SerialSettings, serial};
 pub use provider::{Backoff, SessionAnchor, TagReportDecoder, ThingMagicReader, UndecodedReports};
 pub use reassembly::{Reassembler, Stats};
+pub use start::{Progress, Refusal, StartSequence, Starting};
 pub use tag_report::{ReportError, StreamDecoder};

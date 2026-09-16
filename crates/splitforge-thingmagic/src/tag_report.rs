@@ -32,7 +32,9 @@
 //!
 //! - **Any frame but a successful `0x22`.** The capture is opcode `0x22` with status `0x0000`.
 //!   A frame answering some other command, or reporting an error, can carry a payload that
-//!   walks cleanly as a tag report, and the checks below it never look at the header.
+//!   walks cleanly as a tag report, and the checks below it never look at the header. **One
+//!   exception is documented twice:** an empty `0x22` with status `0x0400`, which the module
+//!   sends at the end of every search cycle while streaming. See [`NO_TAGS_FOUND`].
 //! - **A metadata flag above `0x0100`.** The 2023 layout has five more fields than the nine
 //!   this decoder walks, and a decoder that ignored an unknown high bit would not fail — it
 //!   would read the next field's bytes as this one's and return a plausible, wrong EPC.
@@ -120,7 +122,27 @@ enum StreamResponse {
     Status,
     /// The stream ends with this message.
     End,
+    /// A search cycle ended, whether or not it found anything. See [`NO_TAGS_FOUND`].
+    EndOfCycle,
 }
+
+/// The status of the frame the module sends at the end of every search cycle while streaming.
+///
+/// **Documented by two independent sources, and not yet seen on this module.** MercuryAPI's
+/// `serial_reader.c` handles it in the streaming receive path: *"In case of streaming after
+/// every async ON cycle, module sends the tag not found response"*, and *"For GEN2 case we got
+/// the response with 0x400 status."* SparkFun's `parseResponse` treats an empty `0x22` with
+/// status `0x0400` as a keep-alive, *"Sent once per second"*, which matches the 1000 ms search
+/// timeout its start command asks for, and the one this crate sends.
+///
+/// Only the empty form is accepted. MercuryAPI's comment also shows a longer form, carrying a
+/// timestamp, when its start command enables multi-select, and this crate's does not. A frame
+/// with this status and a payload is still a fault until something shows its layout.
+///
+/// Arriving about once a second into an empty field, this is very likely the liveness signal
+/// [Q14](../../../docs/open-questions.md) asks about. It is counted here and not yet treated as
+/// one, until a module shows the period.
+pub const NO_TAGS_FOUND: u16 = 0x0400;
 
 /// Why a tag report could not be decoded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -134,8 +156,9 @@ pub enum ReportError {
     /// The frame's status word is not success.
     ///
     /// Refused rather than read, because no capture shows what a failed `0x22` carries. The
-    /// module may well send one in an empty field, and if it does, this count is how that is
-    /// found out, and deciding it is not a fault is a change a capture can justify.
+    /// one status that is not a fault is an empty frame with [`NO_TAGS_FOUND`], which two
+    /// sources document; everything else, including the temperature and return-loss statuses
+    /// SparkFun names, is a condition an operator should see counted.
     #[error("the frame reports status {status:#06x}; the only status a capture shows is 0x0000")]
     UnsuccessfulStatus {
         /// The status word as it arrived.
@@ -275,6 +298,7 @@ pub struct StreamDecoder {
     frames: u64,
     reads: u64,
     errors: u64,
+    cycles: u64,
     reported: bool,
 }
 
@@ -290,6 +314,7 @@ impl StreamDecoder {
             frames: 0,
             reads: 0,
             errors: 0,
+            cycles: 0,
             reported: false,
         }
     }
@@ -316,6 +341,16 @@ impl StreamDecoder {
         self.errors
     }
 
+    /// End-of-cycle frames: an empty `0x22` with [`NO_TAGS_FOUND`].
+    ///
+    /// Neither reads nor faults. While streaming, the module sends one per search cycle, so
+    /// this climbing with no reads is a module streaming into an empty field, which is exactly
+    /// what [Q14](../../../docs/open-questions.md) needs to see measured.
+    #[must_use]
+    pub const fn cycles(&self) -> u64 {
+        self.cycles
+    }
+
     /// Classifies a streaming response before any of its metadata is read.
     fn classify(response: &Response<'_>) -> Result<StreamResponse, ReportError> {
         // The header first. Everything after this reads the payload, and a payload that walks
@@ -324,6 +359,9 @@ impl StreamDecoder {
             return Err(ReportError::NotAReadResponse {
                 opcode: response.opcode,
             });
+        }
+        if response.status == NO_TAGS_FOUND && response.data.is_empty() {
+            return Ok(StreamResponse::EndOfCycle);
         }
         if !response.is_ok() {
             return Err(ReportError::UnsuccessfulStatus {
@@ -524,6 +562,10 @@ impl TagReportDecoder for StreamDecoder {
             // Both are successful decodes that carry no tag, and neither is a fault: a status
             // report is reader statistics and a stream-end is the module saying it is done.
             StreamResponse::Status | StreamResponse::End => Ok(None),
+            StreamResponse::EndOfCycle => {
+                self.cycles = self.cycles.saturating_add(1);
+                Ok(None)
+            }
             StreamResponse::Tag => self.read_tag(response.data, anchor).map(Some),
         });
 
@@ -648,6 +690,45 @@ mod tests {
             1,
             "the EPC ran past the end, which is a decode error rather than a short chip id"
         );
+    }
+
+    #[test]
+    fn the_end_of_a_search_cycle_is_neither_a_read_nor_a_fault() {
+        // What the module sends into an empty field while streaming, about once a second. The
+        // decoder counted it as a fault until now, so a stream freshly started in an empty
+        // field would have degraded health until the first tag.
+        let mut decoder = decoder();
+        for _ in 0..3 {
+            assert!(feed(&mut decoder, &framed_as(0x22, NO_TAGS_FOUND, &[])).is_empty());
+        }
+        assert_eq!(decoder.cycles(), 3);
+        assert_eq!(decoder.errors(), 0);
+        assert_eq!(decoder.reads(), 0);
+    }
+
+    #[test]
+    fn only_the_documented_shape_of_that_frame_is_accepted() {
+        // With a payload, its layout is the multi-select form no command here asks for. The
+        // statuses SparkFun names for temperature throttling and high return loss are real
+        // trouble, and are counted as such.
+        for (status, payload) in [
+            (NO_TAGS_FOUND, &[0x88_u8, 0x10][..]),
+            (0x0504, &[][..]),
+            (0x0505, &[][..]),
+        ] {
+            let mut decoder = decoder();
+            assert!(feed(&mut decoder, &framed_as(0x22, status, payload)).is_empty());
+            assert_eq!(
+                decoder.errors(),
+                1,
+                "status {status:#06x} with {payload:02X?}"
+            );
+            assert_eq!(decoder.cycles(), 0);
+        }
+
+        let mut decoder = decoder();
+        assert!(feed(&mut decoder, &framed_as(0x29, NO_TAGS_FOUND, &[])).is_empty());
+        assert_eq!(decoder.errors(), 1, "only a 0x22 ends a search cycle");
     }
 
     #[test]

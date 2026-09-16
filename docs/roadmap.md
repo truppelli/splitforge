@@ -367,7 +367,27 @@ pair of facts rather than a contradiction.
       reconnection that does not re-issue the command inherits timestamps from the previous
       session. So the per-connection anchor under *Session-anchored timestamps* depends on this
       step. **Unticked until a module answers**: like the parser, a command sequence
-      transcribed from the SDK is believed only when real hardware accepts it
+      transcribed from the SDK is believed only when real hardware accepts it.
+      **Built ([ADR-0033](adr/0033-each-connection-starts-the-stream.md)), and "the bytes are
+      already known" was wrong.** The documents recorded the opcodes and a response's layout,
+      not the body of a read command or what to configure before one. The archived sources,
+      re-verified against their hashes, supplied both. They also showed that the command
+      mattered more than expected: `CAPTURED_FRAME` is SparkFun's annotated answer to its own
+      start command, echoing that command's option, search flags and metadata flags, while
+      MercuryAPI 2023 builds a command whose answers shift every field one byte. So each
+      connection sends SparkFun's start, cross-checked command by command against MercuryAPI:
+      stop any running stream, version, Gen2, the operator's region, read filter off, start.
+      There is no antenna-port command, because the two sources disagree for this module family.
+      `splitforge-edge --serial` now requires `--region`, with no default. The connection is
+      announced when the start is accepted; a refused step ends it as a new cause,
+      `NotStarted`. The anchor moves when the start is sent. **Two more things came out of it.**
+      An empty field very likely produces an end-of-cycle frame (`0x22`, status `0x0400`) about
+      once a second, which the decoder had been counting as a fault, and which is very likely
+      the liveness signal Q14 waits on
+      ([finding 17](readers/vendor-documents.md#17-an-empty-field-produces-a-frame-at-the-end-of-every-search-cycle)).
+      And SparkFun describes the tag timestamp as time since the last keep-alive, which the
+      guide contradicts ([finding 18](readers/vendor-documents.md#18-sparkfun-and-the-user-guide-disagree-on-what-the-tag-timestamp-counts-from)).
+      Still unticked: no module has answered one of these commands
 
 **Needs the module:**
 
@@ -1520,6 +1540,10 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       connection gaps and no reads"*, but `StreamDecoder` is composed. M3a's *Compose the
       module* bullet above still names `UndecodedReports`. [deployment.md](deployment.md#operating)
       still says the service *"does not write to the journal at all"*.
+      **The log line is fixed**, by the start-the-stream change, which rewrote it to name the
+      region and the stream it starts. The other two remain, and so does
+      `crates/splitforge-thingmagic/src/provider.rs`'s module documentation, which still says the
+      crate *"ships no implementation"* of a tag-report decoder.
 
 **Checked and held**, so nobody repeats the work: every SQL statement except the `VACUUM
 INTO` above binds its parameters. There is no `unsafe`. Frame length is bounded by the wire
