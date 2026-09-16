@@ -155,6 +155,11 @@ drift the way `master` can.
 | `tmr_serial_reader.h` | `c/src/api/tmr_serial_reader.h` | 14,748 bytes | `8a709d14a39bfcc1b540178e5fe3c551b700222f99e1c31b39df12d2e8b58fdb` |
 | `serial_reader.c` | `c/src/api/serial_reader.c` | 242,673 bytes | `852544644c6384d1a4ee35e09ca126efbf1442af278c1dfe06ed1df093e90573` |
 | `serial_reader_l3.c` | `c/src/api/serial_reader_l3.c` | 292,434 bytes | `3db28019080e98fcabed942d453498c84aa95ecdb889cfa6e6ac4f1d8793e57b` |
+| `tmr_region.h` | `c/src/api/tmr_region.h` | 4,076 bytes | `513e6dab75b8fe3a8202c9f6d510b6eccb40c5132b9ae39d750a9c9aff5216cb` |
+
+`tmr_region.h` was added on 2026-09-15, from the same commit, for the region codes
+`crates/splitforge-thingmagic/src/command.rs` sends. Its header carries the same MIT grant. On the
+same day the other four hashes above were re-verified against fresh downloads, and all four matched.
 
 **The fourth file is the same name as the 2009 one recorded above, and that is the point.**
 Rows 10–14 of the tag-report table and the whole of
@@ -184,7 +189,7 @@ difference is recorded in [finding 13](#13-the-2009-field-order-is-a-prefix-of-t
 | Retrieved | 2026-08-30, HTTP 200 |
 | Size | 31,398 bytes |
 | SHA-256 | `3269d53c3156abb7a7af3c9960a186eace8c4e2b0bfa41b2f39ba72a2d107f18` |
-| Depended on by | `crates/splitforge-thingmagic/src/crc.rs` — `CAPTURED_FRAME` |
+| Depended on by | `crates/splitforge-thingmagic/src/crc.rs` — `CAPTURED_FRAME`; `src/command.rs` — `START_STREAMING_BODY` and the setup commands; `src/tag_report.rs` — `NO_TAGS_FOUND` |
 
 Not an independent implementation: its CRC is copied from `serial_reader_l3.c` and carries the
 same comment. What it adds is a **captured frame** — a real `0x22` response from a real module,
@@ -1008,6 +1013,100 @@ internally consistent, externally wrong, and fully tested.
 The defence is to **decode by walking the flag bits ascending** and to treat an unknown
 high bit as a hard error rather than as an unset field — because at that point the parser has
 lost its place in the stream and everything after it is a guess.
+
+## What starting the stream settled
+
+Findings from building the commands the adapter sends
+([ADR-0033](../adr/0033-each-connection-starts-the-stream.md)). Every source below was re-fetched
+on 2026-09-15 and matched its recorded hash, except `tmr_region.h`, which was recorded then.
+
+### 14. The captured frame answers SparkFun's start command
+
+`SparkFun_UHF_RFID_Reader.cpp`'s `startReading` sends `0x2F` with this body, *"found by using the
+'Transport Logs' option from the Universal Reader Assistant"*:
+
+```text
+00 00 01 22 00 00 05 07 22 10 00 1B 03 E8 01 FF
+```
+
+The last eight bytes are an embedded `0x22`: option `10`, search flags `00 1B`, timeout `03 E8`,
+metadata flags `01 FF`. The same file's `parseResponse` annotates an example response, and
+`CAPTURED_FRAME` is that response. Its payload begins `10 00 1B 01 FF`: **the option, search
+flags and metadata flags of that command, echoed back.** So the frame the decoder is anchored on
+is the module's answer to this exact command. `command.rs` holds the echo as a test, and the
+adapter sends this command, so the decoder reads answers in the one layout a capture shows.
+
+### 15. MercuryAPI 2023 builds a different read command
+
+`TMR_SR_msgSetupReadTagMultipleWithMetadata` adds a singulation option byte before the option
+byte whenever the filter is not a tag-data filter, including no filter at all:
+
+```c
+isMultiSelectEnabled = ((filter) && (filter->type == TMR_FILTER_TYPE_TAG_DATA)) ? false : true;
+```
+
+It also adds `DUTY_CYCLE_CONTROL` and a two-byte off-time for continuous reads. The response-type
+position in [Status reports](#status-reports--tmr_serial_readerh-and-serial_readerc) moves with
+that extra byte (`idx` becomes 1), so every field of a response would shift one byte right.
+**This is why the adapter sends SparkFun's command rather than rebuilding the SDK's.** The SDK's
+form is not wrong; it is a layout no capture here shows.
+
+The other setup commands agree across both sources and were checked field by field:
+
+| Command | Bytes | MercuryAPI 2023 | SparkFun |
+|---|---|---|---|
+| Stop streaming | `2F 00 00 02` | `TMR_SR_cmdStopReading` | `stopReading` |
+| Version | `03` | `TMR_SR_cmdVersion` | `getVersion` |
+| Gen2 protocol | `93 00 05` | `TMR_SR_cmdSetProtocol`, a `u16` | `setTagProtocol` |
+| Region | `97` + one byte | `TMR_SR_cmdSetRegion` | `setRegion` |
+| Read filter off | `9A 01 0C 00` | `TMR_SR_cmdSetReaderConfiguration`, key-value form | `disableReadFilter` |
+
+`TMR_SR_CONFIGURATION_ENABLE_READ_FILTER` is `0x0C` in both the 2009 and 2023
+`serial_reader_imp.h`. A `0x2F` answer echoes the command's option byte first, `0x01` for start
+and `0x02` for stop, per `serial_reader.c`: *"the response received for start continuous reading
+command. (0x2F with type 0x01)"*.
+
+### 16. The two sources disagree on the antenna port for this module
+
+SparkFun's `setAntennaPort` sends `91 01 01`. MercuryAPI 2023's `TMR_SR_cmdSetTxRxPorts` sends
+the transmit port alone, and adds the second byte only `if (reader->u.serialReader.isM6eFamily)`.
+SparkFun was written for the M6e Nano, and the M7e-Pico is not in that family. **The adapter
+sends no antenna-port command.** The module has one port, and the start command reads from the
+configured list. Whether that list is usable without configuring it is a first-session check.
+
+### 17. An empty field produces a frame at the end of every search cycle
+
+Two independent sources describe it. MercuryAPI's `serial_reader.c`, in the streaming receive
+path:
+
+> In case of streaming after every async ON cycle, module sends the tag not found response
+
+> For GEN2 case we got the response with 0x400 status.
+
+SparkFun's `parseResponse` treats a `0x22` with zero data length and status `0x0400` as a
+keep-alive, *"Sent once per second"*. It names `0x0504` as temperature throttling and `0x0505`
+as high return loss. One second is the search timeout the start command asks for.
+
+**This very likely answers the prerequisite [Q14](../open-questions.md#q14-reader-silence-threshold)
+set:** whether the module sends anything into a quiet field. It appears to, periodically. The
+decoder now counts these frames as end-of-cycle frames rather than faults. It does not yet treat
+them as proof of life, and it does not accept the longer form MercuryAPI's comment shows for a
+multi-select command. Both wait for a module to show the frame and its period.
+
+### 18. SparkFun and the user guide disagree on what the tag timestamp counts from
+
+§ 8.8.3 says the timestamp is *"relative to the time the command to read was issued"*.
+SparkFun's `parseResponse` annotates the same field as *"Timestamp in ms since last keep alive
+msg"*. If SparkFun is right, it resets every search cycle, not once per session. Nothing
+authoritative rests on it, because this module's timestamps are recorded as uptime and the
+device's receipt time is what counts ([ADR-0024](../adr/0024-serial-reader-adapter-before-llrp.md)).
+The adapter re-anchors when it sends the start command, which is correct under the guide's
+reading and harmless under SparkFun's.
+
+### 19. SparkFun names one region code differently
+
+SparkFun's `setRegion` comments list `0x08` as EU. In `tmr_region.h`, `8` is `TMR_REGION_EU3`, and
+EU is `2`. The adapter's region names come from `tmr_region.h`.
 
 ## Adding a document here
 

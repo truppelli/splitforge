@@ -42,7 +42,8 @@
 //! Everything around that one seam is real and tested: opening, reading, reassembly,
 //! resynchronization, bounded jittered reconnect, and the counters that make loss visible.
 
-use std::io::{ErrorKind, Read};
+use std::cell::Cell;
+use std::io::{self, ErrorKind, Read};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -54,6 +55,7 @@ use tokio::sync::mpsc;
 use crate::frame::Response;
 use crate::port::{Port, PortFactory};
 use crate::reassembly::Reassembler;
+use crate::start::{Progress, Refusal, StartSequence, Starting};
 
 /// When a connection began, on both clocks.
 ///
@@ -242,6 +244,11 @@ pub struct ThingMagicReader<P, D> {
     framing_before: u64,
     /// The totals last sent, so a report goes out only when one changes.
     faults_reported: ReaderFaults,
+    /// What each connection sends before it streams, or `None` to only listen.
+    start: Option<StartSequence>,
+    /// The last refusal logged, so a module refusing the same command on every attempt says
+    /// so once rather than once per reconnect.
+    last_refusal: Option<Refusal>,
 }
 
 /// How a connection's read loop finished.
@@ -253,6 +260,8 @@ enum Pumped {
         /// Whether the connection proved itself before it ended. See
         /// [`ThingMagicReader::established`].
         established: bool,
+        /// Which way it ended.
+        cause: Disconnection,
     },
 }
 
@@ -271,7 +280,21 @@ where
             capacity: 256,
             framing_before: 0,
             faults_reported: ReaderFaults::default(),
+            start: None,
+            last_refusal: None,
         }
+    }
+
+    /// Starts the stream on every connection with `sequence`.
+    ///
+    /// Without one, the reader only listens, which hears nothing from a module that has not
+    /// been told to read (user guide § 7). With one, a connection is announced when the module
+    /// accepts the start command, and a module that refuses a step ends the connection as
+    /// [`Disconnection::NotStarted`].
+    #[must_use]
+    pub fn with_start(mut self, sequence: StartSequence) -> Self {
+        self.start = Some(sequence);
+        self
     }
 
     /// Overrides the reconnect schedule.
@@ -344,7 +367,7 @@ where
 
             match self.factory.open() {
                 Ok(port) => {
-                    let Pumped::Ended { established } = self.pump(port, sender) else {
+                    let Pumped::Ended { established, cause } = self.pump(port, sender) else {
                         // The consumer is gone. A reader with nowhere to deliver should stop
                         // reading rather than buffer a race into memory.
                         return;
@@ -362,9 +385,7 @@ where
                     // Sent for a connection that never proved itself too. If it follows an
                     // outage, the gap is already open and opening it again writes nothing.
                     if sender
-                        .blocking_send(ReaderEvent::Disconnected {
-                            cause: Disconnection::Ended,
-                        })
+                        .blocking_send(ReaderEvent::Disconnected { cause })
                         .is_err()
                     {
                         return;
@@ -408,8 +429,33 @@ where
     /// **The connection is announced here rather than when the port opens**, so that a run of
     /// ports that open and die at once is one outage and one gap rather than two rows per
     /// attempt. The cost is that a quiet module is reported connected up to `max` late.
-    fn established(&self, reassembler: &Reassembler, anchor: &SessionAnchor) -> bool {
-        reassembler.stats().frames > 0 || anchor.opened_at.elapsed() >= self.backoff.max
+    ///
+    /// **With a start sequence, only the module accepting the start command shows it.** A
+    /// module that answers the version and refuses the region is there, and is not recording.
+    /// Announcing it at its first answer would reset the backoff and write a pair of gap rows
+    /// on every attempt, which is the churn this function exists to prevent.
+    fn established(
+        &self,
+        reassembler: &Reassembler,
+        opened: &SessionAnchor,
+        started: bool,
+    ) -> bool {
+        if self.start.is_some() {
+            return started;
+        }
+        reassembler.stats().frames > 0 || opened.opened_at.elapsed() >= self.backoff.max
+    }
+
+    /// Logs why a connection did not start, unless it is the reason already logged.
+    fn report_refusal(&mut self, refusal: Refusal) {
+        if self.last_refusal == Some(refusal) {
+            return;
+        }
+        self.last_refusal = Some(refusal);
+        eprintln!(
+            "splitforge-thingmagic: the module did not start streaming: {refusal}. The \
+             connection is closed and retried; this is logged again only if the reason changes."
+        );
     }
 
     /// Reads one connection to its end.
@@ -417,16 +463,52 @@ where
         // A fresh connection starts from no partial frame. Bytes held over from the previous
         // one would splice two sessions into a frame that was never transmitted.
         let mut reassembler = Reassembler::new();
-        let anchor = SessionAnchor::now();
+        let opened = SessionAnchor::now();
+        // What a tag report's relative timestamp counts from. User guide § 8.8.3 defines it as
+        // relative to *"the time the command to read was issued"*, so it moves when the start
+        // command is sent. A `Cell`, because the frame handler below both reads and moves it.
+        let anchor = Cell::new(opened);
         let mut chunk = [0_u8; 512];
         let mut reads: Vec<ReaderMessage> = Vec::new();
         let mut announced = false;
 
+        let mut starting = self.start.as_ref().map(Starting::new);
+        let mut progress = Progress::Waiting;
+        if let Some(sequence) = starting.as_mut() {
+            match sequence.begin(&mut port, Instant::now()) {
+                Ok(step) => progress = step,
+                Err(_) => {
+                    return Pumped::Ended {
+                        established: false,
+                        cause: Disconnection::Ended,
+                    };
+                }
+            }
+        }
+
         loop {
             let read = port.read(&mut chunk);
             let decoder = &mut self.decoder;
-            let mut decode =
-                |response: &Response<'_>| decoder.decode(response, &anchor, &mut reads);
+            let mut written: io::Result<()> = Ok(());
+            // Every verified frame goes one of two ways. The answer the start sequence is
+            // waiting for goes to it; everything else is a report, including one from a stream
+            // the last connection left running, and goes to the decoder.
+            let mut decode = |response: &Response<'_>| {
+                if let Some(sequence) = starting.as_mut()
+                    && sequence.claims(response)
+                {
+                    let was_starting = sequence.is_starting();
+                    match sequence.answer(response, &mut port, Instant::now()) {
+                        Ok(step) => progress = step,
+                        Err(error) => written = Err(error),
+                    }
+                    if !was_starting && sequence.is_starting() {
+                        anchor.set(SessionAnchor::now());
+                    }
+                } else {
+                    decoder.decode(response, &anchor.get(), &mut reads);
+                }
+            };
 
             let ended = match read {
                 Ok(0) => true,
@@ -454,7 +536,33 @@ where
                 reassembler.flush(&mut decode);
             }
 
-            if !announced && self.established(&reassembler, &anchor) {
+            // The deadline for the answer being waited on, checked on every turn, which a real
+            // port makes at least once per read timeout.
+            if !ended
+                && written.is_ok()
+                && matches!(progress, Progress::Waiting)
+                && let Some(sequence) = starting.as_mut()
+            {
+                match sequence.tick(&mut port, Instant::now()) {
+                    Ok(step) => progress = step,
+                    Err(error) => written = Err(error),
+                }
+            }
+
+            let started = matches!(progress, Progress::Started);
+            if started {
+                self.last_refusal = None;
+            }
+            let cause = match progress {
+                Progress::Refused(refusal) => {
+                    self.report_refusal(refusal);
+                    Some(Disconnection::NotStarted)
+                }
+                _ if ended || written.is_err() => Some(Disconnection::Ended),
+                _ => None,
+            };
+
+            if !announced && self.established(&reassembler, &opened, started) {
                 if sender.blocking_send(ReaderEvent::Connected).is_err() {
                     return Pumped::ConsumerGone;
                 }
@@ -474,10 +582,11 @@ where
                 return Pumped::ConsumerGone;
             }
 
-            if ended {
+            if let Some(cause) = cause {
                 self.framing_before = framing;
                 return Pumped::Ended {
                     established: announced,
+                    cause,
                 };
             }
         }
@@ -554,11 +663,28 @@ mod tests {
         }
     }
 
+    /// Accepts and discards everything, as a port with nobody listening for commands would.
+    macro_rules! discards_writes {
+        ($port:ty) => {
+            impl io::Write for $port {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    Ok(bytes.len())
+                }
+
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+        };
+    }
+
     /// A port that yields scripted chunks and then fails, as often as the script says.
     struct ScriptedPort {
         chunks: Vec<Vec<u8>>,
         index: usize,
     }
+
+    discards_writes!(ScriptedPort);
 
     impl Read for ScriptedPort {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -688,6 +814,8 @@ mod tests {
             sent: bool,
         }
 
+        discards_writes!(TimeoutThenData);
+
         impl Read for TimeoutThenData {
             fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
                 if self.remaining > 0 {
@@ -728,6 +856,8 @@ mod tests {
         timeouts: usize,
         ended: Arc<AtomicUsize>,
     }
+
+    discards_writes!(ChunkThenQuiet);
 
     impl Read for ChunkThenQuiet {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -851,6 +981,222 @@ mod tests {
             }),
             "unchanged totals are not sent again"
         );
+    }
+
+    /// A response frame with a status word, as the module sends one.
+    fn answer(opcode: u8, status: u16, data: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(RESPONSE_HEADER_LEN + data.len() + 2);
+        frame.push(SOH);
+        frame.push(u8::try_from(data.len()).expect("small"));
+        frame.push(opcode);
+        frame.extend_from_slice(&status.to_be_bytes());
+        frame.extend_from_slice(data);
+        let crc = crc16(&frame[1..]);
+        frame.extend_from_slice(&crc.to_be_bytes());
+        frame
+    }
+
+    /// A module on the other end of the port: it answers every command it is sent, echoing the
+    /// option byte of a `0x2F` the way MercuryAPI documents, and streams once it is started.
+    struct FakeModule {
+        pending: std::collections::VecDeque<u8>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+        refuse: Option<(u8, u16)>,
+        streams: Vec<Vec<u8>>,
+        quiet_reads: usize,
+    }
+
+    impl FakeModule {
+        fn new(written: &Arc<std::sync::Mutex<Vec<u8>>>) -> Self {
+            Self {
+                pending: std::collections::VecDeque::new(),
+                written: Arc::clone(written),
+                refuse: None,
+                streams: Vec::new(),
+                quiet_reads: 3,
+            }
+        }
+    }
+
+    impl io::Write for FakeModule {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.written
+                .lock()
+                .expect("the written bytes")
+                .extend_from_slice(bytes);
+
+            let length = usize::from(bytes[1]);
+            let opcode = bytes[2];
+            let body = &bytes[3..3 + length];
+            let status = match self.refuse {
+                Some((refused, status)) if refused == opcode => status,
+                _ => 0x0000,
+            };
+            let echo: Vec<u8> = if opcode == 0x2F {
+                vec![body[2]]
+            } else {
+                Vec::new()
+            };
+            self.pending.extend(answer(opcode, status, &echo));
+
+            let started = opcode == 0x2F && body[2] == 0x01 && status == 0;
+            if started {
+                for frame in &self.streams {
+                    self.pending.extend(frame.iter().copied());
+                }
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for FakeModule {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.pending.is_empty() {
+                let count = self.pending.len().min(buffer.len());
+                for slot in buffer.iter_mut().take(count) {
+                    *slot = self.pending.pop_front().expect("counted");
+                }
+                return Ok(count);
+            }
+            if self.quiet_reads > 0 {
+                self.quiet_reads -= 1;
+                thread::sleep(Duration::from_millis(1));
+                return Err(io::Error::from(ErrorKind::TimedOut));
+            }
+            Err(io::Error::from(ErrorKind::BrokenPipe))
+        }
+    }
+
+    fn starting_reader<P: PortFactory + 'static>(factory: P) -> Box<dyn ReaderProvider> {
+        Box::new(
+            ThingMagicReader::new(ReaderId::new("mat"), factory, StubDecoder)
+                .with_start(StartSequence::gen2(crate::command::Region::Na))
+                .with_backoff(Backoff {
+                    first: Duration::from_millis(1),
+                    max: Duration::from_secs(1),
+                })
+                .with_capacity(16),
+        )
+    }
+
+    /// The bytes of the whole start sequence, as the command builders encode it.
+    fn the_start_sequence() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for command in StartSequence::gen2(crate::command::Region::Na).commands() {
+            let mut out = [0_u8; crate::frame::MAX_FRAME_LEN];
+            bytes.extend_from_slice(command.encode(&mut out).expect("encode"));
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn a_module_told_to_start_is_announced_when_it_accepts_and_its_reports_follow() {
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = Arc::clone(&written);
+        let factory = move || -> io::Result<Port> {
+            let mut module = FakeModule::new(&record);
+            module.streams = vec![response(0x22, &[0x01, 0x02])];
+            Ok(Box::new(module) as Port)
+        };
+
+        let mut receiver = starting_reader(factory).start();
+
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Connected));
+        let Some(ReaderEvent::Read(message)) = receiver.recv().await else {
+            panic!("the stream's first report");
+        };
+        assert_eq!(message.chip, ChipId::new("0102"));
+        assert_eq!(
+            receiver.recv().await,
+            Some(ReaderEvent::Disconnected {
+                cause: Disconnection::Ended
+            })
+        );
+
+        let sent = written.lock().expect("the written bytes").clone();
+        let sequence = the_start_sequence();
+        assert_eq!(
+            &sent[..sequence.len()],
+            &sequence[..],
+            "stop, version, Gen2, region, read filter off, start, byte for byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_module_that_refuses_a_step_is_not_announced_and_is_not_churned() {
+        // A module that answers and will not take the region: it is there, and it is not
+        // recording. Announcing it would close and reopen a gap on every attempt.
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&opens);
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = Arc::clone(&written);
+        let factory = move || -> io::Result<Port> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut module = FakeModule::new(&record);
+            module.refuse = Some((0x97, 0x0105));
+            Ok(Box::new(module) as Port)
+        };
+
+        let mut receiver = starting_reader(factory).start();
+        for _ in 0..3 {
+            assert_eq!(
+                receiver.recv().await,
+                Some(ReaderEvent::Disconnected {
+                    cause: Disconnection::NotStarted
+                }),
+                "refused, so never connected"
+            );
+        }
+
+        let sent = written.lock().expect("the written bytes").clone();
+        let opcodes: Vec<u8> = decode_commands(&sent);
+        assert_eq!(
+            &opcodes[..4],
+            &[0x2F, 0x03, 0x93, 0x97],
+            "nothing is sent after the refusal"
+        );
+        assert!(
+            !opcodes.windows(2).any(|pair| pair == [0x97, 0x9A]),
+            "the read filter and the start never follow a refused region: {opcodes:02X?}"
+        );
+    }
+
+    /// The opcode of every command frame in `bytes`.
+    fn decode_commands(bytes: &[u8]) -> Vec<u8> {
+        let mut opcodes = Vec::new();
+        let mut rest = bytes;
+        while rest.len() > 2 {
+            let length = usize::from(rest[1]);
+            opcodes.push(rest[2]);
+            rest = &rest[(3 + length + 2).min(rest.len())..];
+        }
+        opcodes
+    }
+
+    #[tokio::test]
+    async fn a_report_from_a_stream_left_running_is_kept_while_the_start_waits() {
+        // The module goes on streaming into a broken link, so a reconnection can open on the
+        // tail of the last session's stream. Those reports reached the host; they are
+        // evidence, and they arrive before the new stream is announced.
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = Arc::clone(&written);
+        let factory = move || -> io::Result<Port> {
+            let mut module = FakeModule::new(&record);
+            module.pending.extend(response(0x22, &[0xAA]));
+            Ok(Box::new(module) as Port)
+        };
+
+        let mut receiver = starting_reader(factory).start();
+
+        let Some(ReaderEvent::Read(message)) = receiver.recv().await else {
+            panic!("the leftover report comes first");
+        };
+        assert_eq!(message.chip, ChipId::new("AA"));
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Connected));
     }
 
     #[tokio::test]

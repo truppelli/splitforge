@@ -352,6 +352,301 @@ pub mod search_flag {
     pub const DUTY_CYCLE_CONTROL: u16 = 0x0400;
 }
 
+/// A regulatory region, from the 2023 `tmr_region.h`, `enum TMR_Region`.
+///
+/// **Chosen by the operator, never assumed.** The M7e-Pico is a single SKU pre-configured for
+/// many regions, so the adapter sets one on every connection, and which one is a question of
+/// where the device is and what it is licensed to transmit on. There is deliberately no
+/// default.
+///
+/// Four values from the enum are left out. `NONE` is not a region, `OPEN` is not a compliant
+/// one, and the header marks `UNIVERSAL` for the M3e and `IS2` for the Micro and Nano, neither
+/// of which is this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Region {
+    /// North America.
+    Na = 1,
+    /// European Union.
+    Eu = 2,
+    /// Korea.
+    Kr = 3,
+    /// India.
+    In = 4,
+    /// Japan.
+    Jp = 5,
+    /// People's Republic of China.
+    Prc = 6,
+    /// European Union 2.
+    Eu2 = 7,
+    /// European Union 3.
+    Eu3 = 8,
+    /// Korea 2.
+    Kr2 = 9,
+    /// People's Republic of China, 840 MHz.
+    Prc2 = 10,
+    /// Australia.
+    Au = 11,
+    /// New Zealand. The header marks it experimental.
+    Nz = 12,
+    /// Reduced FCC region.
+    Na2 = 13,
+    /// 5 MHz FCC band.
+    Na3 = 14,
+    /// Israel.
+    Is = 15,
+    /// Malaysia.
+    My = 16,
+    /// Indonesia.
+    Id = 17,
+    /// Philippines.
+    Ph = 18,
+    /// Taiwan.
+    Tw = 19,
+    /// Macau.
+    Mo = 20,
+    /// Russia.
+    Ru = 21,
+    /// Singapore.
+    Sg = 22,
+    /// Japan 2: 24 dBm with 13 channels.
+    Jp2 = 23,
+    /// Japan 3: 24 dBm with 6 channels.
+    Jp3 = 24,
+    /// Vietnam.
+    Vn = 25,
+    /// Thailand.
+    Th = 26,
+    /// Argentina.
+    Ar = 27,
+    /// Hong Kong.
+    Hk = 28,
+    /// Bangladesh.
+    Bd = 29,
+    /// European Union 4: three channels.
+    Eu4 = 30,
+}
+
+impl Region {
+    /// Every region, with the name an operator types for it.
+    pub const ALL: &'static [(&'static str, Self)] = &[
+        ("na", Self::Na),
+        ("eu", Self::Eu),
+        ("kr", Self::Kr),
+        ("in", Self::In),
+        ("jp", Self::Jp),
+        ("prc", Self::Prc),
+        ("eu2", Self::Eu2),
+        ("eu3", Self::Eu3),
+        ("kr2", Self::Kr2),
+        ("prc2", Self::Prc2),
+        ("au", Self::Au),
+        ("nz", Self::Nz),
+        ("na2", Self::Na2),
+        ("na3", Self::Na3),
+        ("is", Self::Is),
+        ("my", Self::My),
+        ("id", Self::Id),
+        ("ph", Self::Ph),
+        ("tw", Self::Tw),
+        ("mo", Self::Mo),
+        ("ru", Self::Ru),
+        ("sg", Self::Sg),
+        ("jp2", Self::Jp2),
+        ("jp3", Self::Jp3),
+        ("vn", Self::Vn),
+        ("th", Self::Th),
+        ("ar", Self::Ar),
+        ("hk", Self::Hk),
+        ("bd", Self::Bd),
+        ("eu4", Self::Eu4),
+    ];
+
+    /// The wire byte.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// The name an operator types for this region.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(_, region)| *region == self)
+            .map_or("unknown", |(name, _)| name)
+    }
+}
+
+/// A region name nobody defined.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{name:?} is not a region; expected one of: {}", Region::ALL.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "))]
+pub struct UnknownRegion {
+    /// What was given.
+    pub name: String,
+}
+
+impl std::str::FromStr for Region {
+    type Err = UnknownRegion;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let wanted = text.trim().to_ascii_lowercase();
+        Self::ALL
+            .iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, region)| *region)
+            .ok_or(UnknownRegion {
+                name: text.to_owned(),
+            })
+    }
+}
+
+/// The most data any command in this crate carries.
+const MAX_COMMAND_BODY: usize = 16;
+
+/// A command, ready to encode: an opcode and the bytes after it.
+///
+/// Built only by the constructors below, each of which cites where its bytes come from.
+/// There is no way to build one from arbitrary bytes, because a command is something this
+/// crate transmits to a radio, and the ones it sends should each have been checked against a
+/// source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Command {
+    opcode: OpCode,
+    body: [u8; MAX_COMMAND_BODY],
+    len: usize,
+}
+
+/// The body of the command that starts a continuous Gen2 read, streaming tag reports.
+///
+/// SparkFun's `startReading`, recovered by its author from the vendor's Universal Reader
+/// Assistant transport logs. It is `0x2F`, multi-protocol tag operation, carrying an embedded
+/// `0x22`:
+///
+/// | Bytes | Meaning |
+/// |---|---|
+/// | `00 00` | Timeout, ignored for continuous reading |
+/// | `01` | Option: start continuous reading |
+/// | `22` | The embedded operation: read tag ID multiple |
+/// | `00 00` | Search flags for the multi-protocol operation |
+/// | `05` | Protocol: Gen2 |
+/// | `07` | Length of the embedded command after its opcode |
+/// | `22` | Embedded opcode |
+/// | `10` | Option: metadata follows |
+/// | `00 1B` | Search flags: `TAG_STREAMING`, `LARGE_TAG_POPULATION_SUPPORT`, configured antenna list |
+/// | `03 E8` | Search timeout: 1000 ms, which is also how often an empty field produces an end-of-cycle frame |
+/// | `01 FF` | Metadata flags: the nine fields `StreamDecoder` walks |
+///
+/// **Chosen over MercuryAPI 2023's own construction because the decoder is anchored on its
+/// answers.** A streaming response echoes the embedded option, search flags, and metadata
+/// flags, and [`crate::crc::CAPTURED_FRAME`] carries exactly these: `10`, `00 1B`, `01 FF`. The
+/// 2023 SDK adds a multi-select option byte whenever there is no filter, which moves every
+/// field of the response one byte right, and an off-time field. A test below holds the echo.
+pub const START_STREAMING_BODY: [u8; 16] = [
+    0x00, 0x00, 0x01, 0x22, 0x00, 0x00, 0x05, 0x07, 0x22, 0x10, 0x00, 0x1B, 0x03, 0xE8, 0x01, 0xFF,
+];
+
+/// Gen2, as `SET_TAG_PROTOCOL` takes it.
+///
+/// `TMR_TAG_PROTOCOL_GEN2`, sent as a `u16` by MercuryAPI's `TMR_SR_cmdSetProtocol` and as
+/// `00 05` by SparkFun's `setTagProtocol`. The two agree.
+pub const GEN2: u16 = 0x0005;
+
+/// `TMR_SR_CONFIGURATION_ENABLE_READ_FILTER`, from `serial_reader_imp.h` in both 2009 and 2023.
+pub const CONFIGURATION_ENABLE_READ_FILTER: u8 = 0x0C;
+
+impl Command {
+    const fn new(opcode: OpCode, data: &[u8]) -> Self {
+        let mut body = [0_u8; MAX_COMMAND_BODY];
+        let mut index = 0;
+        while index < data.len() {
+            body[index] = data[index];
+            index += 1;
+        }
+        Self {
+            opcode,
+            body,
+            len: data.len(),
+        }
+    }
+
+    /// Stop a continuous read, if one is running.
+    ///
+    /// `0x2F` with timeout `00 00` and option `02`, byte for byte the same in MercuryAPI's
+    /// `TMR_SR_cmdStopReading` and SparkFun's `stopReading`. The module goes on streaming into a
+    /// broken link (§ 8.8.2), so a new connection may find a stream from the last one still
+    /// running, and a start command sent into it would be answered somewhere in the middle.
+    #[must_use]
+    pub const fn stop_streaming() -> Self {
+        Self::new(OpCode::MultiProtocolTagOp, &[0x00, 0x00, 0x02])
+    }
+
+    /// Ask for the firmware version, with no body.
+    ///
+    /// Sent for its answer's existence rather than its contents: a response proves an
+    /// application firmware is listening at this baud rate before anything is configured.
+    #[must_use]
+    pub const fn version() -> Self {
+        Self::new(OpCode::Version, &[])
+    }
+
+    /// Select Gen2 as the tag protocol.
+    #[must_use]
+    pub const fn gen2_protocol() -> Self {
+        let [high, low] = GEN2.to_be_bytes();
+        Self::new(OpCode::SetTagProtocol, &[high, low])
+    }
+
+    /// Set the regulatory region.
+    ///
+    /// One byte, in both MercuryAPI's `TMR_SR_cmdSetRegion` and SparkFun's `setRegion`.
+    #[must_use]
+    pub const fn region(region: Region) -> Self {
+        Self::new(OpCode::SetRegion, &[region.to_byte()])
+    }
+
+    /// Turn the module's read filter off.
+    ///
+    /// Key-value form `01`, the key, and `00` for false: MercuryAPI's
+    /// `TMR_SR_cmdSetReaderConfiguration`, and SparkFun's `disableReadFilter`, which its
+    /// `startReading` calls first. With the filter on, the module suppresses repeated reads of
+    /// a tag itself, which removes the burst every `SelectionRule` selects from.
+    #[must_use]
+    pub const fn read_filter_off() -> Self {
+        Self::new(
+            OpCode::SetReaderOptionalParams,
+            &[0x01, CONFIGURATION_ENABLE_READ_FILTER, 0x00],
+        )
+    }
+
+    /// Start streaming. See [`START_STREAMING_BODY`].
+    #[must_use]
+    pub const fn start_streaming() -> Self {
+        Self::new(OpCode::MultiProtocolTagOp, &START_STREAMING_BODY)
+    }
+
+    /// The opcode, which is also what the module's answer carries.
+    #[must_use]
+    pub const fn opcode(&self) -> OpCode {
+        self.opcode
+    }
+
+    /// The bytes after the opcode.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body[..self.len]
+    }
+
+    /// Encodes the whole frame into `out`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::frame::EncodeError::BufferTooSmall`] if `out` cannot hold the frame.
+    pub fn encode<'a>(&self, out: &'a mut [u8]) -> Result<&'a [u8], crate::frame::EncodeError> {
+        crate::frame::encode_command(self.opcode.to_byte(), self.body(), out)
+    }
+}
+
 /// Splits a tag report's antenna byte into its transmit and receive ports.
 ///
 /// **The byte is not an antenna number**, which is the trap § 8.8.3 sets by describing the
@@ -454,6 +749,128 @@ mod tests {
         assert_eq!(antenna_ports(0x01), (16, 1));
         // The top of the range is representable without wrapping.
         assert_eq!(antenna_ports(0xFF), (15, 15));
+    }
+
+    #[test]
+    fn the_start_command_asks_for_exactly_what_the_captured_answer_carries() {
+        // The anchor. A streaming response echoes the embedded read's option byte, search
+        // flags, and metadata flags, and the captured frame is one such response. If the start
+        // command asked for anything else, the decoder, which is anchored on that frame, would
+        // be reading answers in a layout it has never seen.
+        let body = START_STREAMING_BODY;
+        let payload = &CAPTURED_FRAME[crate::frame::RESPONSE_HEADER_LEN..];
+
+        assert_eq!(
+            body[8],
+            OpCode::ReadTagIdMultiple.to_byte(),
+            "the embedded read"
+        );
+        assert_eq!(body[9], payload[0], "option byte");
+        assert_eq!(body[10..12], payload[1..3], "search flags");
+        assert_eq!(body[14..16], payload[3..5], "metadata flags");
+        assert_eq!(
+            u16::from_be_bytes([body[14], body[15]]),
+            crate::tag_report::flag::DECODABLE,
+            "the start command asks for every field the decoder walks and nothing it refuses"
+        );
+    }
+
+    #[test]
+    fn the_start_command_is_internally_consistent() {
+        let body = START_STREAMING_BODY;
+        let flags = u16::from_be_bytes([body[10], body[11]]);
+
+        assert_eq!(body[2], 0x01, "option 1 starts continuous reading");
+        assert_eq!(body[3], OpCode::ReadTagIdMultiple.to_byte());
+        assert_eq!(u16::from(body[6]), GEN2, "the protocol the read runs");
+        assert_eq!(
+            usize::from(body[7]),
+            body.len() - 9,
+            "the length byte counts the embedded command after its opcode"
+        );
+        assert_ne!(
+            flags & search_flag::TAG_STREAMING,
+            0,
+            "streams rather than buffers"
+        );
+        assert_ne!(flags & search_flag::LARGE_TAG_POPULATION_SUPPORT, 0);
+        assert_eq!(
+            flags & search_flag::ANTENNA_MASK,
+            search_flag::CONFIGURED_LIST
+        );
+        assert_eq!(
+            flags & search_flag::STATUS_REPORT_STREAMING,
+            0,
+            "no status reports: where their flags go in this form is not established"
+        );
+    }
+
+    #[test]
+    fn each_command_encodes_to_the_bytes_its_sources_agree_on() {
+        // Frame bodies as MercuryAPI and SparkFun both build them. The CRC is the crate's,
+        // anchored separately on the captured frame.
+        let cases: [(Command, u8, &[u8]); 6] = [
+            (Command::stop_streaming(), 0x2F, &[0x00, 0x00, 0x02]),
+            (Command::version(), 0x03, &[]),
+            (Command::gen2_protocol(), 0x93, &[0x00, 0x05]),
+            (Command::region(Region::Na), 0x97, &[0x01]),
+            (Command::read_filter_off(), 0x9A, &[0x01, 0x0C, 0x00]),
+            (Command::start_streaming(), 0x2F, &START_STREAMING_BODY),
+        ];
+
+        for (command, opcode, body) in cases {
+            let mut out = [0_u8; crate::frame::MAX_FRAME_LEN];
+            let frame = command
+                .encode(&mut out)
+                .expect("every command fits a frame");
+            assert_eq!(frame[0], crate::frame::SOH);
+            assert_eq!(usize::from(frame[1]), body.len());
+            assert_eq!(frame[2], opcode, "{command:?}");
+            assert_eq!(&frame[3..3 + body.len()], body, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn regions_carry_the_values_tmr_region_h_gives_them() {
+        // Spot checks against the header, including the two SparkFun's comments get wrong by
+        // name: its "EU" is 0x08, which MercuryAPI calls EU3.
+        assert_eq!(Region::Na.to_byte(), 1);
+        assert_eq!(Region::Eu.to_byte(), 2);
+        assert_eq!(Region::Eu3.to_byte(), 8);
+        assert_eq!(Region::Na2.to_byte(), 13);
+        assert_eq!(Region::Na3.to_byte(), 14);
+        assert_eq!(Region::Eu4.to_byte(), 30);
+
+        let mut bytes: Vec<u8> = Region::ALL
+            .iter()
+            .map(|(_, region)| region.to_byte())
+            .collect();
+        let listed = bytes.len();
+        bytes.sort_unstable();
+        bytes.dedup();
+        assert_eq!(bytes.len(), listed, "no two names share a code");
+        assert_eq!(
+            bytes,
+            (1..=30).collect::<Vec<u8>>(),
+            "1 to 30, with nothing missing"
+        );
+    }
+
+    #[test]
+    fn a_region_is_named_the_way_an_operator_types_it() {
+        assert_eq!("na".parse::<Region>(), Ok(Region::Na));
+        assert_eq!(" EU3 ".parse::<Region>(), Ok(Region::Eu3));
+        for (name, region) in Region::ALL {
+            assert_eq!(name.parse::<Region>(), Ok(*region));
+            assert_eq!(region.name(), *name);
+        }
+
+        let error = "open".parse::<Region>().expect_err("OPEN is not offered");
+        let text = error.to_string();
+        assert!(
+            text.contains("\"open\"") && text.contains("na, eu"),
+            "{text}"
+        );
     }
 
     #[test]
