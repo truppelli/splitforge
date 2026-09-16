@@ -29,3 +29,10 @@ tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# A pseudo-terminal, so `port::open` can be exercised against a real tty device rather than
+# only against fakes that implement `Read`.
+rustix.workspace = true
+# A path that exists and is not a device, for the error a mistyped `--serial` produces.
+tempfile.workspace = true

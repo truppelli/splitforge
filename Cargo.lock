@@ -939,6 +939,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rusqlite",
+ "rustix",
  "serde_json",
  "splitforge-api",
  "splitforge-cli",
@@ -1040,9 +1041,11 @@ dependencies = [
 name = "splitforge-thingmagic"
 version = "0.0.0"
 dependencies = [
+ "rustix",
  "serialport",
  "splitforge-domain",
  "splitforge-reader",
+ "tempfile",
  "thiserror",
  "time",
  "tokio",

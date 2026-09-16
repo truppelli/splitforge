@@ -46,6 +46,9 @@ workspace = true
 # To hold a write lock on the event database from a second connection, which is how a test
 # makes the read path's append fail the way a busy database really does.
 rusqlite.workspace = true
+# A pseudo-terminal for the serial rehearsal: a real device for `--serial` to open, with a
+# fake module on the other end. `openpty` by hand would need `unsafe`, denied workspace-wide.
+rustix.workspace = true
 serde_json.workspace = true
 # The tests spawn the real service binary, but build its fixture database through library
 # calls — `splitforge-cli` is a dependency above, so they reach for it directly. Shelling out
