@@ -268,7 +268,16 @@ pair of facts rather than a contradiction.
       against ports that fail on demand, which is the right way to test a lifecycle and is not
       the same as running it: the branch deciding that a timeout is *not* a disconnection turns
       on what a real idle `/dev/ttyUSB0` returns, and getting that wrong reopens the port
-      between every pair of runners
+      between every pair of runners.
+      **`port::open` has now opened a pseudo-terminal**, in
+      `crates/splitforge-thingmagic/tests/pty.rs`, and that branch is right on a tty: an idle
+      port returns `TimedOut` after its timeout, and a device whose other end has gone returns
+      `BrokenPipe` at once, which is a disconnection rather than a quiet reader. It also found
+      that `port::open` flattened every failure to `ErrorKind::Other` and named no path, so a
+      missing device node and one this account may not open — a udev rule and a group — were
+      indistinguishable from each other and from anything else; both are fixed. **Still
+      unticked**: a pty is a tty, and a USB serial bridge being unplugged is not the same event
+      as a pty controller closing
 - [ ] **Decode a tag report into a read.** The one thing the adapter above cannot do, and the
       reason `TagReportDecoder` is a trait this crate ships no implementation of. Field *order*
       was established from the parser itself; which bit selects which field was not.
@@ -347,7 +356,16 @@ pair of facts rather than a contradiction.
       reconnection, each recorded as a confirmed gap. That half needs a real cable and no
       parser, and waiting for the decoder would have left it untested on hardware for no
       reason. **Unticked, and this one cannot be ticked from a desk at all**: the flag exists
-      to be pointed at a device node, and `/dev/null` in a test is not one
+      to be pointed at a device node, and `/dev/null` in a test is not one.
+      **A device node it now is pointed at, in a test.** `apps/splitforge-edge/tests/serial.rs`
+      spawns the real binary with `--serial` against a pseudo-terminal and a fake module built
+      from the same archived sources the adapter was: the service opens the tty, sends the
+      start sequence, journals the reports streamed back, records a confirmed gap when the
+      device goes, and never announces a module that refused a command.
+      `crates/splitforge-thingmagic/tests/pty.rs` covers `port::open` itself. Still unticked,
+      and the reason is unchanged rather than weakened: a pty is not a USB serial bridge, and a
+      fake built from the sources the adapter was built from agrees with it by construction —
+      which is exactly how `crc.rs` shipped wrong
 - [ ] **Start the stream.** Nothing tells the module to read. `Port` is `Box<dyn Read>`, so
       the adapter can only listen. No code sends the `0x22` read command with `TAG_STREAMING`,
       and no document describes a startup sequence or a module profile that starts reading on
@@ -387,7 +405,8 @@ pair of facts rather than a contradiction.
       ([finding 17](readers/vendor-documents.md#17-an-empty-field-produces-a-frame-at-the-end-of-every-search-cycle)).
       And SparkFun describes the tag timestamp as time since the last keep-alive, which the
       guide contradicts ([finding 18](readers/vendor-documents.md#18-sparkfun-and-the-user-guide-disagree-on-what-the-tag-timestamp-counts-from)).
-      Still unticked: no module has answered one of these commands
+      Still unticked: no module has answered one of these commands. **A fake one has**, over a
+      pseudo-terminal — see *Compose the module* above
 
 **Needs the module:**
 

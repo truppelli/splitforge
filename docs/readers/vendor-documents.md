@@ -1108,6 +1108,48 @@ reading and harmless under SparkFun's.
 SparkFun's `setRegion` comments list `0x08` as EU. In `tmr_region.h`, `8` is `TMR_REGION_EU3`, and
 EU is `2`. The adapter's region names come from `tmr_region.h`.
 
+## What a pseudo-terminal settled
+
+The adapter's device half had never opened a device: every test supplied a fake implementing
+`Read`. A pty is the closest thing a machine with no module can offer, and running the real
+binary against one ([the serial rehearsal](../../apps/splitforge-edge/tests/serial.rs)) settled
+three questions and found two defects. **None of it is a claim about the module** — a pty is a
+tty, not a USB serial bridge.
+
+### 20. An idle port times out, and a closed one does not
+
+M3a recorded the branch deciding that a timeout is *not* a disconnection as turning on *"what a
+real idle `/dev/ttyUSB0` returns"*. On a tty, with `serialport` 4.10:
+
+| The port | `read` returns |
+|---|---|
+| Open, nothing sent | `TimedOut`, after the configured timeout |
+| Other end closed | `BrokenPipe`, immediately |
+| Other end closed, reopened | `NotFound` — the device node is gone |
+
+So `pump`'s two branches are right on a tty: a quiet module keeps its connection, and one that
+goes is a disconnection noticed at once rather than after a silence threshold. Whether a USB
+bridge's `ttyUSB0` behaves the same when its cable is pulled is still open, and is the one
+thing only the hardware can say.
+
+### 21. `port::open` erased the reason a port would not open
+
+Every failure came back as `ErrorKind::Other` with serialport's own text — *"No such file or
+directory"*, naming no path. On a device whose port is named by a udev rule, the path is exactly
+what an operator gets wrong, and the two failures a Pi produces are a missing device node and one
+the service account may not open: a udev rule and a group, diagnosed differently. Both now keep
+their kind and name the path. A path that exists and is not a tty stays `Other`, because
+serialport reports that as `Unknown` and guessing from the message text would be worse.
+
+### 22. A pty controller is inherited by anything the test spawns
+
+Not a protocol finding, and the one that cost the most time. `posix_openpt` does **not** set
+close-on-exec, unlike everything `std::fs` opens. So a test that opens a pty and then spawns the
+service hands the service a copy of the controller end. Dropping every copy in the test process
+then closes nothing: the device stays open, the service reads on undisturbed, and the cable
+cannot be pulled. `rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC)` is the fix, and the symptom to
+recognise is a disconnection that never arrives.
+
 ## Adding a document here
 
 One row per document, with a SHA-256 taken at retrieval, and the code or docs that depend on

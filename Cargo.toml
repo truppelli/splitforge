@@ -46,6 +46,10 @@ clap = { version = "4.5.51", features = ["derive"] }
 # between a reader report and a durable write parses CSV.
 csv = "1.4.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Test-only, and already in the tree: `tokio` and `tempfile` both build it. The pty module
+# gives the serial rehearsal a real tty device to point `--serial` at, through a safe API —
+# `openpty` by hand would need `unsafe`, which is denied workspace-wide (CONTRIBUTING).
+rustix = { version = "1.1.4", features = ["pty"] }
 serde = { version = "1.0.229", features = ["derive"] }
 # The serial port the ThingMagic adapter opens (ADR-0024). Default features are off on
 # purpose: they pull in `libudev`, which needs `libudev-dev` for the *target*, and CI's

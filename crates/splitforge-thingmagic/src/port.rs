@@ -83,9 +83,36 @@ pub fn serial(settings: SerialSettings) -> impl PortFactory {
         let port = serialport::new(&settings.path, settings.baud)
             .timeout(settings.read_timeout)
             .open()
-            .map_err(io::Error::other)?;
+            .map_err(|error| opening(&settings.path, &error))?;
         Ok(Box::new(port) as Port)
     }
+}
+
+/// Turns a `serialport` failure into an `io::Error` that keeps its kind and names the path.
+///
+/// **Both halves were missing, and a pty rehearsal found them.** `io::Error::other` flattened
+/// every failure to [`io::ErrorKind::Other`], and the message serialport supplies is
+/// *"No such file or directory"* with no clue which file — on a device whose port is named by
+/// a udev rule, so the path is exactly what an operator got wrong.
+///
+/// The path is what anybody reads today: the reconnect loop treats every failure to open the
+/// same way, deliberately, because retrying is the right response to all of them. The kind is
+/// preserved because erasing it is free to avoid and expensive to undo, and because the two
+/// failures a Pi actually produces — a device node that is not there, and one this account may
+/// not open — are a udev rule and a group, diagnosed differently.
+///
+/// What serialport cannot say is when a path opens and is not a tty: it reports that as
+/// `Unknown`, so it stays [`io::ErrorKind::Other`] here rather than being guessed at from the
+/// message text.
+fn opening(path: &str, error: &serialport::Error) -> io::Error {
+    let kind = match error.kind() {
+        serialport::ErrorKind::Io(kind) => kind,
+        // The crate's own words for "the path names nothing".
+        serialport::ErrorKind::NoDevice => io::ErrorKind::NotFound,
+        serialport::ErrorKind::InvalidInput => io::ErrorKind::InvalidInput,
+        serialport::ErrorKind::Unknown => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, format!("opening the serial port {path}: {error}"))
 }
 
 #[cfg(test)]
