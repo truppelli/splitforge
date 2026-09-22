@@ -426,7 +426,22 @@ ordering above was written** ([vendor-documents.md](readers/vendor-documents.md#
   bounds and counts the loss that streaming cannot, at a throughput cost nobody has measured.
   Which of the two the adapter uses is a decision this plan does not yet make.
 
-### Step 5 — systemd and the device node
+### Step 5 — systemd and the device node — **done, but for the bridge's IDs**
+
+**Done by [ADR-0034](adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)**, and
+observed under systemd 252 rather than on a Pi. Three things below turned out to be missing:
+
+- **The driver has to be loaded before the service starts.** `DeviceAllow=char-ttyUSB` is
+  looked up in `/proc/devices` at start, and `ttyUSB` is listed only once `usbserial` has
+  loaded. Otherwise the filter allows nothing and systemd says so only at debug level.
+  `deploy/splitforge.modules-load.conf` loads it at boot.
+- **`ProtectClock=yes` does not close the device policy by itself**, so `DevicePolicy=closed`
+  is load-bearing rather than belt-and-braces.
+- **The service threw away the reason a port would not open.** It now logs it, and
+  [deployment.md](deployment.md#connecting-the-reader) maps each message to its fix.
+
+The rule below shipped as `deploy/99-splitforge-reader.rules` matching any USB serial adapter,
+because the bridge has not been chosen. The `XXXX`s are still to fill in once it is.
 
 > **`PrivateDevices=yes` in [`deploy/splitforge-edge.service`](../deploy/splitforge-edge.service)
 > gives the service a private `/dev` containing only pseudo-devices. `/dev/ttyUSB0` is not in

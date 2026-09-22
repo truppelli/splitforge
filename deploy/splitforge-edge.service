@@ -123,7 +123,25 @@ PrivateMounts=yes
 # The service reads the clock and never sets it. Clock discipline is the system's NTP or
 # GPS daemon's job, and it is a different unit with different privileges.
 ProtectClock=yes
-PrivateDevices=yes
+# The reader's serial port, and no other device (ADR-0034).
+#
+# PrivateDevices=yes gave the service a /dev of its own holding null, zero, random and little
+# else, so --serial named a node that was not there and the first session with a module
+# would have failed to open it. It is off, and the device filter it implied is kept here
+# explicitly: the service sees this device's /dev and may open only the pseudo-devices every
+# service may, and USB serial ports. Observed under this unit on Debian bookworm, systemd 252.
+#
+# Binding the one node into a private /dev instead does not survive the morning: a node that
+# appears after the service starts, as it does on a Pi booted with the reader unplugged,
+# never appears inside it.
+#
+# char-ttyUSB is looked up in /proc/devices when the service starts, and the kernel lists it
+# only once the usbserial driver is loaded. If it is not, this allows nothing, every open is
+# "Operation not permitted", and systemd says why only at debug level.
+# deploy/splitforge.modules-load.conf loads the driver at boot, before this unit starts.
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

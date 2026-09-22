@@ -249,6 +249,9 @@ pub struct ThingMagicReader<P, D> {
     /// The last refusal logged, so a module refusing the same command on every attempt says
     /// so once rather than once per reconnect.
     last_refusal: Option<Refusal>,
+    /// The last reason a port would not open, logged once per outage rather than once per
+    /// retry.
+    last_open_failure: Option<String>,
 }
 
 /// How a connection's read loop finished.
@@ -282,6 +285,7 @@ where
             faults_reported: ReaderFaults::default(),
             start: None,
             last_refusal: None,
+            last_open_failure: None,
         }
     }
 
@@ -373,6 +377,7 @@ where
                         return;
                     };
                     failures = if established {
+                        self.last_open_failure = None;
                         0
                     } else {
                         failures.saturating_add(1)
@@ -391,8 +396,9 @@ where
                         return;
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     failures = failures.saturating_add(1);
+                    self.report_open_failure(&error);
                     // Sent on every failed attempt rather than only the first. Opening a gap
                     // is idempotent at the journal — `open_reader_gap` returns the one
                     // already open — so a stateless report here costs a row nobody writes,
@@ -456,6 +462,31 @@ where
             "splitforge-thingmagic: the module did not start streaming: {refusal}. The \
              connection is closed and retried; this is logged again only if the reason changes."
         );
+    }
+
+    /// Logs why the port would not open, unless it is the reason already logged. Returns
+    /// whether it logged.
+    ///
+    /// **The reason is the whole diagnosis, and it used to be discarded.** A port that would
+    /// not open was a confirmed gap with no cause attached anywhere, so the three failures an
+    /// operator actually meets were indistinguishable: *No such file or directory* (nothing
+    /// plugged in, or no device name), *Permission denied* (the node's owner), and *Operation
+    /// not permitted* (a device filter refusing it). They are fixed in three different
+    /// places — see docs/deployment.md — and `port::open` had already kept them apart, only
+    /// for this loop to drop the error on the floor.
+    ///
+    /// Forgotten once a connection proves itself, so the next outage says why it happened.
+    fn report_open_failure(&mut self, error: &io::Error) -> bool {
+        let reason = error.to_string();
+        if self.last_open_failure.as_deref() == Some(reason.as_str()) {
+            return false;
+        }
+        eprintln!(
+            "splitforge-thingmagic: the port did not open: {reason}. It is retried with \
+             backoff; this is logged again only if the reason changes."
+        );
+        self.last_open_failure = Some(reason);
+        true
     }
 
     /// Reads one connection to its end.
@@ -1229,6 +1260,33 @@ mod tests {
                 cause: Disconnection::Ended
             },
             "a port that dies mid-stream is reported as a connection that ended"
+        );
+    }
+
+    #[test]
+    fn why_a_port_would_not_open_is_logged_once_per_reason() {
+        // An unplugged module is retried with backoff for as long as it stays unplugged, and a
+        // line per retry would bury everything else in journald by lunchtime.
+        let mut reader = ThingMagicReader::new(
+            ReaderId::new("mat"),
+            || -> io::Result<Port> { Err(io::Error::from(ErrorKind::NotFound)) },
+            StubDecoder,
+        );
+        let missing = io::Error::new(ErrorKind::NotFound, "opening /dev/r: No such file");
+        let refused = io::Error::new(ErrorKind::PermissionDenied, "opening /dev/r: not permitted");
+
+        assert!(
+            reader.report_open_failure(&missing),
+            "the first reason is logged"
+        );
+        assert!(!reader.report_open_failure(&missing), "and not again");
+        assert!(
+            reader.report_open_failure(&refused),
+            "a different reason is news"
+        );
+        assert!(
+            reader.report_open_failure(&missing),
+            "and so is the first one, back again"
         );
     }
 

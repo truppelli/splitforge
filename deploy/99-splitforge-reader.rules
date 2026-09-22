@@ -1,0 +1,23 @@
+# The reader's serial port: a name that survives re-enumeration, owned by the service's group.
+#
+# Install to /etc/udev/rules.d/99-splitforge-reader.rules — see docs/deployment.md.
+#
+# SYMLINK: a USB serial port is ttyUSB0 until it re-enumerates while the old node is still
+# held open, and then it is ttyUSB1. A pulled cable does exactly that to a process that has not
+# yet noticed. --serial names /dev/splitforge-reader, which follows the device.
+#
+# GROUP and MODE: the node is otherwise root:dialout 0660, and the service account is not in
+# dialout. Adding it would grant every serial port on the device, not just the reader's.
+#
+# 99: after 50-udev-default.rules, which gives every tty to dialout.
+#
+# Any USB serial adapter matches, because the USB-UART bridge has not been chosen (hardware plan
+# section 3). Once it is bought, narrow this with its ATTRS{idVendor}, ATTRS{idProduct} and, if
+# it has one, ATTRS{serial}. Until then, two USB serial adapters plugged in at once contend for
+# the one name, and so would a GPS whose NMEA arrived over USB: the plan puts only its PPS on a
+# GPIO pin.
+#
+# KERNEL names the same device group as the unit's DeviceAllow=char-ttyUSB. A bridge that
+# enumerates as ttyACM needs both changed, and apps/splitforge-edge/tests/unit_file.rs fails
+# until they agree.
+SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*", SYMLINK+="splitforge-reader", GROUP="splitforge", MODE="0660"

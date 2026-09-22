@@ -6,9 +6,11 @@
 //! error that reads like a packaging problem.
 //!
 //! Every assertion here compares the unit against a fact taken from somewhere else — the
-//! binary's own `--help` output, `splitforge_api::DEFAULT_SOCKET_PATH`, or the sysusers
-//! file — rather than against a constant restated in this file. A test that restated the
-//! path would drift in exactly the same way.
+//! binary's own `--help` output, `splitforge_api::DEFAULT_SOCKET_PATH`, the sysusers file,
+//! the udev rule, or the install guide — rather than against a constant restated in this
+//! file. A test that restated the path would drift in exactly the same way. The one table of
+//! facts written down here, which kernel module registers which device group, is the
+//! kernel's, and it fails on a group it does not know rather than passing.
 //!
 //! What this cannot check is whether the unit *runs*: whether the syscall filter is wide
 //! enough for `rusqlite`'s `fsync`, whether the hardening breaks something on the Pi's
@@ -85,6 +87,100 @@ impl Unit {
         );
         values[0]
     }
+}
+
+/// The reader's udev rule, as `(key, operator, value)` terms.
+///
+/// One rule, on one line. udev also allows several, and line continuations; nothing here
+/// needs either, and the parser refuses both rather than misreading them.
+struct Rule {
+    terms: Vec<(String, String, String)>,
+}
+
+impl Rule {
+    fn load() -> Self {
+        let path = deploy().join("99-splitforge-reader.rules");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+        let rules: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(rules.len(), 1, "one rule, for one port: {rules:?}");
+        assert!(!rules[0].ends_with('\\'), "a continued rule: {}", rules[0]);
+
+        let terms = rules[0]
+            .split(',')
+            .map(|term| {
+                let term = term.trim();
+                // Longest first: `==` and `+=` both contain `=`.
+                let (key, operator, value) = ["==", "+=", "="]
+                    .iter()
+                    .find_map(|operator| {
+                        term.split_once(operator)
+                            .map(|(key, value)| (key, *operator, value))
+                    })
+                    .unwrap_or_else(|| panic!("not a udev term: {term}"));
+                (
+                    key.trim().to_owned(),
+                    operator.to_owned(),
+                    value.trim().trim_matches('"').to_owned(),
+                )
+            })
+            .collect();
+        Self { terms }
+    }
+
+    /// The single value `key` is matched or assigned with `operator`.
+    fn one(&self, key: &str, operator: &str) -> &str {
+        let values: Vec<&str> = self
+            .terms
+            .iter()
+            .filter(|(name, op, _)| name == key && op == operator)
+            .map(|(_, _, value)| value.as_str())
+            .collect();
+        assert_eq!(
+            values.len(),
+            1,
+            "expected one {key}{operator} in the udev rule, found {values:?}"
+        );
+        values[0]
+    }
+}
+
+/// The account `splitforge.sysusers.conf` declares.
+fn service_account() -> String {
+    let path = deploy().join("splitforge.sysusers.conf");
+    let sysusers = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let declared: Vec<&str> = sysusers
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("u "))
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .collect();
+    assert_eq!(declared.len(), 1, "expected one user, got {declared:?}");
+    declared[0].to_owned()
+}
+
+/// The device group the unit's filter allows: `ttyUSB` for `DeviceAllow=char-ttyUSB rw`.
+fn allowed_device_group(unit: &Unit) -> &str {
+    let allowed = unit.one("DeviceAllow");
+    allowed
+        .strip_prefix("char-")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("DeviceAllow={allowed} does not name a device group"))
+}
+
+/// The install guide an operator follows.
+fn install_guide() -> String {
+    let path = deploy()
+        .parent()
+        .expect("deploy/ sits in the workspace root")
+        .join("docs/deployment.md");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
 /// A default path as the binary itself reports it.
@@ -253,19 +349,12 @@ fn the_unit_and_the_sysusers_file_agree_on_the_account() {
     let path = deploy().join("splitforge.sysusers.conf");
     let sysusers = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let account = service_account();
 
-    let declared: Vec<&str> = sysusers
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("u "))
-        .filter_map(|line| line.split_whitespace().nth(1))
-        .collect();
-
-    assert_eq!(declared.len(), 1, "expected one user, got {declared:?}");
-    assert_eq!(unit.one("User"), declared[0]);
+    assert_eq!(unit.one("User"), account);
     assert_eq!(
         unit.one("Group"),
-        declared[0],
+        account,
         "sysusers gives a user its own group of the same name"
     );
 
@@ -275,6 +364,135 @@ fn the_unit_and_the_sysusers_file_agree_on_the_account() {
         sysusers.contains("nologin") || sysusers.contains("/bin/false"),
         "the service account should not be able to log in:\n{sysusers}"
     );
+}
+
+#[test]
+fn the_service_may_open_the_readers_port_and_no_other_device() {
+    // ADR-0034. PrivateDevices=yes gave the service a /dev without the reader's port in it,
+    // so the first session with a module would have failed to open it. Turning it off gives
+    // back every device node on the Pi unless the filter it implied is kept, and ProtectClock
+    // adding its own `char-rtc r` entry does not close the policy on its own: under systemd
+    // 252 a serial port opened with only that in place.
+    let unit = Unit::load();
+
+    assert_eq!(
+        unit.one("PrivateDevices"),
+        "no",
+        "a private /dev hides the reader's port, and binding the port into one misses a \
+         reader plugged in after the service starts (ADR-0034)"
+    );
+    assert_eq!(
+        unit.one("DevicePolicy"),
+        "closed",
+        "without this, PrivateDevices=no is every device node on the Pi"
+    );
+    assert_eq!(
+        unit.all("DeviceAllow"),
+        ["char-ttyUSB rw"],
+        "the reader's port and nothing else. A second device is a security decision."
+    );
+}
+
+#[test]
+fn the_udev_rule_hands_the_service_the_port_its_filter_allows() {
+    // Three files have to agree for the service to open its port, and a disagreement in any
+    // of them is a gap at 6 a.m. with a one-line reason: the rule matching a group the unit
+    // does not allow is "Operation not permitted", and a node owned by another group is
+    // "Permission denied".
+    let unit = Unit::load();
+    let rule = Rule::load();
+    let group = allowed_device_group(&unit);
+
+    assert_eq!(rule.one("SUBSYSTEM", "=="), "tty");
+    let kernel = rule.one("KERNEL", "==");
+    assert!(
+        kernel
+            .strip_prefix(group)
+            .is_some_and(|rest| rest.starts_with('[')),
+        "the rule matches {kernel} and the unit allows char-{group}; a bridge that enumerates \
+         as something else needs both changed"
+    );
+
+    assert_eq!(
+        rule.one("GROUP", "="),
+        service_account(),
+        "the node belongs to the service's own group, so the account never joins dialout"
+    );
+    let mode = rule.one("MODE", "=");
+    let bits = u32::from_str_radix(mode, 8)
+        .unwrap_or_else(|error| panic!("MODE={mode} is not octal: {error}"));
+    assert_eq!(
+        bits & 0o060,
+        0o060,
+        "MODE={mode}: the group must read and write"
+    );
+    assert_eq!(
+        bits & 0o007,
+        0,
+        "MODE={mode} opens the reader's port to every account"
+    );
+}
+
+#[test]
+fn the_operator_is_told_to_read_the_name_the_rule_creates() {
+    // `ttyUSB0` renumbers when the bridge re-enumerates while the old node is held, which is
+    // what a pulled cable does. A guide that said `--serial /dev/ttyUSB0` would work until
+    // the first induced disconnection and then never reconnect.
+    let link = Rule::load().one("SYMLINK", "+=").to_owned();
+    let guide = install_guide();
+    let named = format!("--serial /dev/{link}");
+    assert!(
+        guide.contains(&named),
+        "docs/deployment.md never says {named}, which is the name the udev rule creates"
+    );
+}
+
+#[test]
+fn the_driver_that_registers_the_allowed_group_is_loaded_at_boot() {
+    // DeviceAllow=char-<group> is looked up in /proc/devices when the service starts, and a
+    // group whose driver has not loaded is not listed there. The filter then allows nothing,
+    // every open is "Operation not permitted" for the life of the process, and systemd says
+    // why only at debug level. Observed under systemd 252.
+    let unit = Unit::load();
+    let group = allowed_device_group(&unit);
+    let module = match group {
+        "ttyUSB" => "usbserial",
+        "ttyACM" => "cdc_acm",
+        other => panic!(
+            "which kernel module registers char-{other}? Add it here and to \
+             deploy/splitforge.modules-load.conf"
+        ),
+    };
+
+    let path = deploy().join("splitforge.modules-load.conf");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let loaded: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with(';'))
+        .collect();
+    assert!(
+        loaded.contains(&module),
+        "char-{group} needs {module} loaded before the service starts; the file loads {loaded:?}"
+    );
+}
+
+#[test]
+fn every_file_in_deploy_is_in_the_install_guide() {
+    // A file shipped in deploy/ that the guide never mentions is one nobody installs. The
+    // udev rule and the modules-load file are each a silent failure when missing, so this is
+    // the check that they are at least on the list.
+    let guide = install_guide();
+    let entries = std::fs::read_dir(deploy()).expect("list deploy/");
+    for entry in entries {
+        let name = entry.expect("a directory entry").file_name();
+        let name = name.to_str().expect("utf-8");
+        assert!(
+            guide.contains(&format!("`deploy/{name}`")),
+            "docs/deployment.md does not list deploy/{name} in what gets installed"
+        );
+    }
 }
 
 #[test]

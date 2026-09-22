@@ -413,7 +413,20 @@ pair of facts rather than a contradiction.
 - [ ] `PrivateDevices=no` / `DevicePolicy=closed` / `DeviceAllow=char-ttyUSB rw` in the unit,
       plus a udev rule for a stable device name. The network directives **stay** as
       [ADR-0032](adr/0032-the-service-speaks-ip-to-this-device-only.md) left them — a serial
-      adapter opens a file, not a socket
+      adapter opens a file, not a socket.
+      **Built, and most of it did not need the module**
+      ([ADR-0034](adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)). As shipped,
+      `PrivateDevices=yes` hid the port, so the first session would have opened nothing. Under
+      systemd 252, with the unit as committed and only `ExecStart` changed, the service ran its
+      whole lifecycle against a scripted module on a pseudo-terminal: a gap while unplugged, three
+      reads journaled once plugged in, and a confirmed gap when pulled. The filter refused an
+      unlisted serial group and allowed a listed one. Doing it found a failure the plan had not
+      named: `char-ttyUSB` is looked up in `/proc/devices` when the service starts, so on a Pi
+      booted with the reader unplugged the filter would allow nothing, silently at systemd's level.
+      `deploy/splitforge.modules-load.conf` loads `usbserial` at boot to prevent it. It also found
+      the service had been throwing away the reason a port would not open. **Still unticked**: no
+      `ttyUSB` port has been opened, because the container's kernel has no `usbserial`, and the udev
+      rule matches any USB serial adapter until the USB-UART bridge is chosen and its IDs are known
 - [ ] Measure what M5 could not: whether the SD card honors `fsync`, what the second sync per
       reader report costs on real flash, what a full day's journal weighs, and what happens to
       a write in flight when the power goes
@@ -1560,9 +1573,12 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       module* bullet above still names `UndecodedReports`. [deployment.md](deployment.md#operating)
       still says the service *"does not write to the journal at all"*.
       **The log line is fixed**, by the start-the-stream change, which rewrote it to name the
-      region and the stream it starts. The other two remain, and so does
-      `crates/splitforge-thingmagic/src/provider.rs`'s module documentation, which still says the
-      crate *"ships no implementation"* of a tag-report decoder.
+      region and the stream it starts. **The deployment.md line is fixed** too, by the change that
+      let the unit open the reader's port
+      ([ADR-0034](adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)). The M3a
+      bullet remains, and so does `crates/splitforge-thingmagic/src/provider.rs`'s module
+      documentation, which still says the crate *"ships no implementation"* of a tag-report
+      decoder.
 
 **Checked and held**, so nobody repeats the work: every SQL statement except the `VACUUM
 INTO` above binds its parameters. There is no `unsafe`. Frame length is bounded by the wire
