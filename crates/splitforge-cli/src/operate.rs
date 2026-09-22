@@ -109,6 +109,9 @@ pub(crate) struct RecoveryView {
     pub corrupt_lines: u64,
     /// Trailing bytes from an interrupted write. Expected after a power cut.
     pub torn_tail_bytes: u64,
+    /// Interrupted writes a later write was appended onto. Expected after a power cut, and
+    /// the reads after them were recovered.
+    pub torn_writes: u64,
 }
 
 impl RecoveryView {
@@ -119,6 +122,7 @@ impl RecoveryView {
             backfilled_into_sidecar: report.backfilled_into_sidecar,
             corrupt_lines: report.found.corrupt_lines,
             torn_tail_bytes: report.found.torn_tail_bytes,
+            torn_writes: report.found.torn_writes,
         }
     }
 }
@@ -229,6 +233,17 @@ pub(crate) fn doctor(
                 "the sidecar ends with {} byte(s) of an unfinished write, which is the \
                  expected shape after a power cut. The reads before it are intact.",
                 sidecar.torn_tail_bytes
+            ),
+        ));
+    }
+    if sidecar.torn_writes > 0 {
+        findings.push(Finding::warning(
+            "journal.sidecar",
+            format!(
+                "{} write(s) to the sidecar were interrupted and a later write was appended \
+                 onto them, which is the shape a power cut leaves. The reads written after \
+                 each were recovered from behind it, and every complete write is intact.",
+                sidecar.torn_writes
             ),
         ));
     }

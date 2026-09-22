@@ -35,6 +35,9 @@ pub struct SidecarStatus {
     pub corrupt_lines: u64,
     /// Trailing bytes from a write that never finished. Expected after a power cut.
     pub torn_tail_bytes: u64,
+    /// Writes that never finished and had a later one appended onto them. Expected after a
+    /// power cut, and not damage: the line after each was recovered from behind it.
+    pub torn_writes: u64,
     /// Reads in the sidecar that the database does not have. The recoverable case.
     pub missing_from_database: u64,
     /// Reads in the database that the sidecar does not have. Evidence without a backstop.
@@ -47,6 +50,7 @@ impl SidecarStatus {
     pub const fn is_clean(&self) -> bool {
         self.corrupt_lines == 0
             && self.torn_tail_bytes == 0
+            && self.torn_writes == 0
             && self.missing_from_database == 0
             && self.missing_from_sidecar == 0
     }
@@ -282,6 +286,7 @@ impl SqliteJournal {
                 records: scan.records.len() as u64,
                 corrupt_lines: scan.corrupt_lines,
                 torn_tail_bytes: scan.torn_tail_bytes,
+                torn_writes: scan.torn_writes,
                 missing_from_database: replay.len() as u64,
                 missing_from_sidecar: backfill.len() as u64,
             },
@@ -1082,6 +1087,7 @@ fn replay_detail(replay: &[SidecarRead], found: &SidecarStatus) -> String {
         "latest_recorded_at": recorded.max().map(rfc3339),
         "corrupt_lines": found.corrupt_lines,
         "torn_tail_bytes": found.torn_tail_bytes,
+        "torn_writes": found.torn_writes,
     })
     .to_string()
 }
@@ -1470,6 +1476,84 @@ mod tests {
         assert_eq!(report.replayed_into_database, 2);
         assert_eq!(report.found.corrupt_lines, 1);
         assert_eq!(journal.count().expect("count"), 2);
+    }
+
+    #[test]
+    fn the_first_read_after_a_power_cut_still_has_two_copies() {
+        // The 2026-09-13 review's reproduction, through the journal as the service uses it.
+        // A power cut left half a line, the next start appended the next read straight onto
+        // it, and `survey` then reported corrupt_lines: 1, missing_from_sidecar: 1. So the
+        // first read after every power cut had one copy until a restart backfilled it, and
+        // doctor reported the line as damage for as long as the file existed.
+        use std::io::Write as _;
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        {
+            let (mut journal, _) = SqliteJournal::open_recovering(&path, "test").expect("open");
+            journal.append(&sample_read("BEFORE", 0)).expect("append");
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(sidecar::path_for(&path))
+            .expect("open the sidecar")
+            .write_all(b"SFJ1 5d41402abc4b {\"id\":\"half-writ")
+            .expect("the half of a write that reached the disk");
+
+        let after = sample_read("AFTER", 1);
+        {
+            let (mut journal, report) =
+                SqliteJournal::open_recovering(&path, "test").expect("the next start");
+            assert_eq!(
+                report.found.torn_tail_bytes, 34,
+                "the cut, seen on the way in"
+            );
+            journal
+                .append(&after)
+                .expect("the first read after the cut");
+        }
+
+        let status = SqliteJournal::open(&path)
+            .expect("reopen")
+            .survey()
+            .expect("survey");
+        assert_eq!(
+            status.missing_from_sidecar, 0,
+            "the read after the cut has its second copy: {status:?}"
+        );
+        assert_eq!(
+            status.corrupt_lines, 0,
+            "a power cut is not damage: {status:?}"
+        );
+        assert_eq!(
+            status.torn_writes, 1,
+            "and it is still reported: {status:?}"
+        );
+        assert_eq!(status.torn_tail_bytes, 0, "{status:?}");
+        assert!(
+            !status.is_clean(),
+            "a power cut is worth knowing about: {status:?}"
+        );
+
+        // The copy is usable, not merely counted: a database lost after the cut is rebuilt
+        // from the sidecar with that read in it.
+        let mut rebuilt = SqliteJournal::open_with_sidecar(
+            dir.path().join("rebuilt.db"),
+            sidecar::path_for(&path),
+        )
+        .expect("a fresh database on the old sidecar");
+        let report = rebuilt.reconcile("test").expect("replay");
+        assert_eq!(report.replayed_into_database, 2);
+        let ids: Vec<RawReadId> = rebuilt
+            .read_all()
+            .expect("read")
+            .into_iter()
+            .map(|stored| stored.read.id)
+            .collect();
+        assert!(
+            ids.contains(&after.id),
+            "the read after the cut was replayed"
+        );
     }
 
     #[test]
