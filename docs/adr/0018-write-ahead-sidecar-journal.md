@@ -68,6 +68,13 @@ SFJ1 <64 hex characters of sha256(json)> <json>\n
 - **No sequence number.** It is assigned by `AUTOINCREMENT` when the row is inserted, which
   is after this file is written. Writing a guess would write a number that is wrong exactly
   when it matters
+- **A line can follow the remains of an interrupted write**, on the same line. *Amended
+  2026-09-21.* A write the power cut short has no newline, so the next write is appended
+  onto it. Reading finds the complete line behind the remains by its tag, and keeps it
+  because its digest verifies. The remains count as a torn write, which is a warning, and
+  not as damage, which is an error. Nothing writes a newline to close the gap: every process
+  that opens a journal opens this file, and one that closed a gap while the service was
+  appending could split the service's own line
 
 ### The acknowledgment point does not move
 

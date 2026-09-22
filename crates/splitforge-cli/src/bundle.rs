@@ -389,6 +389,9 @@ pub struct SidecarSection {
     pub corrupt_lines: u64,
     /// Trailing bytes from a write that never finished. Expected after a power cut.
     pub torn_tail_bytes: u64,
+    /// Writes that never finished and had a later one appended onto them. Expected after a
+    /// power cut.
+    pub torn_writes: u64,
     /// Reads in the sidecar that the database does not have. The recoverable case.
     pub missing_from_database: u64,
     /// Reads in the database that the sidecar does not have. Evidence without a backstop.
@@ -402,6 +405,7 @@ impl SidecarSection {
             records: status.records,
             corrupt_lines: status.corrupt_lines,
             torn_tail_bytes: status.torn_tail_bytes,
+            torn_writes: status.torn_writes,
             missing_from_database: status.missing_from_database,
             missing_from_sidecar: status.missing_from_sidecar,
         }

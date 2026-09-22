@@ -341,6 +341,110 @@ async fn the_restore_is_recorded_in_the_audit_trail_of_the_database_it_produced(
 
 // ---- helpers --------------------------------------------------------------------
 
+#[tokio::test]
+async fn a_power_cut_does_not_fail_the_pre_race_gate_forever() {
+    // The 2026-09-13 review's finding, as an operator meets it. A power cut left half a line
+    // in the sidecar, the next read was appended straight onto it, and the pair failed its
+    // digest. `doctor` then reported an error — "the database is now the only copy" — and
+    // exited non-zero, so `doctor && race start` failed after every power cut, for as long as
+    // the file existed. A power cut is a warning, and it is only ever one.
+    use std::io::Write as _;
+
+    let race = timed_race().await;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(sidecar_of(&race.database))
+        .expect("open the sidecar")
+        .write_all(b"SFJ1 5d41402abc4b {\"id\":\"half-writ")
+        .expect("the half of a write that reached the disk");
+
+    // The next reads after the cut, through the same path that wrote the first ones.
+    let more = json(&run_ok(&["simulate", "--scenario", "five-k"], &race.database).await);
+    let after = more["reads_persisted"].as_u64().expect("a count");
+
+    let (report, ok) = run(&["doctor"], &race.database).await;
+    let report = json(&report);
+    assert!(ok, "a power cut must not fail the pre-race gate: {report}");
+    assert_eq!(report["errors"], 0, "{report}");
+
+    let sidecar: Vec<&serde_json::Value> = report["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|finding| finding["check"] == "journal.sidecar")
+        .collect();
+    assert_eq!(sidecar.len(), 1, "one finding, for the cut: {sidecar:?}");
+    assert_eq!(sidecar[0]["severity"], "warning");
+    assert!(
+        sidecar[0]["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("interrupted"),
+        "{sidecar:?}"
+    );
+
+    // Every read is in the sidecar, including the first one after the cut: the database is
+    // rebuilt from it with nothing missing.
+    destroy(&race.database);
+    let recovered = json(&run_ok(&["recover"], &race.database).await);
+    assert_eq!(
+        recovered["replayed_into_database"].as_u64(),
+        Some(race.reads + after),
+        "{recovered}"
+    );
+    assert_eq!(recovered["torn_writes"], 1, "{recovered}");
+    assert_eq!(recovered["corrupt_lines"], 0, "{recovered}");
+}
+
+#[tokio::test]
+async fn doctor_still_fails_the_gate_on_real_damage_after_a_power_cut() {
+    // The other half: a power cut must not hide damage. Rot in a line that has nothing to do
+    // with the cut is still an error.
+    use std::io::Write as _;
+
+    let race = timed_race().await;
+    let sidecar = sidecar_of(&race.database);
+    let text = std::fs::read_to_string(&sidecar).expect("read the sidecar");
+    let first = text.lines().next().expect("a line").to_owned();
+    let rotted = first.replacen("\"chip\":\"", "\"chip\":\"X", 1);
+    assert_ne!(rotted, first, "the line has a chip field to damage");
+    std::fs::write(&sidecar, text.replacen(&first, &rotted, 1)).expect("rot one line");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&sidecar)
+        .expect("open the sidecar")
+        .write_all(b"SFJ1 5d41402abc4b {\"id\":\"half-writ")
+        .expect("the cut");
+    run_ok(&["simulate", "--scenario", "five-k"], &race.database).await;
+
+    let (report, ok) = run(&["doctor"], &race.database).await;
+    assert!(!ok, "damage still fails the gate");
+    let report = json(&report);
+    let severities: Vec<&str> = report["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|finding| finding["check"] == "journal.sidecar")
+        .filter_map(|finding| finding["severity"].as_str())
+        .collect();
+    assert!(severities.contains(&"error"), "the rot: {report}");
+    assert!(severities.contains(&"warning"), "the cut: {report}");
+}
+
+#[tokio::test]
+async fn doctor_is_clean_before_any_cut() {
+    // The control for the two above: the same race, untouched, has no sidecar finding at all.
+    let race = timed_race().await;
+    let report = json(&run_ok(&["doctor"], &race.database).await);
+    let sidecar: Vec<&serde_json::Value> = report["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|finding| finding["check"] == "journal.sidecar")
+        .collect();
+    assert!(sidecar.is_empty(), "{sidecar:?}");
+}
+
 fn sidecar_of(database: &Path) -> std::path::PathBuf {
     let mut name = database.as_os_str().to_owned();
     name.push(".reads.jsonl");

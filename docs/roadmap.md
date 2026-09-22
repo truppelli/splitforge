@@ -1442,13 +1442,25 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       is that a quiet module is reported connected up to 5 s late. Two tests fail against the
       unfixed code: a port that ends at once must never be announced, and a flapping port may
       open at most six times in 400 ms, where the old loop opened 27.
-- [ ] **A torn sidecar tail swallows the next acknowledged read's backup copy.**
+- [x] **A torn sidecar tail swallows the next acknowledged read's backup copy.**
       *Reproduced.* After a simulated power cut left half a line, the next append was glued
       onto it. `survey` then reported `corrupt_lines: 1, missing_from_sidecar: 1`. Power loss
       mid-write is O1, the most likely failure in the register. After every such power cut,
       the first read recorded has only one copy until the next restart backfills it, and
       `doctor` keeps reporting the corrupt line. *Fix:* in `Sidecar::open`, append a newline
       if the file does not end in one.
+      **Fixed, but not that way.** Reproduced again on `f2835db` with the same counts. The
+      consequence was worse than recorded: `doctor` reported the line as an *error*, so
+      `doctor && race start` failed after every power cut, for as long as the file existed.
+      The suggested fix would not have cured that — the terminated half-line still fails its
+      digest — and `Sidecar::open` runs in every process that opens a journal, including
+      `reads --follow` and `doctor` while the service appends, so it could have split the
+      service's own half-written line. Instead, reading the sidecar finds the complete line
+      behind the remains by its tag and keeps it because its digest verifies, and counts the
+      remains as a torn write: a `doctor` warning, never an error. Remains that are not the
+      start of a line, or zeros, are still damage, and the line behind them is still kept.
+      Nothing writes to the file, and a sidecar already in this state reads correctly
+      ([ADR-0018, amended](adr/0018-write-ahead-sidecar-journal.md#the-line-format)).
 - [ ] **CSV exports do not neutralize spreadsheet formulas.** *From code.* `results_csv` and
       the crossings export write names as given, and names come from public registration.
       The results CSV is built to be opened in Excel (see Milestone 6), so a runner registered

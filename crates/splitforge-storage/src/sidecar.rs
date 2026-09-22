@@ -29,6 +29,20 @@
 //! syntax: a missing field must be a defect that fails loudly, never an absence that
 //! quietly decodes as `None`.
 //!
+//! ## After a power cut
+//!
+//! A write the power interrupted leaves the start of a line with no newline after it. The
+//! next write is appended straight onto it, so the two share one line: the remains of the
+//! interrupted write, then a complete line that was written and synced as it should have
+//! been. That line is found by its tag and kept, because its digest proves it; the remains in
+//! front of it are counted as a torn write, not as damage. `tail` shows such a line as a
+//! long one with a second `SFJ1` in it, and everything from that second tag on is the read.
+//!
+//! **Nothing here writes a newline to close the gap.** The reads are all in the file already,
+//! and every process that opens a journal opens this file — `reads --follow` and `doctor`
+//! included, while the service is appending. A reader that "repaired" a tail without a
+//! newline could be looking at the service's own line half-written, and would split it.
+//!
 //! ## What is deliberately absent
 //!
 //! **The sequence number.** It is assigned by SQLite's `AUTOINCREMENT` when the row is
@@ -93,6 +107,10 @@ pub(crate) struct SidecarScan {
     pub corrupt_lines: u64,
     /// Bytes after the last newline: a write that was interrupted before it finished.
     pub torn_tail_bytes: u64,
+    /// Interrupted writes that a later write was appended onto, each found in front of the
+    /// line it now shares. Counted once per line: two power cuts with nothing finished
+    /// between them look like one.
+    pub torn_writes: u64,
 }
 
 /// An append-only text journal beside the database.
@@ -209,9 +227,17 @@ impl Sidecar {
             if line.is_empty() {
                 continue;
             }
-            match parse_line(line) {
-                Ok(record) => scan.records.push(record),
-                Err(_) => scan.corrupt_lines += 1,
+            match read_line(line) {
+                Line::Record(record) => scan.records.push(record),
+                Line::AfterTornWrite(record) => {
+                    scan.records.push(record);
+                    scan.torn_writes += 1;
+                }
+                Line::AfterDamage(record) => {
+                    scan.records.push(record);
+                    scan.corrupt_lines += 1;
+                }
+                Line::Corrupt => scan.corrupt_lines += 1,
             }
         }
         Ok(scan)
@@ -224,6 +250,57 @@ impl Sidecar {
             .map(|record| record.read.id.to_string())
             .collect()
     }
+}
+
+/// One complete line, and what it turned out to hold.
+enum Line {
+    /// A line that verified.
+    Record(SidecarRead),
+    /// The remains of an interrupted write, then a line that verified.
+    AfterTornWrite(SidecarRead),
+    /// Bytes that are not the start of any line, then a line that verified.
+    AfterDamage(SidecarRead),
+    /// Nothing in it verified.
+    Corrupt,
+}
+
+/// Reads one line, and looks behind whatever is in front of a line for the line itself.
+///
+/// **Before this, the first read written after a power cut was lost from this file.** The
+/// interrupted write and the next one became one line, the line failed its digest, and the
+/// read — written, synced, and then committed to the database — had one copy until a restart
+/// backfilled it. `doctor` meanwhile reported the line as damage that had left the database
+/// the only copy, after every power cut, for as long as the file existed.
+///
+/// Every place the tag starts after the first byte is tried in order, and the first whose
+/// remainder verifies is the line. The digest is what makes this safe rather than generous:
+/// a remainder that verifies is a line this writer wrote, whatever is in front of it.
+fn read_line(line: &[u8]) -> Line {
+    if let Ok(record) = parse_line(line) {
+        return Line::Record(record);
+    }
+    let start = format!("{LINE_TAG} ");
+    let start = start.as_bytes();
+    let found = (1..line.len())
+        .filter(|&at| line[at..].starts_with(start))
+        .find_map(|at| parse_line(&line[at..]).ok().map(|record| (at, record)));
+    match found {
+        Some((at, record)) if is_torn_write(&line[..at], start) => Line::AfterTornWrite(record),
+        Some((_, record)) => Line::AfterDamage(record),
+        None => Line::Corrupt,
+    }
+}
+
+/// Whether `fragment` is what an interrupted write leaves behind.
+///
+/// That is the start of a line cut off anywhere, the tag included, or bytes the filesystem
+/// allocated before the power went and never filled, which read back as zeros. Anything else
+/// in front of a good line is damage and is counted as such: the line behind it is still
+/// kept, but calling rot a power cut would turn an error into a warning.
+fn is_torn_write(fragment: &[u8], start: &[u8]) -> bool {
+    let unfilled = fragment.iter().take_while(|byte| **byte == 0).count();
+    let fragment = &fragment[unfilled..];
+    fragment.is_empty() || fragment.starts_with(start) || start.starts_with(fragment)
 }
 
 fn parse_line(line: &[u8]) -> Result<SidecarRead, StorageError> {
@@ -491,6 +568,106 @@ mod tests {
         assert_eq!(scan.records.len(), 2, "the completed reads are still there");
         assert_eq!(scan.corrupt_lines, 0, "a torn tail is not corruption");
         assert_eq!(scan.torn_tail_bytes, 30);
+    }
+
+    /// Appends `bytes` with no newline, as a write the power interrupted leaves them.
+    fn interrupt_a_write(path: &Path, bytes: &[u8]) {
+        let mut file = OpenOptions::new().append(true).open(path).expect("reopen");
+        file.write_all(bytes)
+            .expect("the part that reached the disk");
+    }
+
+    /// A sidecar holding `A`, then `fragment` with no newline, then `B` appended after it.
+    fn a_power_cut_between(fragment: &[u8], after: &RawRead) -> SidecarScan {
+        let dir = tempdir().expect("tempdir");
+        let path = path_for(&dir.path().join("event.db"));
+        Sidecar::open(path.clone())
+            .expect("open")
+            .append(&[sample_read("A")], OffsetDateTime::UNIX_EPOCH)
+            .expect("append");
+        interrupt_a_write(&path, fragment);
+        Sidecar::open(path.clone())
+            .expect("the next start")
+            .append(std::slice::from_ref(after), OffsetDateTime::UNIX_EPOCH)
+            .expect("the first read after the cut");
+        Sidecar::open(path).expect("open").scan().expect("scan")
+    }
+
+    #[test]
+    fn a_read_appended_onto_an_interrupted_write_is_recovered_from_behind_it() {
+        // The 2026-09-13 review's reproduction, at the file: the next append was glued onto
+        // the half-line, and the pair failed as one corrupt line.
+        let after = sample_read("B");
+        let scan = a_power_cut_between(b"SFJ1 deadbeef {\"id\":\"half-writ", &after);
+
+        assert_eq!(scan.records.len(), 2, "A, and the read after the cut");
+        assert_eq!(scan.records[1].read, after, "recovered byte for byte");
+        assert_eq!(scan.torn_writes, 1, "the cut is still reported, as a cut");
+        assert_eq!(scan.corrupt_lines, 0, "a power cut is not damage");
+        assert_eq!(scan.torn_tail_bytes, 0);
+    }
+
+    #[test]
+    fn a_write_cut_off_inside_the_tag_is_still_a_torn_write() {
+        let scan = a_power_cut_between(b"SF", &sample_read("B"));
+        assert_eq!((scan.records.len(), scan.torn_writes), (2, 1));
+        assert_eq!(scan.corrupt_lines, 0);
+    }
+
+    #[test]
+    fn bytes_the_filesystem_never_filled_are_a_torn_write() {
+        // A file extended before the power went and never written reads back as zeros. The
+        // two can come together: the unfilled bytes, then the start of the line.
+        for fragment in [&[0_u8; 96][..], b"\0\0\0\0SFJ1 12ab {\"id\":"] {
+            let scan = a_power_cut_between(fragment, &sample_read("B"));
+            assert_eq!(
+                (scan.records.len(), scan.torn_writes),
+                (2, 1),
+                "{fragment:?}"
+            );
+            assert_eq!(scan.corrupt_lines, 0, "{fragment:?}");
+        }
+    }
+
+    #[test]
+    fn two_power_cuts_with_nothing_finished_between_them_look_like_one() {
+        let scan = a_power_cut_between(
+            b"SFJ1 aaaa {\"id\":\"first-halfSFJ1 bbbb {\"id\":\"second-ha",
+            &sample_read("B"),
+        );
+        assert_eq!((scan.records.len(), scan.torn_writes), (2, 1));
+        assert_eq!(scan.corrupt_lines, 0);
+    }
+
+    #[test]
+    fn damage_in_front_of_a_good_line_is_still_damage_and_the_line_is_still_kept() {
+        // Something other than a line's start glued onto the next one. The line behind it
+        // verifies, so it is evidence and is kept; calling the rest a power cut would turn
+        // an error into a warning.
+        let after = sample_read("B");
+        let scan = a_power_cut_between(b"\xff\x13 not how any line starts", &after);
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(scan.records[1].read, after);
+        assert_eq!(scan.corrupt_lines, 1);
+        assert_eq!(scan.torn_writes, 0);
+    }
+
+    #[test]
+    fn a_tag_inside_a_read_is_not_mistaken_for_the_start_of_one() {
+        // Every candidate is tried in order and only a verified one is kept, so a chip id
+        // that happens to contain the tag changes nothing.
+        let after = sample_read("SFJ1 INSIDE");
+        let scan = a_power_cut_between(b"SFJ1 00 {\"id\":\"cut", &after);
+        assert_eq!(scan.records[1].read, after);
+        assert_eq!((scan.torn_writes, scan.corrupt_lines), (1, 0));
+
+        let (_dir, mut intact) = open_temp();
+        intact
+            .append(std::slice::from_ref(&after), OffsetDateTime::UNIX_EPOCH)
+            .expect("append");
+        let scan = intact.scan().expect("scan");
+        assert_eq!(scan.records[0].read, after);
+        assert_eq!((scan.torn_writes, scan.corrupt_lines), (0, 0));
     }
 
     #[test]
