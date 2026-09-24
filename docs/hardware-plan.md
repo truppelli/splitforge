@@ -614,9 +614,9 @@ Each is a decision, not a guess, and belongs in
 | # | Decision | Needs | Status |
 |---|---|---|---|
 | 1 | Does M3 split into M3a / M3b as § 2 proposes? | Roadmap amendment | **Decided** — [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md); [roadmap](roadmap.md#milestone-3--one-physical-reader) amended |
-| 2 | Is the M7e-Pico the first physical adapter, with ADR-0004 standing? | New ADR | **Decided** — ADR-0024; ADR-0004 stands unamended, [Q9a](open-questions.md#q9a-first-serial-module) closed, [Q9b](open-questions.md#q9b-first-llrp-reader-model) still gates M3b |
+| 2 | Is the M7e-Pico the first physical adapter, with ADR-0004 standing? | New ADR | **Decided, then changed** — ADR-0024 chose the Pico; [ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md) replaced it with the M7E Hecto on SparkFun's USB board. ADR-0004 stands unamended, [Q9a](open-questions.md#q9a-first-serial-module) closed, [Q9b](open-questions.md#q9b-first-llrp-reader-model) still gates M3b |
 | 3 | Does `serialport` join the read path? | Covered by the same ADR, per `deny.toml` `[bans]` | **Decided** — ADR-0024, with `default-features = false` mandatory for the Pi cross-build |
-| 4 | Does CM4/CM5 become the shipped platform with Pi 3 as the support floor? | New ADR, plus one line in ADR-0002 | **Open** |
+| 4 | Does CM4/CM5 become the shipped platform with Pi 3 as the support floor? | New ADR, plus one line in ADR-0002 | **Half decided** — [ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md) makes the Pi 4 the target and drops the Pi 3 as a floor. Whether a Compute Module ships is still open |
 | 5 | Is the product's radio a replaceable subassembly, or soldered down? | New ADR — it constrains the carrier design | **Open** |
 | 6 | Is [Q10](open-questions.md#q10-gps-pps-time-reference) answered as "required for published results"? | Q10 has been open since M0, and Phase 1 is when it becomes answerable | **Open** |
 

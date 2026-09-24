@@ -9,7 +9,7 @@ this?" two years from now, the ADR is the answer.
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-rust-workspace.md) | Multi-crate Rust workspace | Accepted |
-| [0002](0002-raspberry-pi-target.md) | Raspberry Pi 3, 64-bit Linux, `aarch64-unknown-linux-gnu` | Accepted |
+| [0002](0002-raspberry-pi-target.md) | Raspberry Pi 3, 64-bit Linux, `aarch64-unknown-linux-gnu` | Accepted; board superseded by 0036 |
 | [0003](0003-sqlite-wal-local-persistence.md) | SQLite in WAL mode for local persistence | Accepted |
 | [0004](0004-llrp-first-reader-adapter.md) | LLRP as the first reader protocol | Accepted |
 | [0005](0005-raw-read-append-only-journal.md) | Raw reads are an append-only journal | Accepted |
@@ -31,7 +31,7 @@ this?" two years from now, the ADR is the answer.
 | [0021](0021-local-api-listens-on-a-unix-socket.md) | The local API listens on a Unix socket, not on the network | Accepted |
 | [0022](0022-the-service-never-waits-for-the-network.md) | The service never waits for the network and never stops restarting | Accepted |
 | [0023](0023-manual-entries-are-derivation-inputs.md) | A manual entry is an input to derivation, not an override of its output | Accepted |
-| [0024](0024-serial-reader-adapter-before-llrp.md) | A serial module is the first physical adapter; LLRP stays the first networked one | Accepted |
+| [0024](0024-serial-reader-adapter-before-llrp.md) | A serial module is the first physical adapter; LLRP stays the first networked one | Accepted; module superseded by 0035 |
 | [0025](0025-m3a-proves-durability-above-the-transport.md) | M3a proves durability above the transport; the adapter streams rather than polls | Accepted |
 | [0026](0026-a-reader-gap-is-two-rows.md) | A reader gap is two append-only rows, paired by sequence number | Accepted |
 | [0027](0027-a-reader-reports-connection-events-on-the-read-channel.md) | A reader reports connection events on the same channel as its reads | Accepted |
@@ -42,6 +42,8 @@ this?" two years from now, the ADR is the answer.
 | [0032](0032-the-service-speaks-ip-to-this-device-only.md) | The service may speak IP, to this device and nothing else | Accepted |
 | [0033](0033-each-connection-starts-the-stream.md) | Each connection starts the stream, with the command the decoder is anchored on | Accepted |
 | [0034](0034-the-service-opens-the-readers-port-and-nothing-else.md) | The service opens the reader's port and nothing else | Accepted |
+| [0035](0035-the-first-module-is-the-m7e-hecto.md) | The first physical adapter is the M7E Hecto, on SparkFun's USB board | Accepted |
+| [0036](0036-raspberry-pi-4-is-the-edge-target.md) | The Raspberry Pi 4 is the edge target | Accepted |
 
 ## Process
 
