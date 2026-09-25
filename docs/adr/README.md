@@ -45,6 +45,7 @@ this?" two years from now, the ADR is the answer.
 | [0035](0035-the-first-module-is-the-m7e-hecto.md) | The first physical adapter is the M7E Hecto, on SparkFun's USB board | Accepted |
 | [0036](0036-raspberry-pi-4-is-the-edge-target.md) | The Raspberry Pi 4 is the edge target | Accepted |
 | [0037](0037-startup-recovery-reads-what-it-has-not-already-verified.md) | Startup recovery reads what it has not already verified, a line at a time | Accepted |
+| [0038](0038-each-connection-sets-the-read-power-the-operator-chose.md) | Each connection sets the read power the operator chose | Proposed |
 
 ## Process
 
