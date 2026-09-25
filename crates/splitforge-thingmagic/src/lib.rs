@@ -53,7 +53,7 @@
 //!
 //! That layering is deliberate and it is most of the value. Binary parsing against untrusted
 //! input is the highest-risk code in the project, and it is the part that can be finished, in
-//! full, before anybody spends $345 — truncated frames, bad checksums, and a `0xFF` in the
+//! full, before anybody buys a module — truncated frames, bad checksums, and a `0xFF` in the
 //! middle of a payload are all reachable from a byte-slice literal.
 //!
 //! **One of those assumptions was wrong, and finding it is what this warning was for.** The

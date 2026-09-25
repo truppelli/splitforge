@@ -192,13 +192,13 @@ splitforge-thingmagic: the port did not open: opening the serial port /dev/split
 The service does not exit when the port will not open, so `Restart=always` never gets a
 chance to fix a refusal. It keeps retrying until the port opens or it is restarted.
 
-**The rule as shipped matches any USB serial adapter**, because the bridge had not been
-chosen when it was written. It has now: the reader is SparkFun's M7E Hecto board, whose
-USB-UART bridge is a CH340C, `1a86:7523`
-([the reader notes](readers/thingmagic-m7e-hecto.md#deployment-notes)). Until the rule is
-narrowed to those IDs, keep other USB serial adapters unplugged. CH340-family bridges are not
-expected to carry a serial number, so two identical boards on one Pi cannot be told apart by
-the rule. The rule itself says how to narrow it.
+**The rule matches the reader's USB-UART bridge**, the CH340C on SparkFun's M7E Hecto board,
+by its vendor and product ID, `1a86:7523`
+([the reader notes](readers/thingmagic-m7e-hecto.md#deployment-notes)). Those IDs come from
+documentation; if `/dev/splitforge-reader` does not appear with the board plugged in, compare
+them with `udevadm info /dev/ttyUSB0`. Any other CH340 adapter on the same Pi contends for the
+name, so keep them unplugged. CH340-family bridges are not expected to carry a serial number,
+so two identical boards on one Pi cannot be told apart by this rule.
 
 ## Operating
 

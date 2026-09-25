@@ -11,13 +11,17 @@
 #
 # 99: after 50-udev-default.rules, which gives every tty to dialout.
 #
-# Any USB serial adapter matches, because the USB-UART bridge has not been chosen (hardware plan
-# section 3). Once it is bought, narrow this with its ATTRS{idVendor}, ATTRS{idProduct} and, if
-# it has one, ATTRS{serial}. Until then, two USB serial adapters plugged in at once contend for
-# the one name, and so would a GPS whose NMEA arrived over USB: the plan puts only its PPS on a
-# GPIO pin.
+# idVendor and idProduct: the reader is SparkFun's M7E Hecto board (ADR-0035), whose USB-UART
+# bridge is a CH340C. 1a86:7523 is the CH340 in the kernel's ch341 driver table. These come from
+# documentation, not from a board: confirm them with `udevadm info /dev/ttyUSB0` when one is
+# plugged in. So the rule matches the bridge, not the module behind it, and any other CH340
+# adapter on the same Pi contends for the name, as would a GPS whose NMEA arrived through one.
+#
+# No ATTRS{serial}: CH340-family bridges are not expected to carry a USB serial number, so two
+# identical boards cannot be told apart here. Two readers on one Pi would need a rule per
+# physical USB port (KERNELS, or ENV{ID_PATH}) instead. See docs/readers/thingmagic-m7e-hecto.md.
 #
 # KERNEL names the same device group as the unit's DeviceAllow=char-ttyUSB. A bridge that
 # enumerates as ttyACM needs both changed, and apps/splitforge-edge/tests/unit_file.rs fails
 # until they agree.
-SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*", SYMLINK+="splitforge-reader", GROUP="splitforge", MODE="0660"
+SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="splitforge-reader", GROUP="splitforge", MODE="0660"

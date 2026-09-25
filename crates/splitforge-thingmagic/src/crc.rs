@@ -117,9 +117,10 @@ pub const fn crc16(bytes: &[u8]) -> u16 {
 /// `SparkFun_Simultaneous_RFID_Tag_Reader_Library`, which annotates its final two bytes,
 /// `56 1D`, as the message CRC.
 ///
-/// **It is an M6e frame, not an M7e-Pico one.** The modules differ; the serial protocol in
-/// user guide § 7.1–7.3 does not, and the framing this crate implements decodes it. So it is
-/// evidence about the protocol rather than about the Pico, and it is recorded as such.
+/// **It is an M6e frame, not one from the M7E-HECTO this adapter is for.** The modules differ;
+/// the serial protocol in user guide § 7.1–7.3 does not, and the framing this crate implements
+/// decodes it. So it is evidence about the protocol rather than about any one module, and it is
+/// recorded as such.
 pub const CAPTURED_FRAME: [u8; 47] = [
     0xFF, 0x28, 0x22, 0x00, 0x00, 0x10, 0x00, 0x1B, 0x01, 0xFF, 0x01, 0x01, 0xC4, 0x11, 0x0E, 0x16,
     0x40, 0x00, 0x00, 0x01, 0x27, 0x00, 0x00, 0x05, 0x00, 0x00, 0x0F, 0x00, 0x80, 0x30, 0x00, 0x00,

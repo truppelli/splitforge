@@ -5,10 +5,11 @@
 //! a port that vanishes is reopened, and where frames become [`ReaderMessage`] values that
 //! the timing engine cannot distinguish from the simulator's.
 //!
-//! # What is not here, and why
+//! # The one seam
 //!
-//! **Nothing turns a frame's payload into a tag read.** That is [`TagReportDecoder`], and
-//! this crate ships no implementation of it.
+//! **Turning a frame's payload into a tag read is not done here.** It is behind a trait,
+//! [`TagReportDecoder`]. [`StreamDecoder`](crate::tag_report::StreamDecoder) fills it, and is
+//! what `splitforge-edge --serial` composes. [`UndecodedReports`] counts frames and decodes none.
 //!
 //! The frame layout came from the user guide, which is archived and quoted in
 //! [vendor-documents.md](../../../docs/readers/vendor-documents.md). The *payload* layout did
@@ -27,7 +28,7 @@
 //! tested — which is worse than no parser at all, because it looks finished. **This crate has
 //! already done that once**, with a CRC the user guide named and the module did not compute.
 //!
-//! Three specifics from the archived SDK belong in whatever fills this seam, because each is a
+//! Three specifics from the archived SDK are what `StreamDecoder` follows, because each is a
 //! way to be confidently wrong:
 //!
 //! - **Walk the flag bits ascending and reject an unknown high bit.** The layout gained five
@@ -90,9 +91,10 @@ impl SessionAnchor {
 
 /// Turns a verified frame into the reads it carries, if any.
 ///
-/// **This crate ships no implementation.** See the module documentation: the payload layout
-/// is not in any document this project holds, and guessing at one would produce a parser
-/// that passes its own tests and misreads a race.
+/// [`StreamDecoder`](crate::tag_report::StreamDecoder) is the implementation, anchored on a
+/// captured frame. It stays a trait for the reason the module documentation gives: a layout
+/// taken from documents is believed only when a capture agrees with it, and a decoder that
+/// refuses what it does not recognise can be swapped for one that knows more.
 ///
 /// A frame is not a read. Most frames are answers to configuration commands and carry none,
 /// which is why this appends to a buffer rather than returning one value.
@@ -834,8 +836,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_timeout_is_not_a_disconnection() {
-        // A port that times out twice, then delivers. If a timeout were treated as the port
-        // ending, the open count would climb; it must not.
+        // A port that times out twice, then delivers a frame carrying the number of the open
+        // that produced it. If a timeout were treated as the port ending, every open would
+        // start again with two timeouts and no frame would ever arrive; and the one that does
+        // arrive must come from the first open.
+        //
+        // The port ends after its frame, so the reader reopens it at once. That is why this
+        // checks which open sent the read rather than counting opens afterwards: the count
+        // races the reopen, and lost under a loaded parallel test run.
         let opens = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&opens);
 
@@ -864,18 +872,24 @@ mod tests {
         }
 
         let factory = move || -> io::Result<Port> {
-            counter.fetch_add(1, Ordering::SeqCst);
+            let open = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let open = u8::try_from(open).expect("fewer than 256 opens in one test");
             Ok(Box::new(TimeoutThenData {
                 remaining: 2,
-                frame: response(0x22, &[0x5A]),
+                frame: response(0x22, &[open]),
                 sent: false,
             }) as Port)
         };
 
         let mut receiver = reader(factory).start();
         let message = next_read(&mut receiver).await;
-        assert_eq!(message.chip, ChipId::new("5A"));
-        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            message.chip,
+            ChipId::new("01"),
+            "the read came from open {} of {}",
+            message.chip.as_str(),
+            opens.load(Ordering::SeqCst)
+        );
     }
 
     /// A port that delivers one chunk and then times out, many times, before it ends.

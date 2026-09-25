@@ -434,6 +434,31 @@ fn the_udev_rule_hands_the_service_the_port_its_filter_allows() {
 }
 
 #[test]
+fn the_udev_rule_matches_the_bridge_the_reader_notes_name() {
+    // An unnarrowed rule gives the reader's name to whichever USB serial adapter enumerates
+    // first, and a GPS or a console cable would then be opened as the reader. The rule matches
+    // the bridge by ID instead, and the IDs have to be the ones the reader's notes record for
+    // the board being bought, or the rule matches nothing and the port never appears.
+    let rule = Rule::load();
+    let id = format!(
+        "`{}:{}`",
+        rule.one("ATTRS{idVendor}", "=="),
+        rule.one("ATTRS{idProduct}", "==")
+    );
+    let path = deploy()
+        .parent()
+        .expect("deploy/ sits in the workspace root")
+        .join("docs/readers/thingmagic-m7e-hecto.md");
+    let notes = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    assert!(
+        notes.contains(&id),
+        "the udev rule matches {id}, and {} never names it",
+        path.display()
+    );
+}
+
+#[test]
 fn the_operator_is_told_to_read_the_name_the_rule_creates() {
     // `ttyUSB0` renumbers when the bridge re-enumerates while the old node is held, which is
     // what a pulled cable does. A guide that said `--serial /dev/ttyUSB0` would work until

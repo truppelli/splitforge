@@ -461,7 +461,7 @@ observed under systemd 252 rather than on a Pi. Three things below turned out to
 The rule below shipped as `deploy/99-splitforge-reader.rules` matching any USB serial adapter,
 because the bridge had not been chosen. It has now: SparkFun's Hecto board carries a CH340C,
 which the kernel's `ch341` driver lists as `1a86:7523`, so the `XXXX`s below are known and the
-shipped rule can be narrowed to them. CH340-family bridges are not expected to carry a serial
+shipped rule now matches them. CH340-family bridges are not expected to carry a serial
 number, so the rule cannot tell two identical boards apart
 ([the reader notes](readers/thingmagic-m7e-hecto.md#deployment-notes)).
 

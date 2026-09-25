@@ -14,7 +14,7 @@
 //! **and it consumes to the payload's last byte exactly**, which is the assertion that would
 //! fail first if any width or any order in the table were wrong.
 //!
-//! That is one frame from an M6e, not a stream from an M7e-Pico, and it is the difference
+//! That is one frame from an M6e, not a stream from an M7E-HECTO, and it is the difference
 //! between *written from documentation alone* — which
 //! [ADR-0004](../../../docs/adr/0004-llrp-first-reader-adapter.md) forbids and which this
 //! crate has already shipped once — and *written from documentation and checked against

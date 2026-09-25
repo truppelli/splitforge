@@ -1,6 +1,6 @@
 //! Discontinuities in the device's wall clock.
 //!
-//! The Pi 3 has no battery-backed clock ([ADR-0002](../../../docs/adr/0002-raspberry-pi-target.md)),
+//! The Pi 4 has no battery-backed clock ([ADR-0036](../../../docs/adr/0036-raspberry-pi-4-is-the-edge-target.md)),
 //! so it boots believing whatever it believed last, and then something corrects it — NTP
 //! when a network appears, an RTC module, an operator with `date`. That correction is a
 //! **step**: the wall clock jumps, while the monotonic clock does not.

@@ -433,8 +433,8 @@ pair of facts rather than a contradiction.
       `deploy/splitforge.modules-load.conf` loads `usbserial` at boot to prevent it. It also found
       the service had been throwing away the reason a port would not open. **Still unticked**: no
       `ttyUSB` port has been opened, because the container's kernel has no `usbserial`, and the udev
-      rule matches any USB serial adapter. The bridge is now known — the CH340C on SparkFun's
-      board, `1a86:7523` — so the rule can be narrowed; it cannot tell two identical boards apart,
+      rule's IDs come from documentation. It now matches the bridge — the CH340C on SparkFun's
+      board, `1a86:7523` — and it cannot tell two identical boards apart,
       because CH340-family bridges are not expected to carry a serial number
       ([the reader notes](readers/thingmagic-m7e-hecto.md#deployment-notes))
 - [ ] Measure what M5 could not: whether the SD card honors `fsync`, what the second sync per
@@ -1589,7 +1589,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       install script from its `main` branch into bash, and installs unpinned `cargo-deny` and
       `cargo-audit` on a floating `rust:1` base. *Fix:* pin Actions by SHA and tools by
       version, and set `permissions: contents: read`.
-- [ ] **Stale text tells an operator the wrong thing.** *From code.* When started with
+- [x] **Stale text tells an operator the wrong thing.** *From code.* When started with
       `--serial`, the edge still logs *"it has no tag-report decoder, so it will record
       connection gaps and no reads"*, but `StreamDecoder` is composed. M3a's *Compose the
       module* bullet above still names `UndecodedReports`. [deployment.md](deployment.md#operating)
@@ -1599,9 +1599,10 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       let the unit open the reader's port
       ([ADR-0034](adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)). **The M3a
       bullet is annotated**, by the change that recorded the Hecto: its history stays, with a
-      note that `StreamDecoder` replaced `UndecodedReports`. What remains is
-      `crates/splitforge-thingmagic/src/provider.rs`'s module documentation, which still says the
-      crate *"ships no implementation"* of a tag-report decoder.
+      note that `StreamDecoder` replaced `UndecodedReports`. **And `provider.rs`'s module
+      documentation is fixed** by the change that narrowed the udev rule: it names
+      `StreamDecoder` as what fills the `TagReportDecoder` seam, rather than saying the crate
+      ships no implementation. Nothing here is behavior, so nothing fails against `b457991`.
 
 **Checked and held**, so nobody repeats the work: every SQL statement except the `VACUUM
 INTO` above binds its parameters. There is no `unsafe`. Frame length is bounded by the wire

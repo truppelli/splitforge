@@ -130,7 +130,7 @@ pub enum OpCode {
     GetTemperature = 0x72,
     /// Configure the antenna ports.
     SetAntennaPort = 0x91,
-    /// Set transmit power for reads. Capped at 24 dBm on this module.
+    /// Set transmit power for reads. 0 to +27 dBm on the M7E-HECTO (user guide § 5.3.1).
     SetReadTxPower = 0x92,
     /// Select the tag protocol.
     SetTagProtocol = 0x93,
@@ -354,10 +354,13 @@ pub mod search_flag {
 
 /// A regulatory region, from the 2023 `tmr_region.h`, `enum TMR_Region`.
 ///
-/// **Chosen by the operator, never assumed.** The M7e-Pico is a single SKU pre-configured for
-/// many regions, so the adapter sets one on every connection, and which one is a question of
-/// where the device is and what it is licensed to transmit on. There is deliberately no
-/// default.
+/// **Chosen by the operator, never assumed.** The M7E-HECTO is pre-configured for many regions,
+/// so the adapter sets one on every connection, and which one is a question of where the device
+/// is and what it is licensed to transmit on. There is deliberately no default.
+///
+/// Not every region here is one this module accepts. The Hecto supports neither `Eu` nor `Eu2`,
+/// and a module that refuses the region ends the connection as `NotStarted`, naming the step
+/// ([finding 25](../../../docs/readers/vendor-documents.md#25-the-hecto-supports-neither-eu-nor-eu2)).
 ///
 /// Four values from the enum are left out. `NONE` is not a region, `OPEN` is not a compliant
 /// one, and the header marks `UNIVERSAL` for the M3e and `IS2` for the Micro and Nano, neither

@@ -328,7 +328,7 @@ mod tests {
     const NTP_SYNCED: &str = "C0A80101,192.168.1.1,3,1776153600.123456,0.000123,0.000045,\
          0.000067,12.345,0.010,0.250,0.001200,0.004500,64.0,Normal";
 
-    /// A device that has reached no time source. What a Pi 3 looks like at a trailhead,
+    /// A device that has reached no time source. What a Pi 4 looks like at a trailhead,
     /// with or without an RTC fitted.
     const UNSYNCED: &str = "00000000,,0,0.000000000,0.000000000,0.000000000,0.000000000,\
          0.000,0.000,0.000,0.000000000,0.000000000,0.0,Not synchronised";
