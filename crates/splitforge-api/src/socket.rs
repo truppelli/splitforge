@@ -6,7 +6,7 @@
 //! service is a development convenience, and quietly binding a TCP port to make it work
 //! would defeat the point of the decision on the machine it was made for.
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use axum::Router;
@@ -26,6 +26,15 @@ pub enum ServeError {
     /// The socket's directory did not exist and could not be created.
     #[error("creating {0}: {1}")]
     Directory(PathBuf, std::io::Error),
+    /// What was already at the path could not be examined.
+    #[error("checking what is at {0}: {1}")]
+    Inspect(PathBuf, std::io::Error),
+    /// Something other than a socket was at the path. It was left alone and nothing was
+    /// bound, because it is not this service's to delete.
+    #[error(
+        "{0} is not a socket, so it was left alone and the API was not started. Check          --socket, or move the file if it should not be there"
+    )]
+    NotASocket(PathBuf),
     /// A socket file was already there and could not be removed.
     #[error("removing the stale socket at {0}: {1}")]
     Stale(PathBuf, std::io::Error),
@@ -66,8 +75,17 @@ pub async fn serve_on_socket(
     // listening, and the threat model is explicit that availability is a security property
     // here: a timer that will not start because of a leftover file has caused the harm it
     // was protecting against.
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|error| ServeError::Stale(path.to_path_buf(), error))?;
+    //
+    // **Only a socket.** Anything else at the path is not a leftover of this service, and a
+    // `--socket` typo is enough to name the event database. Refusing costs a service that
+    // does not start and says why; removing costs the event. `symlink_metadata`, so that a
+    // link is judged as itself and never followed to something it would be wrong to delete.
+    match std::fs::symlink_metadata(path) {
+        Ok(existing) if existing.file_type().is_socket() => std::fs::remove_file(path)
+            .map_err(|error| ServeError::Stale(path.to_path_buf(), error))?,
+        Ok(_) => return Err(ServeError::NotASocket(path.to_path_buf())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ServeError::Inspect(path.to_path_buf(), error)),
     }
 
     let listener =
@@ -140,11 +158,14 @@ mod tests {
     #[tokio::test]
     async fn a_socket_left_by_a_crash_does_not_stop_the_next_start() {
         // `/run` is a tmpfs so a reboot clears it, but a crash does not — and refusing to
-        // start because of a leftover file would be the check causing the outage.
+        // start because of a leftover socket would be the check causing the outage.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("api.sock");
-        std::fs::write(&path, b"left over from a crash").expect("write a stale file");
-        assert!(path.exists());
+        // A listener that is dropped without being unlinked is exactly what a killed process
+        // leaves behind: the file stays, and nothing is listening on it.
+        drop(std::os::unix::net::UnixListener::bind(&path).expect("bind a socket to leave"));
+        let left = std::fs::symlink_metadata(&path).expect("the socket was left");
+        assert!(left.file_type().is_socket());
 
         let (stop, wait) = tokio::sync::oneshot::channel::<()>();
         let serving = tokio::spawn({
@@ -163,6 +184,66 @@ mod tests {
             .await
             .expect("join")
             .expect("a stale socket must not be fatal");
+    }
+
+    /// Starts a server at `path` that would run until the test ends, and returns what it
+    /// returned, or `None` if it was still serving after a few seconds.
+    async fn start_at(path: &Path) -> Option<Result<(), ServeError>> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            serve_on_socket(path, crate::router(source()), std::future::pending()),
+        )
+        .await
+        .ok()
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_a_socket_is_left_alone() {
+        // A `--socket` typo in a drop-in is enough to point this at the event database. What
+        // is there is not this service's to delete, so nothing is bound and the file is kept.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        std::fs::write(&path, b"every raw read of the event").expect("write the file");
+
+        let outcome = start_at(&path).await;
+
+        assert!(
+            matches!(outcome, Some(Err(ServeError::NotASocket(ref at))) if *at == path),
+            "expected a refusal naming {}, got {outcome:?}",
+            path.display()
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the file is still there"),
+            b"every raw read of the event"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_symlink_at_the_socket_path_is_left_alone() {
+        // `symlink_metadata`, not `metadata`: a link is refused as itself, whatever it points
+        // at, and neither the link nor its target is touched.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("event.db");
+        std::fs::write(&target, b"every raw read of the event").expect("write the target");
+        let path = dir.path().join("api.sock");
+        std::os::unix::fs::symlink(&target, &path).expect("link");
+
+        let outcome = start_at(&path).await;
+
+        assert!(
+            matches!(outcome, Some(Err(ServeError::NotASocket(_)))),
+            "expected a refusal, got {outcome:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("the link is still there")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("the target is still there"),
+            b"every raw read of the event"
+        );
     }
 
     #[tokio::test]

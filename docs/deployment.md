@@ -209,6 +209,12 @@ journalctl -u splitforge-edge -f           # tracing output, journald-native
 journalctl -u splitforge-edge -b           # this boot only
 ```
 
+**The service removes only a socket at its socket path.** A socket left there by a crash is
+cleared and replaced. Anything else, such as a file a mistyped `--socket` in a drop-in points at,
+is left alone, and the service stops with a line naming it: *"… is not a socket, so it was left
+alone and the API was not started."* systemd then restarts it and it refuses again, so the line
+repeats in `journalctl -u splitforge-edge` until `--socket` is corrected.
+
 Stopping the service does **not** stop the CLI from working. Nothing in the read path
 traverses the API ([S10](threat-model.md#security-risks)). The service writes reads to the
 journal itself, from `--serial` or `--simulate`, and the CLI reads the same database.

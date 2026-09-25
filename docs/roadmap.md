@@ -1498,10 +1498,19 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       nobody has captured yet, arriving between runners, would flip health all day. The tests
       use types that did not exist at `b457991`, so there is nothing for them to fail against
       there.
-- [ ] **`serve_on_socket` deletes whatever file is at the socket path.** *Reproduced.* A
+- [x] **`serve_on_socket` deletes whatever file is at the socket path.** *Reproduced.* A
       regular file named `event.db` at the socket path was deleted before the bind. A
       `--socket` typo in a drop-in could delete the event database. *Fix:* remove the path
       only if it is a socket, and refuse to start otherwise.
+      **Fixed.** The path is examined with `symlink_metadata`, so a symbolic link is judged as
+      itself and never followed. Only a socket is removed. Anything else is left alone and
+      returned as `ServeError::NotASocket`, naming the path, and the service exits, so systemd
+      restarts it and it refuses again until `--socket` is corrected
+      ([deployment.md](deployment.md#operating)). Two tests fail against the unfixed code, which
+      is unchanged here since `b457991`: a regular file and a symlink to one were both still
+      being served over five seconds later, the file deleted. The stale-socket test had staged
+      its leftover as a regular file, which is the behavior removed. It now leaves a real
+      socket, as a killed process does.
 - [ ] **Audit attribution is whatever `--actor` says.** *From code.* It defaults to
       `operator`, and since the CLI runs as `sudo -u splitforge`, no OS identity is recorded.
       [Threat model § 5](threat-model.md#5-design-decisions-that-follow-from-this-model)
