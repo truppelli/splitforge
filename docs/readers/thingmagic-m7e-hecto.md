@@ -199,10 +199,12 @@ is a `ttyUSB` node and the directives above cover it.
 `usbserial` at boot so that `char-ttyUSB` resolves even when the board is unplugged at startup.
 
 **The udev rule** in [`deploy/99-splitforge-reader.rules`](../../deploy/99-splitforge-reader.rules)
-gives the port a stable name, `/dev/splitforge-reader`, and the service's group. As shipped it
-matches any USB serial adapter, because the bridge had not been chosen. It is now known: the
-CH340 is `1a86:7523` in the `ch341` driver's device table, and the rule can match on that. Two
-consequences follow before two boards share a Pi:
+gives the port a stable name, `/dev/splitforge-reader`, and the service's group. It matches
+the CH340 by vendor and product ID, `1a86:7523`, which is the CH340's entry in the `ch341`
+driver's device table. That comes from documentation: confirm it with
+`udevadm info /dev/ttyUSB0` when a board is plugged in. `apps/splitforge-edge/tests/unit_file.rs`
+fails if the rule's IDs are not the ones this page names. Two consequences follow before two
+boards share a Pi:
 
 - **Two identical boards are indistinguishable** by vendor and product ID, and CH340-family
   bridges are not expected to carry a serial number that would separate them. A rule would have

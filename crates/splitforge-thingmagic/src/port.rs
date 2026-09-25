@@ -53,9 +53,9 @@ pub struct SerialSettings {
     /// The device path.
     ///
     /// Prefer the stable name a udev rule provides — `/dev/splitforge-reader` — over
-    /// `/dev/ttyUSB0`, which renumbers on re-enumeration and, because the M7e-Pico carrier
-    /// board has no USB of its own, actually names the USB-to-UART bridge rather than the
-    /// module ([the reader notes](../../../docs/readers/thingmagic-m7e-pico.md)).
+    /// `/dev/ttyUSB0`, which renumbers on re-enumeration and names the USB-to-UART bridge — the
+    /// CH340C on SparkFun's M7E Hecto board — rather than the module
+    /// ([the reader notes](../../../docs/readers/thingmagic-m7e-hecto.md)).
     pub path: String,
     /// Bits per second. The module accepts 9.6 k to 921.6 k; 115 200 is its default.
     pub baud: u32,

@@ -13,7 +13,7 @@ use crate::ids::{ChipId, RawReadId, ReaderId};
 
 /// The device clock's synchronization state at the moment a read was received.
 ///
-/// Recorded per read rather than per session: a Pi 3 has no battery-backed clock, so its
+/// Recorded per read rather than per session: a Pi 4 has no battery-backed clock, so its
 /// notion of "now" can change mid-event when a time source appears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

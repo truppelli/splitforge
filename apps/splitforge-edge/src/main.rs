@@ -479,7 +479,7 @@ impl HealthSource for Device {
 /// The whole mechanism is two clocks and a subtraction. Wall time and monotonic time are
 /// sampled together; between two samples they should advance by the same amount, and when
 /// they do not, something moved the wall clock — NTP finding a network, an RTC module, an
-/// operator with `date`. The Pi 3 has no battery-backed clock ([ADR-0002]), so it boots
+/// operator with `date`. The Pi 4 has no battery-backed clock ([ADR-0036]), so it boots
 /// believing whatever it believed last and *something* is going to correct it.
 ///
 /// Why this lives in the service rather than in `splitforge doctor`: a step is only visible
@@ -490,7 +490,7 @@ impl HealthSource for Device {
 /// the clock jumped is bad; stopping the process that also serves health is worse, and the
 /// next sample re-baselines against a clock that has already moved.
 ///
-/// [ADR-0002]: ../../../docs/adr/0002-raspberry-pi-target.md
+/// [ADR-0036]: ../../../docs/adr/0036-raspberry-pi-4-is-the-edge-target.md
 async fn watch_the_clock(device: Arc<Device>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(SAMPLE_INTERVAL_MS));
 

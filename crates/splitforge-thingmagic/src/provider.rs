@@ -5,10 +5,11 @@
 //! a port that vanishes is reopened, and where frames become [`ReaderMessage`] values that
 //! the timing engine cannot distinguish from the simulator's.
 //!
-//! # What is not here, and why
+//! # The one seam
 //!
-//! **Nothing turns a frame's payload into a tag read.** That is [`TagReportDecoder`], and
-//! this crate ships no implementation of it.
+//! **Turning a frame's payload into a tag read is not done here.** It is behind a trait,
+//! [`TagReportDecoder`]. [`StreamDecoder`](crate::tag_report::StreamDecoder) fills it, and is
+//! what `splitforge-edge --serial` composes. [`UndecodedReports`] counts frames and decodes none.
 //!
 //! The frame layout came from the user guide, which is archived and quoted in
 //! [vendor-documents.md](../../../docs/readers/vendor-documents.md). The *payload* layout did
@@ -27,7 +28,7 @@
 //! tested — which is worse than no parser at all, because it looks finished. **This crate has
 //! already done that once**, with a CRC the user guide named and the module did not compute.
 //!
-//! Three specifics from the archived SDK belong in whatever fills this seam, because each is a
+//! Three specifics from the archived SDK are what `StreamDecoder` follows, because each is a
 //! way to be confidently wrong:
 //!
 //! - **Walk the flag bits ascending and reject an unknown high bit.** The layout gained five
@@ -90,9 +91,10 @@ impl SessionAnchor {
 
 /// Turns a verified frame into the reads it carries, if any.
 ///
-/// **This crate ships no implementation.** See the module documentation: the payload layout
-/// is not in any document this project holds, and guessing at one would produce a parser
-/// that passes its own tests and misreads a race.
+/// [`StreamDecoder`](crate::tag_report::StreamDecoder) is the implementation, anchored on a
+/// captured frame. It stays a trait for the reason the module documentation gives: a layout
+/// taken from documents is believed only when a capture agrees with it, and a decoder that
+/// refuses what it does not recognise can be swapped for one that knows more.
 ///
 /// A frame is not a read. Most frames are answers to configuration commands and carry none,
 /// which is why this appends to a buffer rather than returning one value.

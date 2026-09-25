@@ -34,7 +34,7 @@
 //! checked against `875-0093-01 Rev 2.3`, located and quoted in
 //! [vendor-documents.md](../../../docs/readers/vendor-documents.md). Neither has been
 //! checked against a physical module, because nobody has one
-//! ([the reader notes](../../../docs/readers/thingmagic-m7e-pico.md)).
+//! ([the reader notes](../../../docs/readers/thingmagic-m7e-hecto.md)).
 //!
 //! 1. **`len` is one byte** — confirmed, § 7.1 and § 7.2. What was wrong was the bound
 //!    derived from it. A byte holds 255, but a command's data is capped at 250 and a
