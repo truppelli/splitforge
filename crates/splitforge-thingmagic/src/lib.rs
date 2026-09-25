@@ -74,6 +74,7 @@
 // the point. See CONTRIBUTING.md, "Code standards".
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod capture;
 pub mod command;
 pub mod crc;
 pub mod frame;
@@ -83,6 +84,7 @@ pub mod reassembly;
 pub mod start;
 pub mod tag_report;
 
+pub use capture::{Capture, capturing};
 pub use command::{
     Command, InvalidReadPower, OpCode, PowerReport, ReadPower, Region, UnknownRegion,
     antenna_ports, search_flag,
