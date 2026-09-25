@@ -836,8 +836,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_timeout_is_not_a_disconnection() {
-        // A port that times out twice, then delivers. If a timeout were treated as the port
-        // ending, the open count would climb; it must not.
+        // A port that times out twice, then delivers a frame carrying the number of the open
+        // that produced it. If a timeout were treated as the port ending, every open would
+        // start again with two timeouts and no frame would ever arrive; and the one that does
+        // arrive must come from the first open.
+        //
+        // The port ends after its frame, so the reader reopens it at once. That is why this
+        // checks which open sent the read rather than counting opens afterwards: the count
+        // races the reopen, and lost under a loaded parallel test run.
         let opens = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&opens);
 
@@ -866,18 +872,24 @@ mod tests {
         }
 
         let factory = move || -> io::Result<Port> {
-            counter.fetch_add(1, Ordering::SeqCst);
+            let open = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let open = u8::try_from(open).expect("fewer than 256 opens in one test");
             Ok(Box::new(TimeoutThenData {
                 remaining: 2,
-                frame: response(0x22, &[0x5A]),
+                frame: response(0x22, &[open]),
                 sent: false,
             }) as Port)
         };
 
         let mut receiver = reader(factory).start();
         let message = next_read(&mut receiver).await;
-        assert_eq!(message.chip, ChipId::new("5A"));
-        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            message.chip,
+            ChipId::new("01"),
+            "the read came from open {} of {}",
+            message.chip.as_str(),
+            opens.load(Ordering::SeqCst)
+        );
     }
 
     /// A port that delivers one chunk and then times out, many times, before it ends.
