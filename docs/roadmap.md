@@ -1600,6 +1600,41 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       startup recovery would become a `Restart=always` crash loop that records nothing.
       *Fix:* stream these reads, and measure them with the full-day journal M3a is meant to
       produce.
+      **Measured, on synthetic journals and not yet on a Pi.** Release builds of `e04ae8b`, in
+      the CI image on an x86 machine. Each sidecar was grown from the `five-k` fixture's 638
+      lines, cloned with fresh ids and re-digested so every line verifies; each database was
+      the fixture's configuration, filled by the service's own replay. Peak resident memory is
+      `VmHWM` for the service, read once its socket appears, which is after recovery, and GNU
+      `time` for the CLI.
+
+      | Reads | Sidecar | Database | Service start, databases agree | Service start, replaying all | `doctor` | `doctor --bundle` |
+      |---|---|---|---|---|---|---|
+      | 100k | 57 MB | 37 MB | 93 MB, 0.3 s | 93 MB, 1.5 s | 96 MB, 0.7 s | 149 MB, 1.1 s |
+      | 500k | 283 MB | 182 MB | 444 MB, 2.1 s | 445 MB, 10.9 s | 447 MB, 4.8 s | 659 MB, 7.5 s |
+      | 1M | 565 MB | 362 MB | 883 MB, 4.1 s | 883 MB, 25.5 s | 886 MB, 9.8 s | 1.31 GB, 15.4 s |
+
+      Three things follow. **An ordinary restart costs what a full replay does**, about 0.9 KB
+      per read, or 1.6 times the sidecar: `compare` holds the file and every parsed record
+      whether or not anything needs repairing. **The risk is real at scale and not imminent**:
+      on the Pi 4's 2 GB, with the OS resident, startup would fail somewhere around 1.5 to 2
+      million reads, and the bundle first, near 1.2 million. The `five-k` fixture's rate, about
+      53 reads per runner per crossing, puts a 1,000-runner 5K near 100,000. The first real
+      journals will say how close events come. **And the bundle and `doctor` failing costs one
+      command**; only the service's start can become a crash loop, so that is the one to fix
+      first. Memory on a Pi should be close to these figures. Times will not be, and are
+      recorded as an order of magnitude.
+- [ ] **Nothing is recorded while startup recovery runs, and it takes longer the longer the
+      event has run.** *Measured, as above.* `main` in `splitforge-edge` opens the journal with
+      `open_recovering` before it composes the reader, so a module is not read until recovery
+      returns, and a runner crossing in that window is not recorded. Recovery re-reads and
+      re-digests every sidecar line on every start, so the window grows with the journal: 4.1 s
+      at a million reads for an ordinary restart and 25.5 s after a destroyed database, on the
+      x86 machine above. A Pi 4 will be slower. Streaming the sidecar fixes the memory and not
+      this. *Fix:* decide in an ADR, beside ADR-0018 and ADR-0031, whether the reader starts
+      before recovery finishes, or recovery stops re-verifying what it verified last time, or
+      both. **Decided** in [ADR-0037](adr/0037-startup-recovery-reads-what-it-has-not-already-verified.md):
+      stream the scan, record checkpoints of how far the two agree, and read only past the
+      latest one on start. It answers the memory item above for startup as well.
 - [ ] **The edge, API, and CLI crates do not deny `unwrap` and `expect`.** *From code.* There
       are no violations today, but `splitforge-edge` is the binary CONTRIBUTING's *"no
       `unwrap`/`expect` on any path reachable during an event"* rule matters most for.
