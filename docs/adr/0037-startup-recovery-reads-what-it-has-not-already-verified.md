@@ -1,6 +1,6 @@
 # ADR-0037: Startup recovery reads what it has not already verified, a line at a time
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-25
 - **Extends:** [ADR-0018](0018-write-ahead-sidecar-journal.md), [ADR-0031](0031-a-failed-write-is-retried-and-an-unstorable-read-is-set-aside.md)
 

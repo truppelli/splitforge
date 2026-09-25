@@ -44,7 +44,7 @@ this?" two years from now, the ADR is the answer.
 | [0034](0034-the-service-opens-the-readers-port-and-nothing-else.md) | The service opens the reader's port and nothing else | Accepted |
 | [0035](0035-the-first-module-is-the-m7e-hecto.md) | The first physical adapter is the M7E Hecto, on SparkFun's USB board | Accepted |
 | [0036](0036-raspberry-pi-4-is-the-edge-target.md) | The Raspberry Pi 4 is the edge target | Accepted |
-| [0037](0037-startup-recovery-reads-what-it-has-not-already-verified.md) | Startup recovery reads what it has not already verified, a line at a time | Proposed |
+| [0037](0037-startup-recovery-reads-what-it-has-not-already-verified.md) | Startup recovery reads what it has not already verified, a line at a time | Accepted |
 
 ## Process
 

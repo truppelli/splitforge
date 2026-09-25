@@ -1632,7 +1632,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       x86 machine above. A Pi 4 will be slower. Streaming the sidecar fixes the memory and not
       this. *Fix:* decide in an ADR, beside ADR-0018 and ADR-0031, whether the reader starts
       before recovery finishes, or recovery stops re-verifying what it verified last time, or
-      both. **Proposed** in [ADR-0037](adr/0037-startup-recovery-reads-what-it-has-not-already-verified.md):
+      both. **Decided** in [ADR-0037](adr/0037-startup-recovery-reads-what-it-has-not-already-verified.md):
       stream the scan, record checkpoints of how far the two agree, and read only past the
       latest one on start. It answers the memory item above for startup as well.
 - [ ] **The edge, API, and CLI crates do not deny `unwrap` and `expect`.** *From code.* There
