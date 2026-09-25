@@ -49,7 +49,9 @@ pub use backup::{
     sidecar_path_for,
 };
 pub use config::{AuditEntry, ConfigStore, ImportSummary, RaceSelection, parse_checkpoint_kind};
-pub use journal::{RecoveryReport, SidecarStatus, SqliteJournal};
+pub use journal::{
+    CHECKPOINT_INTERVAL, RecoveryReport, SidecarCheckpoint, SidecarStatus, SqliteJournal,
+};
 pub use migrations::{MIGRATIONS, Migration, SCHEMA_VERSION};
 pub use results::{ResultStore, RevisionSummary};
 pub use space::{DEFAULT_MIN_FREE_BYTES, DiskSpace, disk_space};

@@ -1623,7 +1623,24 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       command**; only the service's start can become a crash loop, so that is the one to fix
       first. Memory on a Pi should be close to these figures. Times will not be, and are
       recorded as an order of magnitude.
-- [ ] **Nothing is recorded while startup recovery runs, and it takes longer the longer the
+      **Startup fixed by [ADR-0037](adr/0037-startup-recovery-reads-what-it-has-not-already-verified.md);
+      `doctor` and the bundle still open.** Measured again the same way, on this branch's
+      build. `recover` always reads the whole sidecar, so it shows what a streamed full pass
+      costs now:
+
+      | 1M reads | Before | After |
+      |---|---|---|
+      | Service start, the two agree | 883 MB, 4.1 s | 6.7 MB, 0.1 s |
+      | Service start, replaying all | 883 MB, 25.5 s | 94 MB, 24.8 s |
+      | `recover`, the two agree | — | 110 MB, 1.9 s |
+      | `doctor` | 886 MB | 430 MB |
+      | `doctor --bundle` | 1.31 GB | 537 MB |
+
+      An ordinary start now costs the same at 100k, 500k and 1M reads, because it reads only
+      past its checkpoint. A full pass holds two sets of 16-byte ids rather than the file and
+      every record. `doctor` and the bundle halved, and what remains is `read_all` in their
+      other checks, which this did not touch. That half stays open, and costs one command.
+- [x] **Nothing is recorded while startup recovery runs, and it takes longer the longer the
       event has run.** *Measured, as above.* `main` in `splitforge-edge` opens the journal with
       `open_recovering` before it composes the reader, so a module is not read until recovery
       returns, and a runner crossing in that window is not recorded. Recovery re-reads and
@@ -1635,6 +1652,14 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       both. **Decided** in [ADR-0037](adr/0037-startup-recovery-reads-what-it-has-not-already-verified.md):
       stream the scan, record checkpoints of how far the two agree, and read only past the
       latest one on start. It answers the memory item above for startup as well.
+      **Fixed for an ordinary restart.** The service records a checkpoint at most once a minute
+      as it appends, and on a clean stop, so a start reads at most a minute of the sidecar: 0.1 s
+      at every size measured, where a million reads took 4.1 s. **Not for a destroyed
+      database**, which has no checkpoint and still replays everything before the reader
+      starts, 24.8 s at a million reads on x86. ADR-0037 accepts that, and leaves starting the
+      reader first for M3a's measurements to settle. The new tests call what this change
+      added, the checkpoint and where a pass started, so they have nothing to run against at
+      `3cef7c0`; the measurement above is the before and after.
 - [ ] **The edge, API, and CLI crates do not deny `unwrap` and `expect`.** *From code.* There
       are no violations today, but `splitforge-edge` is the binary CONTRIBUTING's *"no
       `unwrap`/`expect` on any path reachable during an event"* rule matters most for.

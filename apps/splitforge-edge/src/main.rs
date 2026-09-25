@@ -1145,7 +1145,29 @@ async fn main() -> Result<()> {
         ),
     }
 
-    serve(&args.socket, device).await
+    let served = serve(&args.socket, Arc::clone(&device)).await;
+    checkpoint_before_exit(&device);
+    served
+}
+
+/// Records a recovery checkpoint as the service stops, so the next start reads nothing it has
+/// already verified (ADR-0037).
+///
+/// Only on a stop the service is told about. A power cut is covered by the checkpoint an
+/// append recorded within the last [`CHECKPOINT_INTERVAL`]. Nothing here can make stopping
+/// fail: a checkpoint that cannot be written costs the next start a longer read, and is said.
+///
+/// [`CHECKPOINT_INTERVAL`]: splitforge_storage::CHECKPOINT_INTERVAL
+fn checkpoint_before_exit(device: &Device) {
+    let Ok(mut stores) = device.stores.lock() else {
+        return;
+    };
+    if let Err(error) = stores.journal.checkpoint() {
+        eprintln!(
+            "splitforge-edge: no recovery checkpoint was recorded on the way out ({error}); \
+             the next start reads more of the sidecar"
+        );
+    }
 }
 
 /// The handles health reads through, on the database the writers use.
@@ -1679,6 +1701,38 @@ mod tests {
             .journal
             .count()
             .expect("count the journal")
+    }
+
+    #[test]
+    fn a_clean_stop_records_where_the_next_start_can_begin() {
+        // ADR-0037. Appends record a checkpoint at most once a minute, so without this a
+        // restart read up to a minute of the sidecar it had just written.
+        let (device, _directory) = a_device_watching_a_reader();
+        let before = device
+            .stores
+            .lock()
+            .expect("the stores")
+            .journal
+            .latest_checkpoint()
+            .expect("read the checkpoint");
+        deliver(
+            &device,
+            vec![
+                a_read(&device, "E200", ReaderTimestamp::Absent),
+                a_read(&device, "E201", ReaderTimestamp::Absent),
+            ],
+        );
+
+        checkpoint_before_exit(&device);
+
+        let stores = device.stores.lock().expect("the stores");
+        let after = stores
+            .journal
+            .latest_checkpoint()
+            .expect("read the checkpoint")
+            .expect("a checkpoint was recorded");
+        assert_ne!(Some(&after), before.as_ref(), "a new one, not the start's");
+        assert_eq!(after.through_seq, stores.journal.count().expect("count"));
     }
 
     #[test]

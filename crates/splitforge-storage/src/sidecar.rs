@@ -56,9 +56,8 @@
 //! changes, the sidecar covers what changes every second. See
 //! `docs/adr/0018-write-ahead-sidecar-journal.md`.
 
-use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -98,7 +97,9 @@ pub(crate) struct SidecarRead {
     pub recorded_at: OffsetDateTime,
 }
 
-/// What a pass over the sidecar found.
+/// What a pass over the sidecar found, with every verified read kept. Tests only: a pass
+/// that recovers anything goes through [`Sidecar::scan_from`], which keeps none of them.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct SidecarScan {
     /// Every line that parsed and verified.
@@ -113,11 +114,43 @@ pub(crate) struct SidecarScan {
     pub torn_writes: u64,
 }
 
+/// What a pass over the sidecar counted, without the reads themselves.
+#[derive(Debug, Default)]
+pub(crate) struct ScanTally {
+    /// Lines that verified.
+    pub records: u64,
+    /// Lines that failed the digest or the decode. Real damage, not a torn write.
+    pub corrupt_lines: u64,
+    /// Bytes after the last newline: a write that was interrupted before it finished.
+    pub torn_tail_bytes: u64,
+    /// Interrupted writes that a later write was appended onto. See [`Line::AfterTornWrite`].
+    pub torn_writes: u64,
+    /// The last line that verified: where it ends, and the digest it carries. A checkpoint
+    /// can be recorded there, and nowhere later in this pass.
+    pub last_verified: Option<Tip>,
+}
+
+/// The end of a complete line in the sidecar, and the digest that line carries.
+///
+/// What a checkpoint records (ADR-0037), and what is checked against the file before one is
+/// trusted: a file that no longer has this line ending at this offset is not the file the
+/// checkpoint was written about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tip {
+    /// The offset just past the line's newline.
+    pub end: u64,
+    /// The 64 hex characters after the line's tag.
+    pub digest: String,
+}
+
 /// An append-only text journal beside the database.
 #[derive(Debug)]
 pub(crate) struct Sidecar {
     path: PathBuf,
     file: File,
+    /// The last line this handle wrote, or that recovery verified. `None` until one of those
+    /// has happened: a handle that has only been opened knows nothing about the file's end.
+    tip: Option<Tip>,
 }
 
 impl Sidecar {
@@ -140,7 +173,11 @@ impl Sidecar {
         let file = options.open(&path).map_err(|error| {
             StorageError::Sidecar(format!("opening {}: {error}", path.display()))
         })?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            tip: None,
+        })
     }
 
     /// Where this sidecar lives.
@@ -175,14 +212,16 @@ impl Sidecar {
         // affordable on an SD card.
         let mut buffer = String::new();
         let mut count = 0_usize;
+        let mut last_digest = String::new();
         for (read, recorded_at) in records {
             let record = SidecarRecord::of(read, recorded_at)?;
             let json = serde_json::to_string(&record).map_err(|error| {
                 StorageError::Sidecar(format!("encoding read {}: {error}", read.id))
             })?;
+            last_digest = hex_lower(Sha256::digest(json.as_bytes()).as_slice());
             buffer.push_str(LINE_TAG);
             buffer.push(' ');
-            buffer.push_str(&hex_lower(Sha256::digest(json.as_bytes()).as_slice()));
+            buffer.push_str(&last_digest);
             buffer.push(' ');
             buffer.push_str(&json);
             buffer.push('\n');
@@ -200,66 +239,176 @@ impl Sidecar {
         self.file.sync_all().map_err(|error| {
             StorageError::Sidecar(format!("fsync {}: {error}", self.path.display()))
         })?;
+        // Where this handle's own line ended, not the file's length: in append mode the write
+        // lands at the end and leaves the offset after it, which is this line's end even if
+        // another process appends after it.
+        let end = self.file.stream_position().map_err(|error| {
+            StorageError::Sidecar(format!(
+                "locating the end of {}: {error}",
+                self.path.display()
+            ))
+        })?;
+        self.tip = Some(Tip {
+            end,
+            digest: last_digest,
+        });
         Ok(())
     }
 
-    /// Reads and verifies every line.
-    ///
-    /// A damaged line is counted and skipped rather than fatal. The rest of the file is
-    /// still evidence, and refusing to recover 40,000 good reads because one line rotted
-    /// would be the wrong answer to the problem this file exists to solve.
-    pub(crate) fn scan(&self) -> Result<SidecarScan, StorageError> {
-        let bytes = std::fs::read(&self.path).map_err(|error| {
-            StorageError::Sidecar(format!("reading {}: {error}", self.path.display()))
-        })?;
-
-        let mut scan = SidecarScan::default();
-
-        // Everything after the final newline is a write that did not finish. That is an
-        // expected state after a power cut, not damage, so it is reported separately.
-        let complete = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |i| i + 1);
-        scan.torn_tail_bytes = (bytes.len() - complete) as u64;
-
-        for line in bytes[..complete].split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            match read_line(line) {
-                Line::Record(record) => scan.records.push(record),
-                Line::AfterTornWrite(record) => {
-                    scan.records.push(record);
-                    scan.torn_writes += 1;
-                }
-                Line::AfterDamage(record) => {
-                    scan.records.push(record);
-                    scan.corrupt_lines += 1;
-                }
-                Line::Corrupt => scan.corrupt_lines += 1,
-            }
-        }
-        Ok(scan)
+    /// The last line this handle wrote, or recovery verified.
+    pub(crate) const fn tip(&self) -> Option<&Tip> {
+        self.tip.as_ref()
     }
 
-    /// The identifiers present in the sidecar, without materializing the reads.
-    pub(crate) fn ids(scan: &SidecarScan) -> HashSet<String> {
-        scan.records
-            .iter()
-            .map(|record| record.read.id.to_string())
-            .collect()
+    /// Records a line recovery verified, so a checkpoint can be taken there.
+    pub(crate) fn set_tip(&mut self, tip: Tip) {
+        self.tip = Some(tip);
+    }
+
+    /// Reads and verifies every line, keeping every read. Tests only.
+    #[cfg(test)]
+    pub(crate) fn scan(&self) -> Result<SidecarScan, StorageError> {
+        let mut records = Vec::new();
+        let tally = self.scan_from(0, |record| {
+            records.push(record);
+            Ok(())
+        })?;
+        Ok(SidecarScan {
+            records,
+            corrupt_lines: tally.corrupt_lines,
+            torn_tail_bytes: tally.torn_tail_bytes,
+            torn_writes: tally.torn_writes,
+        })
+    }
+
+    /// Reads and verifies every line from `offset` on, a line at a time, handing each read
+    /// that verifies to `each` and keeping none of them.
+    ///
+    /// `offset` is `0` or the end of a line a checkpoint recorded. A damaged line is counted
+    /// and skipped rather than fatal. The rest of the file is still evidence, and refusing to
+    /// recover 40,000 good reads because one line rotted would be the wrong answer to the
+    /// problem this file exists to solve.
+    ///
+    /// Memory is one line, whatever the file's length (ADR-0037). The whole file used to be
+    /// read in one call and every read held, which on an ordinary restart was about 0.9 KB per
+    /// read the event had taken.
+    pub(crate) fn scan_from(
+        &self,
+        offset: u64,
+        mut each: impl FnMut(SidecarRead) -> Result<(), StorageError>,
+    ) -> Result<ScanTally, StorageError> {
+        let reading = |error: std::io::Error| {
+            StorageError::Sidecar(format!("reading {}: {error}", self.path.display()))
+        };
+        let mut file = File::open(&self.path).map_err(reading)?;
+        file.seek(SeekFrom::Start(offset)).map_err(reading)?;
+        let mut reader = BufReader::new(file);
+
+        let mut tally = ScanTally::default();
+        let mut position = offset;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let length = reader.read_until(b'\n', &mut line).map_err(reading)?;
+            if length == 0 {
+                break;
+            }
+            position += length as u64;
+            // Everything after the final newline is a write that did not finish. That is an
+            // expected state after a power cut, not damage, so it is reported separately.
+            let Some(complete) = line.strip_suffix(b"\n") else {
+                tally.torn_tail_bytes = length as u64;
+                break;
+            };
+            if complete.is_empty() {
+                continue;
+            }
+            let (record, at) = match read_line(complete) {
+                Line::Record(record) => (record, 0),
+                Line::AfterTornWrite(record, at) => {
+                    tally.torn_writes += 1;
+                    (record, at)
+                }
+                Line::AfterDamage(record, at) => {
+                    tally.corrupt_lines += 1;
+                    (record, at)
+                }
+                Line::Corrupt => {
+                    tally.corrupt_lines += 1;
+                    continue;
+                }
+            };
+            tally.records += 1;
+            if let Some(digest) = digest_at(complete, at) {
+                tally.last_verified = Some(Tip {
+                    end: position,
+                    digest,
+                });
+            }
+            each(record)?;
+        }
+        Ok(tally)
+    }
+
+    /// Whether the complete line ending at `tip.end` carries `tip.digest`.
+    ///
+    /// The check a checkpoint has to pass before recovery trusts it. `false` for a file that is
+    /// shorter, one whose byte before `end` is not a newline, and one where the line there is
+    /// some other line, which is what a line inserted or removed before it leaves. Only the
+    /// last [`MAX_CHECKED_LINE`] bytes are read, and a longer line is not trusted.
+    pub(crate) fn ends_with_line(&self, tip: &Tip) -> Result<bool, StorageError> {
+        let reading = |error: std::io::Error| {
+            StorageError::Sidecar(format!("reading {}: {error}", self.path.display()))
+        };
+        let mut file = File::open(&self.path).map_err(reading)?;
+        let length = file.metadata().map_err(reading)?.len();
+        if tip.end == 0 || tip.end > length {
+            return Ok(false);
+        }
+        let start = tip.end.saturating_sub(MAX_CHECKED_LINE);
+        file.seek(SeekFrom::Start(start)).map_err(reading)?;
+        let mut window = Vec::new();
+        file.take(tip.end - start)
+            .read_to_end(&mut window)
+            .map_err(reading)?;
+
+        let Some(line) = window.strip_suffix(b"\n") else {
+            return Ok(false);
+        };
+        let line = match line.iter().rposition(|byte| *byte == b'\n') {
+            Some(newline) => &line[newline + 1..],
+            None if start == 0 => line,
+            None => return Ok(false),
+        };
+        let needle = format!("{LINE_TAG} {} ", tip.digest);
+        Ok(line
+            .windows(needle.len())
+            .any(|candidate| candidate == needle.as_bytes()))
     }
 }
 
+/// The longest line [`Sidecar::ends_with_line`] will look back over. A line is a few hundred
+/// bytes; this is room for a payload far longer than any reader sends, and a bound on what a
+/// checkpoint check can cost.
+const MAX_CHECKED_LINE: u64 = 64 * 1024;
+
+/// The digest carried by the verified line that starts `at` bytes into `line`.
+fn digest_at(line: &[u8], at: usize) -> Option<String> {
+    let digest = line.get(at + LINE_TAG.len() + 1..at + LINE_TAG.len() + 1 + 64)?;
+    std::str::from_utf8(digest).ok().map(str::to_owned)
+}
+
 /// One complete line, and what it turned out to hold.
+///
+/// Where a verified line was found behind something else, the offset it starts at comes with
+/// it, so the digest it carries can be recorded.
 enum Line {
     /// A line that verified.
     Record(SidecarRead),
-    /// The remains of an interrupted write, then a line that verified.
-    AfterTornWrite(SidecarRead),
-    /// Bytes that are not the start of any line, then a line that verified.
-    AfterDamage(SidecarRead),
+    /// The remains of an interrupted write, then a line that verified at this offset.
+    AfterTornWrite(SidecarRead, usize),
+    /// Bytes that are not the start of any line, then a line that verified at this offset.
+    AfterDamage(SidecarRead, usize),
     /// Nothing in it verified.
     Corrupt,
 }
@@ -285,8 +434,8 @@ fn read_line(line: &[u8]) -> Line {
         .filter(|&at| line[at..].starts_with(start))
         .find_map(|at| parse_line(&line[at..]).ok().map(|record| (at, record)));
     match found {
-        Some((at, record)) if is_torn_write(&line[..at], start) => Line::AfterTornWrite(record),
-        Some((_, record)) => Line::AfterDamage(record),
+        Some((at, record)) if is_torn_write(&line[..at], start) => Line::AfterTornWrite(record, at),
+        Some((at, record)) => Line::AfterDamage(record, at),
         None => Line::Corrupt,
     }
 }
