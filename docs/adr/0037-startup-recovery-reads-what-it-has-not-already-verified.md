@@ -114,11 +114,16 @@ that has been destroyed, and that is a disaster with its own procedure.
 - **The full scan costs a tenth of the memory.** About 32 bytes per id on each side instead of
   about 100, plus the reads actually being repaired, instead of the whole file and every parsed
   record.
-- **A forged line inserted into the verified part of the sidecar is no longer replayed by a
-  restart.** The 2026-09-13 review found the sidecar was a write path into the journal. A line
-  appended after the checkpoint still is, and is still audited as `journal.replay`. `doctor`
-  still reports one in the verified part, and `splitforge recover` still replays it, on the
-  record.
+- ~~**A forged line inserted into the verified part of the sidecar is no longer replayed by a
+  restart.**~~ *Amended 2026-09-25, when this was implemented: it was wrong.* A line inserted
+  into the verified part moves every line after it, so the line ending at the checkpoint's
+  offset is no longer the one it recorded. The checkpoint is not trusted, the whole file is
+  read, and the inserted line is replayed and audited as `journal.replay`, as it was before this
+  ADR. `a_line_inserted_before_the_checkpoint_makes_the_start_read_everything` holds that. Only
+  a line overwritten in place with another of exactly the same length, leaving the checkpoint's
+  line where it was, is now passed over by a restart; `doctor` still reports it and
+  `splitforge recover` still replays it, on the record. The sidecar remains a write path into
+  the journal, as the 2026-09-13 review found.
 
 ### What this makes hard
 
