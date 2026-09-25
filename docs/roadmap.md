@@ -1259,9 +1259,15 @@ criterion, and therefore after hardware.
 - [x] **Stable CSV export contract.** `RESULTS_CSV_COLUMNS` is the contract, and
       `the_csv_column_list_is_the_contract` fails if a column moves. Every row carries the
       contract version in a trailing `format_version` column
-- Optional RaceDay Connect publish adapter
-- Signed/credentialed outbound sync
-- Local outbox with safe retry
+- ◑ **Optional RaceDay Connect publish adapter** — the translation is built
+      ([ADR-0039](adr/0039-raceday-connect-publishes-what-splitforge-derived.md), Proposed):
+      the wire contract, the course manifest, crossings restated a runner at a time so a
+      corrected crossing leaves the live board, result revisions, and what each response
+      means for the outbox. It sends nothing yet
+- Signed/credentialed outbound sync — the pairing contract and response types exist; the
+  `splitforge raceday pair` command and the token's place in local config do not
+- Local outbox with safe retry — the retry/refuse/unpaired classification and the backoff
+  exist; the `outbox_messages` table, the last-sent state per runner and the shipper do not
 - **Timing never blocks on integration success**
 
 The first two landed with Milestone 4 rather than here: results are a published contract the

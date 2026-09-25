@@ -4,7 +4,8 @@
 > `simulator`, `timesource`, `testkit`, `cli`, `api`, and `edge` exist and are in use.
 > `thingmagic` holds the frame codec, the command set, and the whole connection lifecycle —
 > what it does not hold is a `TagReportDecoder`, so it parses frames and produces no reads
-> yet. `llrp` and `sync` are still empty. **No protocol adapter is composed by
+> yet. `llrp` is still empty, and `sync` translates results for RaceDay Connect but sends
+> nothing. **No protocol adapter is composed by
 > `splitforge-edge` yet**: the only provider the service can build is the simulator. See the
 > [roadmap](roadmap.md). Decisions marked **OPEN** are tracked in
 > [open-questions.md](open-questions.md).
@@ -60,7 +61,7 @@ flowchart LR
     sim["splitforge-simulator"]
     store["splitforge-storage"]
     time["splitforge-timesource<br/><i>runs chronyc</i>"]
-    sync["splitforge-sync<br/><i>empty</i>"]
+    sync["splitforge-sync<br/><i>translation only</i>"]
   end
 
   subgraph core["Core — no I/O"]
@@ -328,11 +329,13 @@ the stronger wording that only a transport tracking delivery can answer
 RaceDay Connect is an **optional, outbound, downstream** integration. This is an
 architectural constraint, not a product preference.
 
-**None of it is built.** `splitforge-sync` is an empty crate and there is no
-`outbox_messages` table; Milestone 6 is gated behind Milestone 5's exit criterion, and
-therefore behind hardware. What follows is the shape the work must take when it happens,
-written down now because the constraint is the point and it is easier to hold to a boundary
-that was drawn before the code than one negotiated after it:
+**The translation is built; the shipping is not.** `splitforge-sync` holds the wire contract
+RaceDay Connect reads and pure functions from SplitForge's derivation onto it: the course
+manifest, crossings restated a runner at a time, and result revisions
+([ADR-0039](adr/0039-raceday-connect-publishes-what-splitforge-derived.md), Proposed). There
+is still no `outbox_messages` table, no HTTP client and no pairing command, so nothing is
+sent. What follows is the shape the work must take, written down before the code because the
+constraint is the point and it is easier to hold to a boundary that was drawn first:
 
 - No SplitForge crate other than `splitforge-sync` may reference it
 - `splitforge-sync` may not be a dependency of `engine`, `results`, or the read path
