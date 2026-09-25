@@ -154,11 +154,21 @@ sudo systemctl edit splitforge-edge.service
 ```ini
 [Service]
 ExecStart=
-ExecStart=/usr/local/bin/splitforge-edge --serial /dev/splitforge-reader --region na
+ExecStart=/usr/local/bin/splitforge-edge --serial /dev/splitforge-reader --region na --read-power 20
 ```
 
 `--region` has no default, because the module transmits and which band is legal depends on
 where it is ([ADR-0033](adr/0033-each-connection-starts-the-stream.md)).
+
+`--read-power` has none either ([ADR-0038](adr/0038-each-connection-sets-the-read-power-the-operator-chose.md)).
+It is dBm, with up to two decimal places, and it sets how far from the mat a chip is read,
+what a read's signal strength is comparable with, and the current and heat the module draws.
+Choose it at the bench, for the lane and antenna in use; `20` above is an example, not a
+recommendation. The module says what range it accepts, 0 to 27 dBm for the M7E-HECTO, and
+refuses a value outside it: the connection then ends as one that did not start, and the log
+names the step. `/health` reports the power the module applied under `reader.read_power`, in
+hundredths of a dBm, and each start records the configuration on the audit trail as
+`reader.configured`. Changing it means restarting the service.
 
 **Name the port `/dev/splitforge-reader`, never `/dev/ttyUSB0`.** The udev rule creates that
 name and moves it with the device. `ttyUSB0` becomes `ttyUSB1` if the bridge re-enumerates

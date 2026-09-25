@@ -66,10 +66,12 @@ use splitforge_domain::{
     ClockStep, DeviceClockState, GapDetection, JournalError, RaceId, RawRead, RawReadJournal,
     ReaderId, SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
 };
-use splitforge_reader::{Disconnection, Ingest, ReaderEvent, ReaderFaults, ReaderProvider};
+use splitforge_reader::{
+    Disconnection, Ingest, ReaderEvent, ReaderFaults, ReaderProvider, TransmitPower,
+};
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
 use splitforge_thingmagic::{
-    Region, SerialSettings, StartSequence, StreamDecoder, ThingMagicReader,
+    ReadPower, Region, SerialSettings, StartSequence, StreamDecoder, ThingMagicReader,
 };
 use splitforge_timesource::ClockReading;
 use tokio::sync::mpsc::Receiver;
@@ -116,25 +118,28 @@ struct Args {
     #[arg(long, value_name = "SPEED", default_value = "immediate")]
     simulate_speed: Speed,
 
-    /// Read from a ThingMagic serial module on this device path. Requires `--region`.
+    /// Read from a ThingMagic serial module on this device path. Requires `--region` and
+    /// `--read-power`.
     ///
     /// Every connection tells the module to read: it stops any stream the last connection left
-    /// running, selects Gen2 and the region, turns the module's read filter off, and starts a
-    /// stream. A module that refuses a step is recorded as a gap that did not start.
+    /// running, selects Gen2, the region and the read power, asks what power the module applied,
+    /// turns the module's read filter off, and starts a stream. A module that refuses a step is
+    /// recorded as a gap that did not start.
     ///
     /// Reads are decoded by a parser anchored on one captured frame from real hardware, and
     /// **it refuses to guess**: a report whose layout it has not seen becomes a counted
     /// decode fault rather than a wrong chip identifier. Connection edges are recorded as
     /// bounded gaps whatever the reports look like — that half needs no decoder.
     ///
-    /// **The installed unit cannot use this.** `deploy/splitforge-edge.service` passes no
-    /// arguments and sets `PrivateDevices=yes`, which gives the service a private `/dev`
-    /// with no serial node in it. This is a bench flag until both change deliberately.
+    /// The installed unit passes no arguments, so a drop-in adds this one, and may open USB
+    /// serial ports and no other device ([ADR-0034](../../../docs/adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)).
+    /// `docs/deployment.md` says how.
     #[arg(
         long,
         value_name = "PATH",
         conflicts_with = "simulate",
-        requires = "region"
+        requires = "region",
+        requires = "read_power"
     )]
     serial: Option<String>,
 
@@ -146,6 +151,17 @@ struct Args {
     /// connection rather than trusting whatever the module last held.
     #[arg(long, value_name = "REGION", requires = "serial")]
     region: Option<Region>,
+
+    /// The read transmit power for `--serial`, in dBm with up to two decimal places: `20`,
+    /// `22.5`.
+    ///
+    /// **There is no default** ([ADR-0038](../../../docs/adr/0038-each-connection-sets-the-read-power-the-operator-chose.md)).
+    /// It sets the read zone, what a read's signal strength means, and the current and heat the
+    /// module draws, and what is legal depends on the whole installation. The module says what
+    /// range it accepts and refuses a value outside it, which ends the connection as one that
+    /// did not start. The M7E-HECTO accepts 0 to 27 dBm.
+    #[arg(long, value_name = "DBM", requires = "serial")]
+    read_power: Option<ReadPower>,
 
     /// Bits per second for `--serial`. The module's own default is 115200.
     #[arg(long, value_name = "BAUD", default_value_t = 115_200)]
@@ -212,6 +228,8 @@ struct ReaderStatus {
     set_aside: u64,
     /// What the provider could not read, as it last reported.
     faults: ReaderFaults,
+    /// The read power the reader last reported, if it has (ADR-0038).
+    read_power: Option<TransmitPower>,
     /// Why the read in hand is not stored yet, while the read path is retrying it.
     fault: Option<String>,
     /// Which reader is composed, and which race it is reading for.
@@ -265,6 +283,7 @@ impl ReaderStatus {
                 framing: 0,
                 decoding: 0,
             },
+            read_power: None,
             fault: None,
             watching: None,
             last_message: None,
@@ -352,6 +371,11 @@ impl HealthSource for Device {
                     // open gap has to survive the restart that a power cut causes, so the
                     // rows are the authority and this process's memory is not.
                     open_gap: None,
+                    read_power: reader.read_power.map(|power| splitforge_api::ReadPower {
+                        centi_dbm: power.centi_dbm,
+                        min_centi_dbm: power.min_centi_dbm,
+                        max_centi_dbm: power.max_centi_dbm,
+                    }),
                 };
                 if let Some(fault) = reader.fault.as_ref() {
                     // Present only while a write is failing, and cleared by the one that
@@ -622,6 +646,25 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, inges
             // that sends only what cannot be decoded is still silent to the watchdog.
             ReaderEvent::Faults(faults) => {
                 device.update_reader(|status| status.faults = faults);
+                continue;
+            }
+            // Said when it changes rather than on every connection: a reader reconnecting at
+            // the power it had is not news, and one that comes back at another is.
+            ReaderEvent::TransmitPower(power) => {
+                let mut changed = false;
+                device.update_reader(|status| {
+                    changed = status.read_power != Some(power);
+                    status.read_power = Some(power);
+                });
+                if changed {
+                    eprintln!(
+                        "splitforge-edge: the reader applied a read power of {} dBm, and accepts \
+                         {} to {} dBm",
+                        centi_dbm(power.centi_dbm),
+                        centi_dbm(power.min_centi_dbm),
+                        centi_dbm(power.max_centi_dbm)
+                    );
+                }
                 continue;
             }
         };
@@ -1121,11 +1164,14 @@ async fn main() -> Result<()> {
             let Some(region) = args.region else {
                 anyhow::bail!("--serial {path} needs --region");
             };
+            let Some(power) = args.read_power else {
+                anyhow::bail!("--serial {path} needs --read-power");
+            };
             compose_serial_reader(
                 &device,
                 path,
                 args.serial_baud,
-                region,
+                (region, power),
                 args.reader.as_deref(),
                 &args.database,
             )?;
@@ -1283,11 +1329,11 @@ fn compose_serial_reader(
     device: &Arc<Device>,
     path: &str,
     baud: u32,
-    region: Region,
+    (region, power): (Region, ReadPower),
     reader: Option<&str>,
     database: &std::path::Path,
 ) -> Result<()> {
-    let store = ConfigStore::open(database)
+    let mut store = ConfigStore::open(database)
         .with_context(|| format!("opening the configuration at {}", database.display()))?;
     let race = match store.resolve_race(None).context("resolving the race")? {
         RaceSelection::One(race) => race,
@@ -1349,10 +1395,28 @@ fn compose_serial_reader(
         ..SerialSettings::default()
     };
 
+    // What every read taken from here on means against: where it was, how it was asked, and
+    // at what power. Once per start, because all of it comes from the command line and changes
+    // only when the service restarts (ADR-0038).
+    let configured_detail = serde_json::json!({
+        "device": path,
+        "baud": baud,
+        "region": region.name(),
+        "read_power_centi_dbm": power.centi_dbm(),
+    });
+    store
+        .record_audit(
+            SERVICE_ACTOR,
+            "reader.configured",
+            Some(reader_id.as_str()),
+            Some(&configured_detail.to_string()),
+        )
+        .context("recording the reader's configuration on the audit trail")?;
+
     eprintln!(
-        "splitforge-edge: SERIAL reader {:?} on {path} at {baud} baud, region {}. Each \
-         connection starts a Gen2 stream, and reports are decoded by a parser that counts what \
-         it cannot read instead of guessing",
+        "splitforge-edge: SERIAL reader {:?} on {path} at {baud} baud, region {}, read power \
+         {power}. Each connection starts a Gen2 stream, and reports are decoded by a parser \
+         that counts what it cannot read instead of guessing",
         reader_id.as_str(),
         region.name()
     );
@@ -1363,7 +1427,7 @@ fn compose_serial_reader(
             splitforge_thingmagic::serial(settings),
             StreamDecoder::new(reader_id.clone()),
         )
-        .with_start(StartSequence::gen2(region)),
+        .with_start(StartSequence::gen2(region, power)),
     );
     let receiver = provider.start();
 
@@ -1383,6 +1447,13 @@ fn compose_serial_reader(
     std::thread::spawn(move || read_into_journal(&device, receiver, ingest));
 
     Ok(())
+}
+
+/// Hundredths of a dBm as dBm, exactly: `2250` is `22.50`.
+fn centi_dbm(value: i16) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let magnitude = value.unsigned_abs();
+    format!("{sign}{}.{:02}", magnitude / 100, magnitude % 100)
 }
 
 /// The configured readers, for an error message that tells the operator what to type.
@@ -1482,6 +1553,7 @@ mod tests {
             observed: Mutex::new(observed),
             clock: RwLock::new(None),
             reader: Mutex::new(ReaderStatus {
+                read_power: None,
                 // The kind is irrelevant here and there is no `Serial` yet: composing the
                 // adapter is the next bullet, and a variant nothing produces would be a
                 // claim about hardware this milestone has not earned.
@@ -1701,6 +1773,41 @@ mod tests {
             .journal
             .count()
             .expect("count the journal")
+    }
+
+    #[test]
+    fn the_power_a_reader_reports_is_what_health_reports() {
+        // ADR-0038. What the module said it applied, not what the command line asked for, and
+        // neither a read nor a sign of life.
+        let (device, _directory) = a_device_watching_a_reader();
+        let power = TransmitPower {
+            centi_dbm: 2240,
+            min_centi_dbm: 0,
+            max_centi_dbm: 2700,
+        };
+        deliver(
+            &device,
+            vec![
+                ReaderEvent::TransmitPower(power),
+                ReaderEvent::TransmitPower(power),
+            ],
+        );
+
+        let health = device.health();
+        assert_eq!(
+            health.reader.read_power,
+            Some(splitforge_api::ReadPower {
+                centi_dbm: 2240,
+                min_centi_dbm: 0,
+                max_centi_dbm: 2700,
+            })
+        );
+        assert_eq!(
+            health.reader.reads_received, 0,
+            "a report of power is not a read"
+        );
+        assert_eq!(centi_dbm(2240), "22.40");
+        assert_eq!(centi_dbm(-5), "-0.05");
     }
 
     #[test]
@@ -2097,7 +2204,7 @@ mod tests {
             &device,
             "/dev/null",
             115_200,
-            Region::Na,
+            (Region::Na, "22.5".parse().expect("a power")),
             Some("nope"),
             &database,
         )
@@ -2132,9 +2239,15 @@ mod tests {
         }
         let device = a_device_on(&database);
 
-        let error =
-            compose_serial_reader(&device, "/dev/null", 115_200, Region::Na, None, &database)
-                .expect_err("two readers and no --reader cannot be resolved");
+        let error = compose_serial_reader(
+            &device,
+            "/dev/null",
+            115_200,
+            (Region::Na, "22.5".parse().expect("a power")),
+            None,
+            &database,
+        )
+        .expect_err("two readers and no --reader cannot be resolved");
         let message = format!("{error}");
 
         // A gap is recorded *against a reader*, so guessing which one would put evidence on
@@ -2159,7 +2272,7 @@ mod tests {
             &device,
             "/dev/null",
             115_200,
-            Region::Na,
+            (Region::Na, "22.5".parse().expect("a power")),
             Some("mat"),
             &database,
         )
@@ -2211,16 +2324,44 @@ mod tests {
         ])
         .expect_err("OPEN is not a region the service offers");
 
-        let serial = Args::try_parse_from([
+        Args::try_parse_from([
             "splitforge-edge",
             "--serial",
             "/dev/ttyUSB0",
             "--region",
             "na",
         ])
-        .expect("--serial with a region parses");
+        .expect_err("a module transmits at a power too, and that has no default either");
+        Args::try_parse_from(["splitforge-edge", "--read-power", "20"])
+            .expect_err("a power with nothing to set it on is a mistake worth refusing");
+        Args::try_parse_from([
+            "splitforge-edge",
+            "--serial",
+            "/dev/ttyUSB0",
+            "--region",
+            "na",
+            "--read-power",
+            "-3",
+        ])
+        .expect_err("a negative power is not a power");
+
+        let serial = Args::try_parse_from([
+            "splitforge-edge",
+            "--serial",
+            "/dev/ttyUSB0",
+            "--region",
+            "na",
+            "--read-power",
+            "22.5",
+        ])
+        .expect("--serial with a region and a read power parses");
         assert_eq!(serial.serial.as_deref(), Some("/dev/ttyUSB0"));
         assert_eq!(serial.region, Some(Region::Na));
+        assert_eq!(
+            serial.read_power.map(ReadPower::centi_dbm),
+            Some(2250),
+            "hundredths of a dBm, exactly"
+        );
         assert_eq!(
             serial.serial_baud, 115_200,
             "the module's own default, so an operator who omits it gets what the guide says"

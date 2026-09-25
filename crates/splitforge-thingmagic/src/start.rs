@@ -16,8 +16,12 @@
 //! 3. **Gen2** as the tag protocol.
 //! 4. **The region**, which the operator chose. The module is a global SKU, so it is set rather
 //!    than assumed.
-//! 5. **Read filter off**, so the module does not suppress the repeated reads a burst is made of.
-//! 6. **Start streaming.**
+//! 5. **The read power**, which the operator also chose (ADR-0038). The read zone, the signal
+//!    strength of every read, and the current the module draws all follow from it.
+//! 6. **What power the module applied**, and the range it accepts, which it reports once asked.
+//!    Not required: a module that accepted the power and cannot describe it still reads.
+//! 7. **Read filter off**, so the module does not suppress the repeated reads a burst is made of.
+//! 8. **Start streaming.**
 //!
 //! Every byte comes from [`crate::command`], which cites where each command was checked.
 //!
@@ -40,7 +44,7 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use crate::command::{Command, OpCode, Region};
+use crate::command::{Command, OpCode, PowerReport, ReadPower, Region};
 use crate::frame::{MAX_FRAME_LEN, Response};
 
 /// How long each command's answer may take before the sequence gives up on it.
@@ -64,9 +68,9 @@ pub struct StartSequence {
 }
 
 impl StartSequence {
-    /// The Gen2 streaming start, in `region`.
+    /// The Gen2 streaming start, in `region`, reading at `power`.
     #[must_use]
-    pub fn gen2(region: Region) -> Self {
+    pub fn gen2(region: Region, power: ReadPower) -> Self {
         let step = |command, must_succeed| Step {
             command,
             must_succeed,
@@ -77,6 +81,8 @@ impl StartSequence {
                 step(Command::version(), true),
                 step(Command::gen2_protocol(), true),
                 step(Command::region(region), true),
+                step(Command::read_power(power), true),
+                step(Command::read_power_with_limits(), false),
                 step(Command::read_filter_off(), true),
                 step(Command::start_streaming(), true),
             ],
@@ -125,6 +131,8 @@ pub struct Starting {
     steps: Vec<Step>,
     next: usize,
     deadline: Option<Instant>,
+    /// What the module said about its read power, until [`Self::take_power_report`].
+    power: Option<PowerReport>,
 }
 
 impl Starting {
@@ -135,6 +143,7 @@ impl Starting {
             steps: sequence.steps.clone(),
             next: 0,
             deadline: None,
+            power: None,
         }
     }
 
@@ -186,8 +195,18 @@ impl Starting {
                 status: response.status,
             }));
         }
+        if step.command == Command::read_power_with_limits() && response.is_ok() {
+            self.power = PowerReport::from_answer(response.data);
+        }
         self.next += 1;
         self.send(port, now)
+    }
+
+    /// What the module reported about its read power on this connection, once.
+    ///
+    /// `None` before it answers, after it has been taken, and when it refused or did not answer.
+    pub const fn take_power_report(&mut self) -> Option<PowerReport> {
+        self.power.take()
     }
 
     /// Checks the time. Past the deadline, a command that had to succeed is a refusal, and one
@@ -254,6 +273,11 @@ mod tests {
     use super::*;
     use crate::frame::{Decoded, decode};
 
+    /// The power every sequence here is built with.
+    fn power() -> ReadPower {
+        "22.5".parse().expect("a power")
+    }
+
     /// A response frame, as the module would send it.
     fn answer_frame(opcode: u8, status: u16, data: &[u8]) -> Vec<u8> {
         let mut frame = vec![
@@ -290,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_module_that_accepts_every_command_starts_streaming() {
-        let sequence = StartSequence::gen2(Region::Na);
+        let sequence = StartSequence::gen2(Region::Na, power());
         let mut starting = Starting::new(&sequence);
         let mut port = Vec::new();
         let now = Instant::now();
@@ -305,6 +329,8 @@ mod tests {
             answer_frame(0x03, 0x0000, &[0x01, 0x02, 0x03]),
             answer_frame(0x93, 0x0000, &[]),
             answer_frame(0x97, 0x0000, &[]),
+            answer_frame(0x92, 0x0000, &[]),
+            answer_frame(0x62, 0x0000, &[0x01, 0x08, 0xCA, 0x0A, 0x8C, 0x00, 0x00]),
             answer_frame(0x9A, 0x0000, &[]),
         ];
         for frame in &answers {
@@ -326,7 +352,10 @@ mod tests {
             Progress::Started
         );
 
-        assert_eq!(sent(&port), vec![0x2F, 0x03, 0x93, 0x97, 0x9A, 0x2F]);
+        assert_eq!(
+            sent(&port),
+            vec![0x2F, 0x03, 0x93, 0x97, 0x92, 0x62, 0x9A, 0x2F]
+        );
         let mut expected = Vec::new();
         for command in sequence.commands() {
             let mut out = [0_u8; MAX_FRAME_LEN];
@@ -340,7 +369,7 @@ mod tests {
 
     #[test]
     fn a_refused_command_stops_the_sequence_and_says_which_and_why() {
-        let mut starting = Starting::new(&StartSequence::gen2(Region::Eu3));
+        let mut starting = Starting::new(&StartSequence::gen2(Region::Eu3, power()));
         let mut port = Vec::new();
         let now = Instant::now();
         starting.begin(&mut port, now).expect("write");
@@ -379,7 +408,7 @@ mod tests {
         // not streaming has nothing to stop, and the sequence goes on either way.
         let now = Instant::now();
 
-        let mut refused_stop = Starting::new(&StartSequence::gen2(Region::Na));
+        let mut refused_stop = Starting::new(&StartSequence::gen2(Region::Na, power()));
         let mut port = Vec::new();
         refused_stop.begin(&mut port, now).expect("write");
         let stop = answer_frame(0x2F, 0x0101, &[0x02]);
@@ -391,7 +420,7 @@ mod tests {
         );
         assert_eq!(sent(&port), vec![0x2F, 0x03]);
 
-        let mut silent_stop = Starting::new(&StartSequence::gen2(Region::Na));
+        let mut silent_stop = Starting::new(&StartSequence::gen2(Region::Na, power()));
         let mut port = Vec::new();
         silent_stop.begin(&mut port, now).expect("write");
         assert_eq!(
@@ -410,7 +439,7 @@ mod tests {
 
     #[test]
     fn a_command_nobody_answers_is_a_refusal_at_the_deadline() {
-        let mut starting = Starting::new(&StartSequence::gen2(Region::Na));
+        let mut starting = Starting::new(&StartSequence::gen2(Region::Na, power()));
         let mut port = Vec::new();
         let now = Instant::now();
         starting.begin(&mut port, now).expect("write");
@@ -437,7 +466,7 @@ mod tests {
     #[test]
     fn a_late_stop_answer_is_not_taken_for_the_start() {
         // Both answer with 0x2F. The option byte each echoes is what tells them apart.
-        let mut starting = Starting::new(&StartSequence::gen2(Region::Na));
+        let mut starting = Starting::new(&StartSequence::gen2(Region::Na, power()));
         let mut port = Vec::new();
         let now = Instant::now();
         starting.begin(&mut port, now).expect("write");
@@ -446,6 +475,8 @@ mod tests {
             answer_frame(0x03, 0, &[]),
             answer_frame(0x93, 0, &[]),
             answer_frame(0x97, 0, &[]),
+            answer_frame(0x92, 0, &[]),
+            answer_frame(0x62, 0, &[0x01, 0x08, 0xCA, 0x0A, 0x8C, 0x00, 0x00]),
             answer_frame(0x9A, 0, &[]),
         ] {
             starting
@@ -465,16 +496,111 @@ mod tests {
     fn a_tag_report_is_never_an_answer() {
         // A stream from the last connection is still running while the sequence waits. Its
         // reports go to the decoder, not here.
-        let mut starting = Starting::new(&StartSequence::gen2(Region::Na));
+        let mut starting = Starting::new(&StartSequence::gen2(Region::Na, power()));
         let mut port = Vec::new();
         starting.begin(&mut port, Instant::now()).expect("write");
 
         assert!(!starting.claims(&response(&crate::crc::CAPTURED_FRAME)));
     }
 
+    /// A sequence that has had every answer up to and including the region's.
+    fn past_the_region(port: &mut Vec<u8>, now: Instant) -> Starting {
+        let mut starting = Starting::new(&StartSequence::gen2(Region::Na, power()));
+        starting.begin(port, now).expect("write");
+        for frame in [
+            answer_frame(0x2F, 0, &[0x02]),
+            answer_frame(0x03, 0, &[]),
+            answer_frame(0x93, 0, &[]),
+            answer_frame(0x97, 0, &[]),
+        ] {
+            starting
+                .answer(&response(&frame), port, now)
+                .expect("write");
+        }
+        starting
+    }
+
+    #[test]
+    fn a_power_the_module_refuses_ends_the_sequence_and_says_so() {
+        // ADR-0038. The range is the module's to judge: FAULT_MSG_POWER_TOO_HIGH.
+        let mut port = Vec::new();
+        let now = Instant::now();
+        let mut starting = past_the_region(&mut port, now);
+
+        let refused = answer_frame(0x92, 0x0103, &[]);
+        assert!(starting.claims(&response(&refused)));
+        assert_eq!(
+            starting
+                .answer(&response(&refused), &mut port, now)
+                .expect("write"),
+            Progress::Refused(Refusal::Status {
+                command: OpCode::SetReadTxPower,
+                status: 0x0103
+            })
+        );
+        assert_eq!(sent(&port), vec![0x2F, 0x03, 0x93, 0x97, 0x92]);
+    }
+
+    #[test]
+    fn a_module_that_cannot_describe_its_power_still_starts() {
+        // The read-back is for the record, not a condition of reading. Refused or unanswered,
+        // the sequence goes on to the read filter.
+        let now = Instant::now();
+
+        let mut port = Vec::new();
+        let mut refused = past_the_region(&mut port, now);
+        refused
+            .answer(&response(&answer_frame(0x92, 0, &[])), &mut port, now)
+            .expect("write");
+        assert_eq!(
+            refused
+                .answer(&response(&answer_frame(0x62, 0x0109, &[])), &mut port, now)
+                .expect("write"),
+            Progress::Waiting
+        );
+        assert_eq!(sent(&port).last(), Some(&0x9A));
+        assert_eq!(refused.take_power_report(), None);
+
+        let mut port = Vec::new();
+        let mut silent = past_the_region(&mut port, now);
+        silent
+            .answer(&response(&answer_frame(0x92, 0, &[])), &mut port, now)
+            .expect("write");
+        assert_eq!(
+            silent.tick(&mut port, now + ANSWER_TIMEOUT).expect("write"),
+            Progress::Waiting
+        );
+        assert_eq!(sent(&port).last(), Some(&0x9A));
+    }
+
+    #[test]
+    fn what_the_module_reports_about_its_power_is_kept_once() {
+        let mut port = Vec::new();
+        let now = Instant::now();
+        let mut starting = past_the_region(&mut port, now);
+        for frame in [
+            answer_frame(0x92, 0, &[]),
+            answer_frame(0x62, 0, &[0x01, 0x08, 0xC0, 0x0A, 0x8C, 0x00, 0x00]),
+        ] {
+            starting
+                .answer(&response(&frame), &mut port, now)
+                .expect("write");
+        }
+        assert_eq!(
+            starting.take_power_report(),
+            Some(PowerReport {
+                centi_dbm: 2240,
+                max_centi_dbm: 2700,
+                min_centi_dbm: 0,
+            }),
+            "what the module applied, which is not necessarily what was sent"
+        );
+        assert_eq!(starting.take_power_report(), None);
+    }
+
     #[test]
     fn nothing_is_claimed_before_the_first_command_goes_out() {
-        let starting = Starting::new(&StartSequence::gen2(Region::Na));
+        let starting = Starting::new(&StartSequence::gen2(Region::Na, power()));
         assert!(!starting.claims(&response(&answer_frame(0x2F, 0, &[0x02]))));
     }
 }

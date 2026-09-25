@@ -131,6 +131,7 @@ pub enum OpCode {
     /// Configure the antenna ports.
     SetAntennaPort = 0x91,
     /// Set transmit power for reads. 0 to +27 dBm on the M7E-HECTO (user guide § 5.3.1).
+    /// See [`Command::read_power`].
     SetReadTxPower = 0x92,
     /// Select the tag protocol.
     SetTagProtocol = 0x93,
@@ -504,6 +505,132 @@ impl std::str::FromStr for Region {
     }
 }
 
+/// A read transmit power, in hundredths of a dBm (ADR-0038).
+///
+/// **Chosen by the operator, never assumed**, like [`Region`]. What range is legal depends on
+/// the installation, and what range is possible depends on the module: this type refuses only
+/// what cannot be a power at all, and the module refuses what it cannot transmit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReadPower(i16);
+
+impl ReadPower {
+    /// A power of `centi_dbm` hundredths of a dBm, or `None` if it is negative.
+    #[must_use]
+    pub const fn from_centi_dbm(centi_dbm: i16) -> Option<Self> {
+        if centi_dbm < 0 {
+            None
+        } else {
+            Some(Self(centi_dbm))
+        }
+    }
+
+    /// The power in hundredths of a dBm, which is what the module takes: `2700` is 27.00 dBm.
+    #[must_use]
+    pub const fn centi_dbm(self) -> i16 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ReadPower {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{:02} dBm", self.0 / 100, self.0 % 100)
+    }
+}
+
+/// A read power that could not be parsed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{given:?} is not a read power; expected dBm as a number from 0 with up to two decimal \
+     places, such as 20 or 22.5"
+)]
+pub struct InvalidReadPower {
+    /// What was given.
+    pub given: String,
+}
+
+impl std::str::FromStr for ReadPower {
+    type Err = InvalidReadPower;
+
+    /// Parses dBm with up to two decimal places, exactly: `22.5` is `2250`, with no binary
+    /// fraction in between.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || InvalidReadPower {
+            given: text.to_owned(),
+        };
+        let trimmed = text
+            .trim()
+            .strip_suffix("dBm")
+            .unwrap_or(text.trim())
+            .trim();
+        let digits =
+            |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+        // A point has to have digits after it: `22.` is a typo, not 22 dBm.
+        let (whole, fraction) = match trimmed.split_once('.') {
+            Some((whole, fraction)) if digits(fraction) && fraction.len() <= 2 => (whole, fraction),
+            Some(_) => return Err(invalid()),
+            None => (trimmed, ""),
+        };
+        if !digits(whole) {
+            return Err(invalid());
+        }
+        let whole: i32 = whole.parse().map_err(|_| invalid())?;
+        let hundredths: i32 = format!("{fraction:0<2}").parse().map_err(|_| invalid())?;
+        let centi = whole
+            .checked_mul(100)
+            .and_then(|value| value.checked_add(hundredths))
+            .ok_or_else(invalid)?;
+        i16::try_from(centi)
+            .ok()
+            .and_then(Self::from_centi_dbm)
+            .ok_or_else(invalid)
+    }
+}
+
+/// What the module says about its read power: what it holds now, and what it accepts.
+///
+/// The answer to [`Command::read_power_with_limits`]. The module calibrates at 0.5 dB and
+/// interpolates between (§ 5.3.1), so what it holds is what it is doing, which is why it is
+/// asked rather than assumed to be what was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerReport {
+    /// The read power in force, in hundredths of a dBm.
+    pub centi_dbm: i16,
+    /// The highest it accepts.
+    pub max_centi_dbm: i16,
+    /// The lowest it accepts.
+    pub min_centi_dbm: i16,
+}
+
+impl PowerReport {
+    /// Reads the data of a `0x62` answer to option `0x01`: the option echoed, then the power
+    /// in force, the maximum and the minimum, each 16 bits big-endian.
+    ///
+    /// MercuryAPI 2023's `TMR_SR_cmdGetReadTxPowerWithLimits` reads them at message offsets
+    /// 6, 8 and 10, which are data offsets 1, 3 and 5 once the header and status are behind.
+    /// `None` for an answer too short or echoing another option.
+    #[must_use]
+    pub fn from_answer(data: &[u8]) -> Option<Self> {
+        let [
+            0x01,
+            set_high,
+            set_low,
+            max_high,
+            max_low,
+            min_high,
+            min_low,
+            ..,
+        ] = *data
+        else {
+            return None;
+        };
+        Some(Self {
+            centi_dbm: i16::from_be_bytes([set_high, set_low]),
+            max_centi_dbm: i16::from_be_bytes([max_high, max_low]),
+            min_centi_dbm: i16::from_be_bytes([min_high, min_low]),
+        })
+    }
+}
+
 /// The most data any command in this crate carries.
 const MAX_COMMAND_BODY: usize = 16;
 
@@ -608,6 +735,27 @@ impl Command {
         Self::new(OpCode::SetRegion, &[region.to_byte()])
     }
 
+    /// Set the read transmit power (ADR-0038).
+    ///
+    /// Signed 16-bit big-endian hundredths of a dBm, in both MercuryAPI 2023's
+    /// `TMR_SR_cmdSetReadWriteTxPower` (`SETS16`) and SparkFun's `setReadPower`. A value the
+    /// module cannot transmit is refused with `FAULT_MSG_POWER_TOO_HIGH` (`0x0103`) or
+    /// `FAULT_MSG_POWER_TOO_LOW` (`0x0106`).
+    #[must_use]
+    pub const fn read_power(power: ReadPower) -> Self {
+        let [high, low] = power.centi_dbm().to_be_bytes();
+        Self::new(OpCode::SetReadTxPower, &[high, low])
+    }
+
+    /// Ask for the read power in force and the range the module accepts.
+    ///
+    /// Option `01`, as MercuryAPI 2023's `TMR_SR_cmdGetReadTxPowerWithLimits` sends it. Option
+    /// `00`, SparkFun's `getReadPower`, returns the power alone. See [`PowerReport`].
+    #[must_use]
+    pub const fn read_power_with_limits() -> Self {
+        Self::new(OpCode::GetReadTxPower, &[0x01])
+    }
+
     /// Turn the module's read filter off.
     ///
     /// Key-value form `01`, the key, and `00` for false: MercuryAPI's
@@ -680,6 +828,67 @@ pub const fn antenna_ports(byte: u8) -> (u8, u8) {
 mod tests {
     use super::*;
     use crate::crc::CAPTURED_FRAME;
+
+    #[test]
+    fn a_read_power_parses_as_exact_hundredths_of_a_dbm() {
+        for (text, centi) in [
+            ("0", 0),
+            ("20", 2000),
+            ("22.5", 2250),
+            ("22.05", 2205),
+            ("27.00", 2700),
+            (" 27 dBm ", 2700),
+        ] {
+            let power: ReadPower = text.parse().unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(power.centi_dbm(), centi, "{text:?}");
+        }
+        assert_eq!(
+            "22.5".parse::<ReadPower>().expect("parse").to_string(),
+            "22.50 dBm"
+        );
+    }
+
+    #[test]
+    fn what_cannot_be_a_power_is_refused_before_the_module_sees_it() {
+        // Negative, not a number, too fine, or more than 16 bits of hundredths. Whether a
+        // number is in range is the module's to say, so 30 dBm parses.
+        for text in ["-1", "", "abc", "22.", ".5", "22.555", "1e2", "400", "22,5"] {
+            assert!(text.parse::<ReadPower>().is_err(), "{text:?} was accepted");
+        }
+        assert!("30".parse::<ReadPower>().is_ok());
+    }
+
+    #[test]
+    fn the_power_commands_carry_the_bytes_both_sources_send() {
+        // MercuryAPI's SETS16 and SparkFun's setReadPower: big-endian hundredths of a dBm.
+        let power = "22.5".parse::<ReadPower>().expect("parse");
+        let set = Command::read_power(power);
+        assert_eq!(set.opcode(), OpCode::SetReadTxPower);
+        assert_eq!(set.body(), [0x08, 0xCA]);
+
+        let ask = Command::read_power_with_limits();
+        assert_eq!(ask.opcode(), OpCode::GetReadTxPower);
+        assert_eq!(ask.body(), [0x01]);
+    }
+
+    #[test]
+    fn a_power_report_is_read_where_mercuryapi_reads_it() {
+        let answer = [0x01, 0x08, 0xCA, 0x0A, 0x8C, 0x00, 0x00];
+        assert_eq!(
+            PowerReport::from_answer(&answer),
+            Some(PowerReport {
+                centi_dbm: 2250,
+                max_centi_dbm: 2700,
+                min_centi_dbm: 0,
+            })
+        );
+        assert_eq!(PowerReport::from_answer(&answer[..6]), None, "too short");
+        assert_eq!(
+            PowerReport::from_answer(&[0x00, 0x08, 0xCA]),
+            None,
+            "option 00 carries no limits"
+        );
+    }
 
     /// The one assertion here anchored outside this file.
     ///

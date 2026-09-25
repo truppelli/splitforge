@@ -212,6 +212,25 @@ pub struct ReaderHealth {
     /// makes it survive a restart: the row that opened the gap was on disk before the power
     /// went ([ADR-0026](../../../docs/adr/0026-a-reader-gap-is-two-rows.md)).
     pub open_gap: Option<OpenGap>,
+    /// The read power the reader last reported, and the range it accepts (ADR-0038).
+    ///
+    /// What the reader said it applied, which is not necessarily what was asked for. `None`
+    /// until a reader has said, including for one that cannot.
+    pub read_power: Option<ReadPower>,
+}
+
+/// A reader's read transmit power, in hundredths of a dBm: `2700` is 27.00 dBm.
+///
+/// Integers rather than fractional dBm, because readers report and are set in hundredths, and
+/// a monitor comparing two reports should never meet a rounding difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadPower {
+    /// The power in force.
+    pub centi_dbm: i16,
+    /// The lowest the reader accepts.
+    pub min_centi_dbm: i16,
+    /// The highest the reader accepts.
+    pub max_centi_dbm: i16,
 }
 
 impl ReaderHealth {
@@ -227,6 +246,7 @@ impl ReaderHealth {
             framing_faults: 0,
             decode_faults: 0,
             open_gap: None,
+            read_power: None,
         }
     }
 }
@@ -478,6 +498,7 @@ mod tests {
             framing_faults: 0,
             decode_faults: 0,
             open_gap: None,
+            read_power: None,
         };
 
         assert_ne!(never.reader.kind, stopped.reader.kind);

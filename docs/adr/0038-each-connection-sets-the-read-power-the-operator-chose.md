@@ -1,6 +1,6 @@
 # ADR-0038: Each connection sets the read power the operator chose
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-25
 - **Extends:** [ADR-0033](0033-each-connection-starts-the-stream.md)
 
