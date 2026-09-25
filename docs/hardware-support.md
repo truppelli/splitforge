@@ -14,18 +14,21 @@ Devices being worked on that have **not** met the bar above. Nothing here is a s
 
 | Vendor | Model | Protocol | Status | Notes |
 |---|---|---|---|---|
-| JADAK / Novanta (ThingMagic) | M7e-Pico | ThingMagic serial | **experimental — under evaluation** | [notes](readers/thingmagic-m7e-pico.md) |
+| JADAK / Novanta (ThingMagic), on SparkFun's WRL-24738 board | M7E-HECTO | ThingMagic serial, over USB | **experimental — under evaluation** | [notes](readers/thingmagic-m7e-hecto.md) |
 
-The M7e-Pico is the first physical adapter
+The M7E-HECTO is the first physical adapter
 ([ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md),
-[Q9a](open-questions.md#q9a-first-serial-module)). **It can never reach the matrix above on
-its own**, and that is worth stating here rather than only in its notes file: it has no
-reader clock, so criterion 4 has nothing to measure; and it has one RF port, so criterion 5
-has no second antenna to identify. Those are structural, not pending.
+[ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md),
+[Q9a](open-questions.md#q9a-first-serial-module)). It replaced the M7e-Pico, which was never
+bought; the [Pico's notes](readers/thingmagic-m7e-pico.md) are kept as the record the adapter was
+built from. **It can never reach the matrix above on its own**, and that is worth stating here
+rather than only in its notes file: it has no reader clock, so criterion 4 has nothing to
+measure; and it has one antenna port, so criterion 5 has no second antenna to identify. Those
+are structural, not pending.
 
 [hardware-plan.md](hardware-plan.md) is the budget behind that work. Its § 2 scores this
 module against the nine criteria below without softening any of them; the decisions it asked
-for are now recorded in ADR-0024, and the ones it asked for and did **not** get are still
+for are now recorded in ADR-0024 and ADR-0035, and the ones it asked for and did **not** get are still
 listed in its § 10.
 
 ## The rule
@@ -84,19 +87,20 @@ lost.
 
 | Component | Target | Notes |
 |---|---|---|
-| Board | Raspberry Pi 3 Model B / B+ | 64-bit ARM Cortex-A53, 1 GB RAM |
+| Board | Raspberry Pi 4 Model B, 2 GB | 64-bit ARM Cortex-A72, 2 GB RAM. [ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md). The Pi 3 is no longer claimed, because nothing tests on one |
 | OS | 64-bit Raspberry Pi OS | |
-| Rust target | `aarch64-unknown-linux-gnu` | [ADR-0002](adr/0002-raspberry-pi-target.md) |
+| Rust target | `aarch64-unknown-linux-gnu` | [ADR-0002](adr/0002-raspberry-pi-target.md), unchanged by ADR-0036 |
 | Storage | High-endurance microSD, A2 or better | USB SSD preferred for multi-day use — SD wear is a real failure mode |
-| Network | **Wired Ethernet** | On the Pi 3, Ethernet is routed over USB 2.0 and shares bandwidth with USB. Adequate for reader traffic; race-day Wi-Fi is the larger risk |
-| Power | External battery/UPS | Power loss during a write is expected, not exceptional |
+| Network | **Wired Ethernet** | On the Pi 4, Gigabit Ethernet has its own controller and does not share the USB bus with the reader. Race-day Wi-Fi is the larger risk |
+| Power | External battery/UPS, 5.1 V 3 A | Power loss during a write is expected, not exceptional. The Pi 4 gives its USB ports 1.2 A in total only from a 3 A supply, and the reader draws over 700 mA at +27 dBm |
 
-1 GB RAM and USB-attached Ethernet are the constraints that keep the first deployment
-modest: one reader, one checkpoint, one database.
+The first deployment stays modest by decision rather than by constraint: one reader, one
+checkpoint, one database. 2 GB is more room than the Pi 3's 1 GB, not unlimited room, so large
+events still stream rather than load.
 
 ## Timekeeping hardware
 
-The Pi 3 has **no battery-backed real-time clock**, and offline-first operation means no
+The Pi 4 has **no battery-backed real-time clock**, and offline-first operation means no
 NTP. See [clock and time discipline](clock-and-time-discipline.md) for the full analysis.
 
 | Component | Recommendation | Why |

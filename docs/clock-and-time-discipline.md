@@ -12,7 +12,7 @@ SplitForge has two requirements that pull against each other:
 
 Normally the second is solved by NTP. But NTP needs a network, and the first requirement
 removes it. So at a trailhead with no signal, **nothing in the default configuration knows
-what time it is.** Worse, the Raspberry Pi 3 has *no battery-backed real-time clock* — on
+what time it is.** Worse, the Raspberry Pi 4 has *no battery-backed real-time clock* — on
 boot it believes it is whenever it last shut down, and stays wrong until something
 corrects it.
 
@@ -104,7 +104,7 @@ that drives the hardware recommendation.
 
 | Option | Absolute accuracy | Holdover | Cost | Notes |
 |---|---|---|---|---|
-| **Nothing (default Pi 3)** | Unbounded | None | £0 | Boots to last-shutdown time. **Not acceptable for timing** |
+| **Nothing (default Pi 4)** | Unbounded | None | £0 | Boots to last-shutdown time. **Not acceptable for timing** |
 | **DS3231 RTC module** (I²C) | Set once, ±2 ppm after | Years on coin cell | ~£5 | Survives power-off. Needs initial sync from a good source |
 | **GPS receiver + PPS** | < 1 µs | While it has sky view | ~£20–40 | Stratum-1 without Internet. Best fit for outdoor events |
 | **LTE/Wi-Fi hotspot → NTP** | ~10–50 ms | None | varies | Violates offline-first if *required*; fine as opportunistic |

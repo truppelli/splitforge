@@ -1,6 +1,6 @@
 # ADR-0002: Raspberry Pi 3 on 64-bit Linux as the first edge target
 
-- **Status:** Accepted
+- **Status:** Accepted; its choice of board superseded by [ADR-0036](0036-raspberry-pi-4-is-the-edge-target.md)
 - **Date:** 2026-08-14
 
 ## Context

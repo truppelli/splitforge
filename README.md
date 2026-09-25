@@ -91,13 +91,13 @@ Four rules constrain every design decision in this repository:
 
 | Component | First target |
 |---|---|
-| Compute | Raspberry Pi 3 Model B/B+, 64-bit Raspberry Pi OS |
+| Compute | Raspberry Pi 4 Model B (2 GB), 64-bit Raspberry Pi OS — [ADR-0036](docs/adr/0036-raspberry-pi-4-is-the-edge-target.md) |
 | Build target | `aarch64-unknown-linux-gnu` |
 | Storage | High-endurance microSD (A2 or better); USB SSD recommended for multi-day use |
-| Network | **Wired Ethernet preferred.** On the Pi 3, Ethernet is routed over USB 2.0 — adequate for reader traffic, but race-day Wi-Fi is the bigger risk |
+| Network | **Wired Ethernet preferred.** Race-day Wi-Fi is the bigger risk |
 | Power | External battery/UPS with clean shutdown. Power loss during a write is an expected event, not an edge case |
-| Clock | **DS3231 RTC strongly recommended; GPS + PPS recommended.** The Pi 3 has no battery-backed clock, and offline-first means no NTP — see [clock and time discipline](docs/clock-and-time-discipline.md) |
-| Reader | One LLRP-capable networked RFID reader — **model TBD, none validated yet** |
+| Clock | **DS3231 RTC strongly recommended; GPS + PPS recommended.** The Pi 4 has no battery-backed clock, and offline-first means no NTP — see [clock and time discipline](docs/clock-and-time-discipline.md) |
+| Reader | **None validated yet.** The first physical adapter is a serial module, the [ThingMagic M7E-HECTO](docs/readers/thingmagic-m7e-hecto.md) on SparkFun's USB board, *experimental — under evaluation*. The first networked LLRP reader is still to be chosen |
 
 ## Documentation
 

@@ -264,8 +264,12 @@ Kept for the record, and so that links from ADRs and older documents still resol
 
 ### Q9a: First serial module
 
-**Resolved — [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md): the ThingMagic
-M7e-Pico, as the first *physical* adapter while LLRP stays the first *networked* protocol.**
+**Resolved — [ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md): the ThingMagic
+M7E-HECTO, on SparkFun's USB board, as the first *physical* adapter while LLRP stays the first
+*networked* protocol.** First resolved by [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md)
+as the M7e-Pico, which no longer fit the budget once a computer had to be bought as well. The
+reasoning below was written for the Pico and holds for the Hecto; where they differ, ADR-0035
+says how.
 
 **Raised in:** [hardware-plan.md](hardware-plan.md). Formerly the first half of
 [Q9](#q9-first-reader-model).
@@ -279,7 +283,7 @@ materials around a scavenged component.
 cannot close two of the nine support criteria — there is no reader clock to measure offset
 and skew against, and there is one RF port, so no per-antenna identity. Neither is "not yet";
 both are structural. So the module enters
-[`docs/readers/thingmagic-m7e-pico.md`](readers/thingmagic-m7e-pico.md) as *experimental —
+[`docs/readers/thingmagic-m7e-hecto.md`](readers/thingmagic-m7e-hecto.md) as *experimental —
 under evaluation*, the support matrix stays empty, and
 [Q3](#q3-reader-clock-trust-defaults) stays open because this module cannot supply the
 measurements it asks for.
@@ -289,10 +293,11 @@ SD card honors `fsync`, what the second sync costs on real flash, what a day's j
 weighs, what a write in flight does when power goes — none of which ever needed LLRP, only a
 real stream of real reads.
 
-**Nothing has been ordered.** The decision is made; the purchase is not, and
-[hardware-plan.md § 3](hardware-plan.md#3-phase-0--bench-validation-500-now) lists four
-questions to answer before it, each of which can turn a $345 order into a box that cannot be
-used on arrival.
+**Nothing has been ordered.** The decision is made; the purchase is not. The order is in
+[`Materials-and-Cost-Table.xlsx`](Materials-and-Cost-Table.xlsx). One step it does not show:
+SparkFun's board ships wired to its PCB trace antenna, and a 0 Ω resistor has to be moved before
+the panel antenna in the order is connected to anything
+([ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md#what-the-board-changes)).
 
 ### Q5: Local API authentication model
 

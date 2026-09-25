@@ -2,16 +2,19 @@
 
 > Status: **partly adopted.** Decisions 1, 2, and 3 of
 > [§ 10](#10-what-this-asks-someone-to-decide) are now recorded in
-> [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md): M3 has split into M3a/M3b, the
-> M7e-Pico is the first physical adapter, and `serialport` may join the read path.
-> **Decisions 4, 5, and 6 are still open and bind nothing.** Everything below about the
-> shipped compute platform, the radio subassembly, and Phase 2 remains a proposal.
+> [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md): M3 has split into M3a/M3b, a
+> serial module is the first physical adapter, and `serialport` may join the read path. The
+> module is now the M7E-HECTO on SparkFun's USB board
+> ([ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md)), which replaced the M7e-Pico, and
+> the computer is a Raspberry Pi 4 ([ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md)).
+> **Decision 4 is half decided, and 5 and 6 are still open and bind nothing.** Everything below
+> about the shipped compute platform, the radio subassembly, and Phase 2 remains a proposal.
 >
-> **No hardware has been ordered.** The four questions in
-> [§ 3](#four-questions-to-answer-before-ordering--asked) have now been answered from
-> documentation rather than from a device — and one of them found that the $345 board has no
-> USB port at all, so it cannot be plugged into a Pi without a bridge that was not in the
-> bill of materials.
+> **No hardware has been ordered.** The pre-order questions in
+> [§ 3](#four-questions-to-answer-before-ordering--asked-twice) have been answered twice from
+> documentation rather than from a device. The first time, they found that the Pico's $345
+> carrier board had no USB port at all. That, and a computer the budget had not expected to
+> buy, is why the order changed.
 > Companion to [hardware-support.md](hardware-support.md) and [roadmap.md](roadmap.md).
 > The parts themselves are in [`Materials-and-Cost-Table.xlsx`](Materials-and-Cost-Table.xlsx),
 > which is the submission template rather than a file this repository designed.
@@ -45,22 +48,25 @@ priced by whatever a liquidator lists this month, and impossible to build a repe
 of materials around. **You cannot certify, manufacture, or support a product whose central
 component is scavenged.**
 
-The ThingMagic M7e-Pico is the opposite trade. It is a current part with an FCC modular
-grant, a US distributor, and a documented serial protocol — what a manufactured product
-needs. What it gives up is precisely the set of things Milestone 3 exists to test.
+A ThingMagic M7E-family module is the opposite trade. It is a current part with an FCC
+modular grant, a US distributor, and a documented serial protocol — what a manufactured
+product needs. What it gives up is precisely the set of things Milestone 3 exists to test.
+This section was written for the M7e-Pico. The scoring holds for the M7E-HECTO that replaced
+it ([ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md)), and the table below is scored
+for the Hecto.
 
 ### Milestone 3's checklist, scored against both
 
 The nine rows are copied from [hardware-support.md](hardware-support.md#what-supported-requires).
 Nothing has been softened.
 
-| Criterion | M7e-Pico | Fixed LLRP reader |
+| Criterion | M7E-HECTO | Fixed LLRP reader |
 |---|---|---|
 | Connects, and reconnects after reboot, cable pull, network interruption | **Partial** — USB re-enumeration, not a network path | Closes |
 | Delivers reads under sustained load without dropping the connection | Closes | Closes |
 | Timestamp type identified and handled correctly | **Recast** — no UTC clock exists; relative-ms maps to `Uptime` with a session anchor | Closes |
 | Clock offset and skew measured over a multi-hour session | **Cannot** — there is no reader clock to measure against | Closes |
-| Antenna identity reported and correctly mapped | **Cannot** — one RF port until a second module is fitted | Closes |
+| Antenna identity reported and correctly mapped | **Cannot** — one antenna port until a second module is fitted | Closes |
 | RSSI reported, or its absence documented | Closes | Closes |
 | Malformed/truncated frames handled without process exit | Closes | Closes |
 | Read counts reconciled against the journal | Closes | Closes |
@@ -69,13 +75,12 @@ Nothing has been softened.
 Six close, one is recast into something narrower and honest, and two cannot be closed at
 all on one single-port module with no clock.
 
-> **The antenna-identity row is now in question.** Answering
-> [§ 3's question 1](#four-questions-to-answer-before-ordering--asked) turned up documentation
-> that the *carrier board* carries four switched U.FL ports, which — if it holds — makes
-> per-antenna identity reachable on one module and that row not a "cannot" at all. The table
-> is left as scored until it is confirmed against something better than a distributor's forum;
-> see [the reader notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above).
-> **The clock row is unaffected** — there is still no reader clock.
+> **The antenna-identity row was briefly in question, and is not any more.** The Pico's
+> carrier board appeared to carry four switched U.FL ports, which would have made per-antenna
+> identity reachable on one module
+> ([the Pico's notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above)).
+> SparkFun's Hecto board has one RF path, and the Hecto guide says the module accepts no
+> antenna but 1, so the row is a "cannot" again.
 
 ### The roadmap consequence
 
@@ -95,7 +100,7 @@ organizer can stake an event on.
 
 ### Two RF paths, not a splitter
 
-A finish line wants two antennas. The Pico has one port. The answer is **two modules**, each
+A finish line wants two antennas. The module has one port. The answer is **two modules**, each
 presenting as its own `ReaderProvider` with its own reader and antenna identity — not one
 module behind a splitter.
 
@@ -104,8 +109,9 @@ identity that [timing-model.md](timing-model.md) depends on and that
 `splitforge reader map --antenna` already exposes to the operator. Two modules preserve it,
 and cost one module.
 
-**A switched carrier board is a third option, and it is not a splitter.** If the four U.FL
-ports and their RF switch are real, one module can address two antennas *sequentially* with
+**A switched carrier board is a third option, and it is not a splitter.** SparkFun's Hecto
+board is not one, but the Pico's appeared to be, and a product carrier could be. With switched
+ports, one module can address two antennas *sequentially* with
 full power into each and a logical antenna number on every read — which keeps the identity a
 splitter destroys. What it does not keep is simultaneity: one antenna is live at a time, so a
 runner crossing while the switch is on the other port is a read that never happens. For a
@@ -117,98 +123,101 @@ between the two — not an argument to be settled on paper.
 Buys the answer to one question: **does a serial UHF module, driven by SplitForge's own
 adapter, put real reads in the journal and keep them there?**
 
-Already on hand: a Raspberry Pi 3 Model B/B+, a weather-resistant box, power cables, and
-Ethernet cables. The spreadsheet lists the ones a reviewer needs to see as in-kind rows so
-the whole system is visible, and costs them at zero.
-
-As submitted, with real vendors and quoted prices:
+The order is [`Materials-and-Cost-Table.xlsx`](Materials-and-Cost-Table.xlsx), which is
+authoritative over this table. As of commit `73a75cd`:
 
 | Line | Vendor | |
 |---|---|---|
-| ThingMagic M7E-PICO-CB | DigiKey | $345.00 |
-| UHF antenna, 6 dBi CP IP65 | L-com | $68.99 |
-| Coax jumper | Walcott Radio | $15.49 |
+| SparkFun Simultaneous RFID Reader, M7E Hecto (WRL-24738) | SparkFun | $309.95 |
+| UHF antenna, 902–928 MHz, circular, 6 dBi, IP65 (L-com LCANFP1031) | L-com | $68.99 |
+| U.FL to SMA-male pigtail, RG178, 15 cm | Amazon | $9.99 |
 | DS3231 RTC | Adafruit 3013 | $17.50 |
-| Powered USB 2.0 hub | Adafruit 961 | $32.50 |
-| Antenna stand and lane materials | Home Depot | $5.00 |
-| **Subtotal** | | **$484.48** |
-| Shipping allowance | | $15.52 |
+| CR1220 coin cell for the RTC | Adafruit 380 | $0.95 |
+| Raspberry Pi 4 Model B, 2 GB | PiShop | $55.00 |
+| Antenna stand and lane materials | Home Depot | $15.00 |
+| Raspberry Pi 4 heatsink set | PiShop | $2.95 |
+| **Subtotal** | | **$480.33** |
+| Shipping allowance | | $19.67 |
 | **Total against the cap** | | **$500.00** |
 
-Three further lines are carried **in kind** and cost the budget nothing: the Raspberry Pi 3
-and the microSD are already owned, and the EPC Gen2 tags are borrowed.
+Carried **in kind**, at no cost to the budget: the Pi's 5.1 V 3 A USB-C supply, a 64 GB
+high-endurance microSD, a USB-C to USB-A data cable, M2.5 mounting hardware for both boards,
+the 3D-printed enclosure, a 5 V fan, four jumper wires for the RTC, and 100 borrowed EPC Gen2
+inlays.
 
-Two cautions the spreadsheet cannot express, both of which belong in the submission's notes
-rather than being discovered later:
+**This is not the order this section first described**, and each change has a reason:
 
-- **The shipping figure is a plug, not an estimate.** It is computed as `500 − subtotal`, so
-  the total lands on exactly $500 by construction. The order spans four separate shippers —
-  DigiKey, L-com, Walcott, and Adafruit — and four shipments are realistically $25–45, not
-  $15.52. The subtotal needs roughly $20 of headroom, or one line has to move in kind.
+- **The radio is SparkFun's M7E Hecto board, not the M7E-PICO-CB.** The Pico's carrier board
+  turned out to have no USB, and with a computer to buy as well it no longer fit
+  ([ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md)).
+- **A Pi 4 is bought, where a Pi 3 was carried in kind.** The Pi 3 was not on hand after all
+  ([ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md)).
+- **The powered USB hub is gone.** A Pi 4 with its 3 A supply gives its USB ports 1.2 A, which
+  covers the reader's 700 mA or more at +27 dBm.
+- **The RG8X coax is now a U.FL pigtail.** RG8X terminates in PL-259, which matched neither the
+  board nor the antenna.
+- **The CR1220 is its own line**, because the DS3231 breakout does not include one.
+
+Cautions the spreadsheet cannot express, which belong in the submission's notes rather than
+being discovered later:
+
+- **The shipping figure is a plug, not an estimate.** It is `500 − subtotal`, so the total lands
+  on exactly $500 by construction. The order spans five shippers — SparkFun, L-com, Amazon,
+  Adafruit and PiShop — and five shipments will cost more than $19.67. The subtotal needs
+  headroom, or a line has to move in kind.
+- **Two prices are not firm.** The pigtail's is an estimate, and the CR1220 was out of stock at
+  Adafruit when checked. Any CR1220 works.
 - **Borrowed tags are a validation risk, not just a cost saving.** The read-zone
   characterization in step 7 depends on knowing the tags' band and inlay class, and on being
   able to mount them on real bib material. Confirm the borrowed stock is 902–928 MHz EPC Gen2
   before relying on it, and keep a small quantity of owned tags if the loan is short-term.
-- **The coax line contradicts its own note.** RG8X from a CB-radio supplier terminates in
-  PL-259/UHF connectors, which are neither constant-impedance nor appropriate at 915 MHz, and
-  which match neither the antenna's SMA-female nor whatever the carrier board turns out to
-  carry. The note on that row already says the connector is unconfirmed, which is the argument
-  for keeping it as an unspent reserve rather than a specific cable. Order an SMA jumper in
-  LMR-195 or RG316 once question 1 below is answered.
+- **Two bench steps come before the first read, and neither is a part.** The board's **UART**
+  switch must be set to **USB**. The board ships wired to its PCB trace antenna, and the 0 Ω
+  resistor labeled **RF** has to be moved to the U.FL position with a soldering iron or hot air
+  before the panel antenna is connected to anything
+  ([the reader notes](readers/thingmagic-m7e-hecto.md#the-board)).
+- **The pigtail must be SMA male, standard polarity**, to meet the antenna's SMA female. An
+  RP-SMA pigtail looks the same and does not mate.
 
-**If the carrier board lands above $345, the antenna is the line to trim.** A cheaper 8 dBi
-panel works for a deliberately narrow lane at reduced power, and RSSI is being measured
-empirically regardless. The RTC and the tags are not trimmable: the RTC removes a whole class
-of silent wrongness for the price of a coin cell, and without tags the reader has nothing to
-read.
+**If the order lands above the cap, the antenna is the line to trim.** A cheaper panel works for
+a deliberately narrow lane, and RSSI is being measured empirically regardless. A replacement
+must be of a type and gain the Hecto's grant already covers
+([ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md#what-the-board-changes)). The RTC and
+the tags are not trimmable: the RTC removes a whole class of silent wrongness for the price of
+a coin cell, and without tags the reader has nothing to read.
 
-### Four questions to answer before ordering — **asked**
+### Four questions to answer before ordering — **asked**, twice
 
-Each could turn a $345 order into a box that cannot be used on arrival. All four have now been
-put to the documentation; the answers, their sources, and how far each can be trusted are in
-[the reader notes](readers/thingmagic-m7e-pico.md#the-four-pre-order-questions--answered-from-documentation).
-Two of them move money, and one moves it in a direction this plan did not anticipate.
+Each could turn an order into a box that cannot be used on arrival.
 
-1. **RF connector: U.FL (I-PEX compatible)**, four of them, with switching on the board.
-   The coax reserve becomes a U.FL-to-antenna pigtail in LMR-195 or RG316 — **the RG8X/PL-259
-   line was wrong**, as the caution above already suspected in writing.
-2. **No power supply with the bare carrier board.** The DEVKIT bundles one at $741.40; the
-   `M7E-PICO-CB` at $345.00 does not. The module wants 3.3–5.5 VDC and under 2.5 W at +24 dBm,
-   which the powered USB hub already in the BOM can supply — so this costs a cable, not $12.
-3. **There is no USB connector, because there is no USB.** The module's only control interface
-   is `UART; 3.3V logic levels`, and the carrier board brings it out on a 15-pin Molex
-   532611571. **This is the bare-header case**, and it is the one line that was called out as
-   "a second part nobody budgeted" — correctly. Add a USB-UART bridge and a Molex 1.25 mm
-   cable, ~$15 together.
-4. **Single SKU for global use**, pre-configured for FCC (NA, SA) 902–928 MHz among seven other
-   regions. So the region is *selectable*, not factory-locked — and the adapter must set it
-   explicitly at startup rather than assume it. **Still open:** whether the selection survives
-   a power cycle.
+**Asked first of the M7e-Pico**, whose answers are in
+[its notes](readers/thingmagic-m7e-pico.md#the-four-pre-order-questions--answered-from-documentation).
+The third found that its carrier board had no USB at all, which is half of why the order
+changed.
 
-**Net effect on the $500 cap: roughly neutral, and the shipping plug still is not.** Question 2
-saves the $12 that was pencilled in; question 3 spends about $15. The coax line stays the same
-size and changes what it buys. None of that touches the real problem the caution above already
-names — four shippers at $25–45 against a $15.52 plug.
+**Asked again of SparkFun's Hecto board**, from documentation rather than a device. The answers,
+their sources, and how far each can be trusted are in
+[the Hecto's notes](readers/thingmagic-m7e-hecto.md#answered-from-documentation-before-ordering):
 
-**One answer reaches past the budget.** If the carrier board really does carry four switched
-U.FL ports, then row 5 of the support checklist — per-antenna identity — is not the structural
-impossibility [§ 2](#milestone-3s-checklist-scored-against-both) scores it as, and this phase
-could close seven of nine rather than six. That is deliberately not rewritten anywhere yet: the
-source is a distributor's forum rather than a datasheet, and only one antenna is live at a time,
-so two checkpoints on one module time-share the radio. See
-[the reader notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above).
+1. **RF connector: U.FL**, plus a PCB trace antenna that is connected by default. Using the
+   U.FL means moving a resistor.
+2. **Power: USB bus power.** 3.3–5 V, a 1 A limit, and over 700 mA at +27 dBm.
+3. **USB: yes**, through a CH340C, with a switch to select it.
+4. **Region: selectable**, and set by the adapter on every connection. **Still open:** whether a
+   region survives a power cycle.
 
-**Before ordering, archive the user guide.** `jadaktech.com`'s documentation links now redirect
-to `novanta.com` and the PDFs 404. The frame codec in `crates/splitforge-thingmagic/` rests on
-that document, and it is no longer where it was found.
+**The user guide is archived**, as this section asked before the first order. The Hecto's guide,
+Rev 1.4, is on SparkFun's CDN and hashed in
+[vendor-documents.md](readers/vendor-documents.md#m7e-hecto-user-guide). The vendor lists a later
+Rev 1.8 that returned nothing when fetched.
 
 ## 4. Phase 1 — field unit, and finding the real BOM ($2,000)
 
 Contingent on Phase 0. Two jobs: build something that survives an actual race day, and
 discover what the product costs to build — which is not what Phase 0 cost.
 
-> **$345 is a developer price, not a BOM price.** The carrier board is a one-off sold in
-> ones. The bare module in production quantities is a fraction of it, and quoting the
+> **$309.95 is a retail price, not a BOM price.** SparkFun's board is a development board
+> sold in ones. The bare module in production quantities is a fraction of it, and quoting the
 > dev-board price as cost of goods makes the product look unviable when it is not.
 > Requesting a qty-100 and qty-500 quote costs an email and has no hardware dependency —
 > do it the week Phase 0 arrives.
@@ -235,22 +244,23 @@ milestones.
 Three decisions that determine whether Phase 1's field unit can become a manufactured one.
 All three are cheaper now than as a retrofit.
 
-### Compute: Compute Module for the product, Pi 3 stays the support floor
+### Compute: Compute Module for the product, the Pi 4 until then
 
-The Pi 3 Model B+ is a development board: no availability commitment suited to a product, no
-eMMC, no RTC, and Ethernet sharing a USB 2.0 bus. The Compute Module 4 or 5 is the part
-Raspberry Pi sells for embedding — guaranteed availability into the 2030s, onboard eMMC, and
-a carrier board designed once.
+The Pi 4 Model B is a development board: no availability commitment suited to a product, no
+eMMC, and no RTC. The Compute Module 4 or 5 is the part Raspberry Pi sells for embedding —
+guaranteed availability into the 2030s, onboard eMMC, and a carrier board designed once.
 
-**This does not overturn [ADR-0002](adr/0002-raspberry-pi-target.md), and the record should
-say so.** ADR-0002's argument is that the Pi 3 is the *constrained* case — "if it works
-there, it works everywhere." That stays true and stays valuable: it keeps the software honest
-about memory and I/O, and keeps the barrier to entry at whatever Pi a volunteer already owns.
+**This section first proposed keeping the Pi 3 as the minimum supported platform**, on
+[ADR-0002](adr/0002-raspberry-pi-target.md)'s argument that it is the constrained case. That
+did not survive the Pi 3 not being on hand.
+[ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md) makes the Pi 4 the target and claims
+no floor below it, because a platform nobody tests on is a claim nothing checks. The half of
+the argument worth keeping, that the software stays honest about memory and I/O, is now kept
+by streaming rather than by a small board.
 
-- Pi 3 remains the **minimum supported platform**.
-- CM4/CM5 becomes the **shipped platform**.
-
-One line in ADR-0002's consequences, and a new ADR for the product target.
+- The Pi 4 is the **target**, and the only board tested.
+- Whether CM4/CM5 becomes the **shipped platform** is still open, as
+  [§ 10](#10-what-this-asks-someone-to-decide) decision 4.
 
 ### Radio: the module is a replaceable subassembly
 
@@ -308,6 +318,14 @@ the same argument [ADR-0004](adr/0004-llrp-first-reader-adapter.md) makes for wr
 parser against captures.
 
 ### Step 0 — write the decisions down first *(no hardware)* — **done**
+
+Done for the M7e-Pico, and done again when it changed:
+[ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md) replaced it with the M7E-HECTO and
+[ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md) made the Pi 4 the target. The Hecto's
+notes are [`docs/readers/thingmagic-m7e-hecto.md`](readers/thingmagic-m7e-hecto.md). The list
+below is the first round, as it was done. Its § numbers are the Pico guide's; the Hecto guide
+puts § 8.8.x at § 8.9.x
+([finding 23](readers/vendor-documents.md#23-the-protocol-sections-are-the-pico-guides-one-section-later-in--8)).
 
 - [x] [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) — records that ADR-0004
       **stands** while the M7e-Pico becomes the first physical adapter, and names what it
@@ -426,7 +444,7 @@ ordering above was written** ([vendor-documents.md](readers/vendor-documents.md#
   bounds and counts the loss that streaming cannot, at a throughput cost nobody has measured.
   Which of the two the adapter uses is a decision this plan does not yet make.
 
-### Step 5 — systemd and the device node — **done, but for the bridge's IDs**
+### Step 5 — systemd and the device node — **done, but for the bridge's IDs in the rule**
 
 **Done by [ADR-0034](adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)**, and
 observed under systemd 252 rather than on a Pi. Three things below turned out to be missing:
@@ -441,7 +459,11 @@ observed under systemd 252 rather than on a Pi. Three things below turned out to
   [deployment.md](deployment.md#connecting-the-reader) maps each message to its fix.
 
 The rule below shipped as `deploy/99-splitforge-reader.rules` matching any USB serial adapter,
-because the bridge has not been chosen. The `XXXX`s are still to fill in once it is.
+because the bridge had not been chosen. It has now: SparkFun's Hecto board carries a CH340C,
+which the kernel's `ch341` driver lists as `1a86:7523`, so the `XXXX`s below are known and the
+shipped rule can be narrowed to them. CH340-family bridges are not expected to carry a serial
+number, so the rule cannot tell two identical boards apart
+([the reader notes](readers/thingmagic-m7e-hecto.md#deployment-notes)).
 
 > **`PrivateDevices=yes` in [`deploy/splitforge-edge.service`](../deploy/splitforge-edge.service)
 > gives the service a private `/dev` containing only pseudo-devices. `/dev/ttyUSB0` is not in
@@ -598,13 +620,14 @@ it is what makes the $2,000 ask legible rather than speculative.
 
 | Risk | Absorbed by |
 |---|---|
-| Carrier board arrives without a power supply, or with an unexpected RF connector | The four pre-order questions in § 3, plus the $25 connector reserve held back rather than pre-spent |
-| Serial protocol documentation is gated behind vendor registration | The Mercury API SDK is publicly downloadable, and SparkFun's M6E-Nano library documents the same protocol family's opcode set. The parser is written against captures either way |
-| Read range insufficient for a real lane at 24 dBm or below | Phase 0 is scoped as a narrow supervised lane. Range is a measured output of step 7, not an assumption. If short, that is a Phase 1 choice between a higher-power module and a higher-gain approved antenna |
+| The board arrives needing parts or work nobody planned | The pre-order questions in § 3, asked of both boards. The one piece of work they found, moving the RF resistor to the U.FL, is a bench step listed there |
+| The module overheats in a closed enclosure and turns its RF off | Heatsinks and a fan in the order. The module reports overheating as `0x504`, which the adapter currently counts as a decode fault rather than naming ([ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md#what-the-board-changes)). Lowering power or duty cycle is the fallback |
+| Serial protocol documentation is gated behind vendor registration | It was, and worse: the vendor's own links now 404. The MercuryAPI sources and SparkFun's library, which names the Hecto, are archived with hashes in [vendor-documents.md](readers/vendor-documents.md). The parser is anchored on a capture either way |
+| Read range insufficient for a real lane at +27 dBm or below | Phase 0 is scoped as a narrow supervised lane. Range is a measured output of step 7, not an assumption. If short, that is a Phase 1 choice between a higher-power module and a higher-gain approved antenna |
 | Volume module pricing comes back too high to be viable | Discovered in Phase 1 for the price of an email, before any PCB or certification spend. This is why the quote request is a Phase 1 deliverable rather than a Phase 2 one |
 | Part 15B testing fails and forces a respin | A ~$1k pre-scan before the full test, budgeted in § 6 for exactly this reason |
 | No LLRP reader is ever sourced | Q9b stays open and M3b stays gated — precisely as M3 is today. Nothing regresses, and the product path does not depend on it |
-| $500 does not cover core plus tax | Stated trim order: the antenna first, then the coax reserve. Never the RTC, never the tags |
+| $500 does not cover core plus tax, or shipping | Stated trim order: the antenna first. Never the RTC, never the tags |
 
 ## 10. What this asks someone to decide
 
@@ -614,9 +637,9 @@ Each is a decision, not a guess, and belongs in
 | # | Decision | Needs | Status |
 |---|---|---|---|
 | 1 | Does M3 split into M3a / M3b as § 2 proposes? | Roadmap amendment | **Decided** — [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md); [roadmap](roadmap.md#milestone-3--one-physical-reader) amended |
-| 2 | Is the M7e-Pico the first physical adapter, with ADR-0004 standing? | New ADR | **Decided** — ADR-0024; ADR-0004 stands unamended, [Q9a](open-questions.md#q9a-first-serial-module) closed, [Q9b](open-questions.md#q9b-first-llrp-reader-model) still gates M3b |
+| 2 | Is the M7e-Pico the first physical adapter, with ADR-0004 standing? | New ADR | **Decided, then changed** — ADR-0024 chose the Pico; [ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md) replaced it with the M7E Hecto on SparkFun's USB board. ADR-0004 stands unamended, [Q9a](open-questions.md#q9a-first-serial-module) closed, [Q9b](open-questions.md#q9b-first-llrp-reader-model) still gates M3b |
 | 3 | Does `serialport` join the read path? | Covered by the same ADR, per `deny.toml` `[bans]` | **Decided** — ADR-0024, with `default-features = false` mandatory for the Pi cross-build |
-| 4 | Does CM4/CM5 become the shipped platform with Pi 3 as the support floor? | New ADR, plus one line in ADR-0002 | **Open** |
+| 4 | Does CM4/CM5 become the shipped platform with Pi 3 as the support floor? | New ADR, plus one line in ADR-0002 | **Half decided** — [ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md) makes the Pi 4 the target and drops the Pi 3 as a floor. Whether a Compute Module ships is still open |
 | 5 | Is the product's radio a replaceable subassembly, or soldered down? | New ADR — it constrains the carrier design | **Open** |
 | 6 | Is [Q10](open-questions.md#q10-gps-pps-time-reference) answered as "required for published results"? | Q10 has been open since M0, and Phase 1 is when it becomes answerable | **Open** |
 
@@ -626,11 +649,11 @@ and ADR-0024 is expensive enough to reverse already. Nothing in M3a depends on e
 
 ## 11. What this plan does not claim
 
-- **That the M7e-Pico is a supported reader.** It is not, and it will not be until step 7 is
+- **That the M7E-HECTO is a supported reader.** It is not, and it will not be until step 7 is
   finished and written up. Until then it is *experimental — under evaluation*, with the two
   criteria it cannot close named in the notes file.
 - **That Phase 0 hardware can time a real event.** It is a narrow, supervised, single-lane
   validation platform with manual backup. A wide finish chute, pack finishes, and unsupervised
-  operation are all outside what one antenna at 24 dBm should be asked to do.
+  operation are all outside what one antenna at +27 dBm should be asked to do.
 - **That the Phase 2 numbers are quotes.** They are ranges. Phase 1 exists to replace them.
 - **That any of this closes M3b.** It does not. M3b needs an LLRP reader, and M5 needs M3b.

@@ -1,6 +1,6 @@
 # ADR-0024: A serial module is the first physical adapter; LLRP stays the first networked one
 
-- **Status:** Accepted
+- **Status:** Accepted; its choice of module superseded by [ADR-0035](0035-the-first-module-is-the-m7e-hecto.md)
 - **Date:** 2026-08-26
 
 ## Context

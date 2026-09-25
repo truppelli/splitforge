@@ -93,7 +93,7 @@ So the rule is implemented as stated, with two guardrails:
 
 ### Device clock health
 
-The Pi's own clock is also suspect: a Pi 3 has **no battery-backed RTC**, so it boots
+The Pi's own clock is also suspect: a Raspberry Pi before the Pi 5 has **no battery-backed RTC**, so it boots
 believing it is whenever it last shut down. Every raw read records the device's clock
 state at the time of the read. A read taken before synchronization is flagged, not
 discarded.
