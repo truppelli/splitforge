@@ -39,7 +39,7 @@ docker run --rm -v "$PWD:/repo" -v splitforge-target:/build splitforge-ci cross
 Or natively, on a Debian or Ubuntu machine with `gcc-aarch64-linux-gnu` installed:
 
 ```bash
-cargo build --release --target aarch64-unknown-linux-gnu --workspace
+cargo build --locked --release --target aarch64-unknown-linux-gnu --workspace
 ```
 
 Building on the Pi itself works and is slow. It is a reasonable fallback when the

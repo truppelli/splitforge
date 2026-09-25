@@ -14,6 +14,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
+# Every gate that resolves dependencies runs `--locked`: against the committed Cargo.lock,
+# failing rather than updating it. The lockfile is what ships to the Pi, so it is what every
+# gate has to be about. Without it, a gate could pass on versions nobody will run.
+
 jobs:
   fmt:
     name: Format
@@ -43,7 +47,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
@@ -52,7 +56,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - run: cargo test --locked --workspace --all-features
 
   msrv:
     name: MSRV (1.88)
@@ -66,7 +70,7 @@ jobs:
       #
       # `--all-targets` so tests are covered too: a dev-dependency that quietly raises
       # the MSRV is exactly the kind of thing that goes unnoticed until it matters.
-      - run: cargo check --workspace --all-features --all-targets
+      - run: cargo check --locked --workspace --all-features --all-targets
 
   audit:
     name: Security advisories
@@ -75,8 +79,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-audit
-      # cargo-audit reads Cargo.lock; generate it if it is not committed yet.
-      - run: cargo generate-lockfile
+      # Audits the committed Cargo.lock, the one that ships. This job used to run
+      # `cargo generate-lockfile` first, from before the lockfile was committed. That
+      # re-resolved every dependency to its newest compatible version, 57 of them on
+      # 2026-09-25, so a vulnerable version pinned in the lockfile passed whenever a fixed
+      # one existed: the case this gate is for.
       - run: cargo audit --deny warnings
 
   deny:
@@ -109,7 +116,7 @@ jobs:
       # The whole workspace, not just the edge service: the edge service is still empty,
       # and a cross-build that compiles nothing proves nothing.
       - name: Build for the Pi
-        run: cargo build --release --target aarch64-unknown-linux-gnu --workspace
+        run: cargo build --locked --release --target aarch64-unknown-linux-gnu --workspace
       # This proves the code COMPILES for the Pi. It proves nothing about reader
       # behavior, storage performance, or power-loss recovery — those are validated
       # on hardware or not at all. See docs/hardware-support.md.
