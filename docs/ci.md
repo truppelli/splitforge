@@ -8,14 +8,20 @@ pull request and every push to `main`.
 | Job | Command | Why it exists |
 |---|---|---|
 | **Format** | `cargo fmt --all --check` | Removes style from code review entirely |
-| **Clippy** | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Warnings are errors. A warning nobody fixes is a warning nobody reads |
-| **Test** | `cargo test --workspace --all-features` | — |
-| **MSRV** | `cargo check --all-targets` on Rust 1.88.0 | Establishes what the floor actually is, rather than what the manifest claims. `--all-targets` so a dev-dependency cannot raise it unnoticed. The floor is a tested fact, not a promise — [ADR-0013](adr/0013-msrv-policy.md) |
-| **Security advisories** | `cargo audit --deny warnings` | Known vulnerabilities in the dependency tree |
+| **Clippy** | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | Warnings are errors. A warning nobody fixes is a warning nobody reads |
+| **Test** | `cargo test --locked --workspace --all-features` | — |
+| **MSRV** | `cargo check --locked --all-targets` on Rust 1.88.0 | Establishes what the floor actually is, rather than what the manifest claims. `--all-targets` so a dev-dependency cannot raise it unnoticed. The floor is a tested fact, not a promise — [ADR-0013](adr/0013-msrv-policy.md) |
+| **Security advisories** | `cargo audit --deny warnings` | Known vulnerabilities in the committed `Cargo.lock`, which is the dependency tree that ships |
 | **Licenses and bans** | `cargo deny check` | License compatibility ([ADR-0007](adr/0007-license-selection.md)), duplicate versions, unknown registries |
-| **Cross-build** | `cargo build --release --target aarch64-unknown-linux-gnu --workspace` | Proves the Pi target still builds, including the bundled SQLite C sources ([ADR-0009](adr/0009-rusqlite-for-sqlite-access.md)) |
+| **Cross-build** | `cargo build --locked --release --target aarch64-unknown-linux-gnu --workspace` | Proves the Pi target still builds, including the bundled SQLite C sources ([ADR-0009](adr/0009-rusqlite-for-sqlite-access.md)) |
 
 Run all of them locally before pushing — the commands are identical.
+
+**`--locked` on every gate that resolves dependencies.** Each builds against the committed
+`Cargo.lock` and fails, rather than updating it, when `Cargo.toml` asks for something the
+lockfile does not hold. The lockfile is what ships to the Pi, so it is what every gate has to
+be about. A change to a dependency therefore comes with its lockfile change in the same pull
+request, as [CONTRIBUTING.md](../CONTRIBUTING.md) already asks.
 
 ## Running the gates locally
 

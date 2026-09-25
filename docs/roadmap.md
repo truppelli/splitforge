@@ -1527,12 +1527,19 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       refuses an empty reason and the CLI help calls it *"Required"*. *Fix:* add a
       `manual_start`/`manual_finish` flag. Flag it more strongly when a manual entry beats a
       chip crossing at the same checkpoint. Refuse a blank reason the way `declare` does.
-- [ ] **The CI advisory gate audits a different lockfile from the one that ships.** *From
+- [x] **The CI advisory gate audits a different lockfile from the one that ships.** *From
       code.* `cargo generate-lockfile` in `.github/workflows/ci.yml` re-resolves every
       dependency before `cargo audit` runs. A vulnerable version pinned in the committed
       `Cargo.lock` passes if a semver-compatible fix exists, which is exactly the case the gate
       exists to catch. *Fix:* delete that step, and add `--locked` to the build, test, and
       clippy gates.
+      **Fixed.** Reproduced first: `cargo generate-lockfile` run on a copy of `0a9325d` moved
+      57 dependency versions, among them `clap`, `cc` and `bitflags`, so the gate audited a
+      tree nothing ships. The step is gone, and `cargo audit` reads the committed lockfile.
+      Clippy, test, MSRV and the cross-build run `--locked`, in the workflow and in
+      `docker/ci.sh`, so a manifest change without its lockfile change fails every gate rather
+      than passing on versions resolved on the day. `docs/ci.md` and the build command in
+      `deployment.md` carry the flag too. There is no test to fail here: the check is CI itself.
 
 ### Decisions this review raised
 

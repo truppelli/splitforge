@@ -35,16 +35,16 @@ gate_fmt() {
 
 gate_clippy() {
     run_gate "Clippy" \
-        cargo clippy --workspace --all-targets --all-features -- -D warnings
+        cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 }
 
 gate_test() {
-    run_gate "Test" cargo test --workspace --all-features
+    run_gate "Test" cargo test --locked --workspace --all-features
 }
 
 gate_msrv() {
     run_gate "MSRV (${MSRV})" \
-        cargo "+${MSRV}" check --workspace --all-features --all-targets
+        cargo "+${MSRV}" check --locked --workspace --all-features --all-targets
 }
 
 gate_audit() {
@@ -61,7 +61,7 @@ gate_cross() {
     # the edge service is still empty, and a cross-build that compiles nothing proves
     # nothing.
     run_gate "Cross-build (aarch64)" \
-        cargo build --release --target aarch64-unknown-linux-gnu --workspace
+        cargo build --locked --release --target aarch64-unknown-linux-gnu --workspace
 }
 
 gates=("$@")
