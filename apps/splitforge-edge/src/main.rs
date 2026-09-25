@@ -160,23 +160,28 @@ struct Args {
     reader: Option<String>,
 }
 
-/// Everything the health endpoint reads, behind one lock.
+/// The service's state, and the handles it reads and writes the database through.
 ///
 /// `rusqlite::Connection` is `Send` but not `Sync`, so a shared handle needs a mutex.
-/// Everything behind it is a counting query, a `statvfs`, or a single-row insert, all
-/// bounded in time regardless of how long the event has run.
 ///
-/// **Three things contend for it now**, and the third is why the two fields below sit
-/// outside it. The health handler reads; the clock monitor holds it for one `INSERT` at most
-/// once per [`SAMPLE_INTERVAL_MS`]; and the read path holds it for an append that fsyncs the
-/// sidecar before it commits, which on an SD card is the longest hold in the process. The
-/// note this comment used to carry — *"if either of those stops being true this needs
-/// `spawn_blocking`"* — is what the read path's own thread answers: it does not run on the
-/// reactor, so a health request waits on a mutex rather than on a starved executor.
+/// **Two sets of handles on one database**, because of what contends for them. The read path
+/// holds [`Self::stores`] for an append that fsyncs the sidecar before it commits, which on an
+/// SD card is the longest hold in the process; the clock monitor and the silence watchdog hold
+/// it briefly to write their rows. Health only reads, and reads it on
+/// [`Self::observed`], a connection of its own. In WAL mode a reader neither waits for a
+/// writer nor holds one up, so a monitor polling health adds nothing to the time a read takes
+/// to reach the journal, and never waits out an append.
 struct Device {
     database: PathBuf,
     started: Instant,
+    /// The handles the service writes through: the read path, the clock monitor, and the
+    /// silence watchdog.
     stores: Mutex<Stores>,
+    /// A second journal and configuration handle on the same database, for health alone.
+    ///
+    /// Never appended to. It sees what the writers have committed, which is what health
+    /// reports, and its lock is contended only by other health requests.
+    observed: Mutex<Stores>,
     /// What the time daemon last said, or `None` before the first sample.
     ///
     /// Deliberately **not** behind [`Self::stores`]. The health handler must be able to
@@ -373,7 +378,10 @@ impl HealthSource for Device {
         // A poisoned mutex means a previous call panicked while holding it. Reporting that
         // as a degradation is strictly better than panicking again: the endpoint keeps
         // answering, and what it answers is the truth.
-        let Ok(stores) = self.stores.lock() else {
+        //
+        // `observed`, not `stores`: this is the only thing that reads through it, so the
+        // read path never waits on these queries and they never wait on its appends.
+        let Ok(stores) = self.observed.lock() else {
             health.degrade("the device state is unreadable after an earlier failure");
             return health;
         };
@@ -1065,10 +1073,18 @@ async fn main() -> Result<()> {
         );
     }
 
+    let observed = observer(&args.database).with_context(|| {
+        format!(
+            "opening a second handle on {} for health",
+            args.database.display()
+        )
+    })?;
+
     let device = Arc::new(Device {
         database: args.database.clone(),
         started: Instant::now(),
         stores: Mutex::new(Stores { journal, config }),
+        observed: Mutex::new(observed),
         clock: RwLock::new(None),
         reader: Mutex::new(ReaderStatus::none()),
     });
@@ -1130,6 +1146,18 @@ async fn main() -> Result<()> {
     }
 
     serve(&args.socket, device).await
+}
+
+/// The handles health reads through, on the database the writers use.
+///
+/// Opened after the writer's journal, so any replay from the sidecar has already committed.
+/// `SqliteJournal::open` does not reconcile, and this handle never appends: it is an observer,
+/// in the way `splitforge reads --follow` is.
+fn observer(database: &std::path::Path) -> Result<Stores, splitforge_storage::StorageError> {
+    Ok(Stores {
+        journal: SqliteJournal::open(database)?,
+        config: ConfigStore::open(database)?,
+    })
 }
 
 /// Puts a scripted reader on the front of the read path.
@@ -1424,10 +1452,12 @@ mod tests {
         let (journal, _recovery) =
             SqliteJournal::open_recovering(&database, "test").expect("open the journal");
 
+        let observed = observer(&database).expect("open the observer");
         let device = Device {
             database,
             started: Instant::now(),
             stores: Mutex::new(Stores { journal, config }),
+            observed: Mutex::new(observed),
             clock: RwLock::new(None),
             reader: Mutex::new(ReaderStatus {
                 // The kind is irrelevant here and there is no `Serial` yet: composing the
@@ -1649,6 +1679,36 @@ mod tests {
             .journal
             .count()
             .expect("count the journal")
+    }
+
+    #[test]
+    fn health_answers_while_the_read_path_holds_the_journal() {
+        // The 2026-09-13 review, from code: every health request ran its counting queries
+        // under the lock the read path appends through. On an SD card an append fsyncs twice
+        // while it holds that lock, so a monitor polling health added its queries to the read
+        // path's latency, and waited out every append in turn.
+        let (device, _directory) = a_device_watching_a_reader();
+        deliver(
+            &device,
+            vec![a_read(&device, "E200", ReaderTimestamp::Absent)],
+        );
+        let device = &device;
+
+        let held = device.stores.lock().expect("hold the read path's lock");
+        std::thread::scope(|scope| {
+            let (answered, answer) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let _ = answered.send(device.health());
+            });
+            let health = answer.recv_timeout(std::time::Duration::from_secs(5));
+            drop(held);
+
+            let health = health.expect("health waited on the read path's lock");
+            assert_eq!(
+                health.raw_reads, 1,
+                "health reads what the read path committed, on a connection of its own"
+            );
+        });
     }
 
     #[test]
@@ -1968,6 +2028,7 @@ mod tests {
             database: database.to_path_buf(),
             started: Instant::now(),
             stores: Mutex::new(Stores { journal, config }),
+            observed: Mutex::new(observer(database).expect("open the observer")),
             clock: RwLock::new(None),
             reader: Mutex::new(ReaderStatus::none()),
         })

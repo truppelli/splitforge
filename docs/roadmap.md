@@ -1575,11 +1575,25 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
 
 ### Hygiene
 
-- [ ] **Health runs blocking SQLite on an async worker, under the lock the read path writes
+- [x] **Health runs blocking SQLite on an async worker, under the lock the read path writes
       through.** *From code, not measured.* Every request runs `COUNT(*)` over `raw_reads`
       while holding `stores`. S10 says the read path does not go through the API, and that
       is true, but they share a mutex. *Fix:* use `spawn_blocking`, keep the read count
       cheaply (for example as `MAX(seq)`), and give health its own read-only connection.
+      **Fixed, two parts of three.** The handler takes the reading in `spawn_blocking`, and a
+      reading that panics is answered with a 500 rather than a dropped connection. Health
+      reads through `Device::observed`, a journal and configuration handle of its own that
+      nothing appends through, so in WAL mode it neither waits for an append nor holds one
+      up. **The count stays `COUNT(*)`.** `seq` is `AUTOINCREMENT`, which SQLite promises is
+      increasing and not that it is gap-free, so `MAX(seq)` could report more reads than the
+      journal holds; off the lock and off the runtime, the scan costs only the health request.
+      Both API tests fail against `b457991`: the reading ran on the serving thread, and a
+      panicking one took the handler down. The edge test fails against `main` before this
+      change, where health waited out a held lock for the full five seconds. It uses helpers
+      that did not exist at `b457991`. **Not changed:** the clock monitor and the silence
+      watchdog still take `stores` from the runtime, each once every ten seconds, and can wait
+      there on an append. The runtime is multi-threaded, so that wait holds one of its worker
+      threads rather than the whole of it.
 - [ ] **Recovery, `doctor`, and the bundle load the whole journal into memory.** *From code.*
       `Sidecar::scan` reads the entire file, `compare` builds a set of every id, and
       `doctor` and `bundle` call `read_all`. On a 1 GB Pi, an out-of-memory crash during
