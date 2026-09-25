@@ -422,6 +422,16 @@ pair of facts rather than a contradiction.
       threshold calibrated at the bench is now calibrated at a power somebody chose and the
       audit trail records. The fake module answers both, and the rehearsal checks `/health`
       and the audit row. A real one has not
+- [ ] **Capture what a session says.** Built
+      ([ADR-0040](adr/0040-a-serial-session-can-be-captured-byte-for-byte.md)): `--capture`
+      writes every byte the service sends to the module and every byte it receives to a text
+      file, with the time and direction, beside the evidence and never in it. Without it, a frame
+      the decoder refused was a counted fault and its bytes were gone, and so were the start
+      sequence's answers, which is what the first session is for. The capture wraps the port
+      factory, so nothing above the port changed, and the reading thread never waits for it: a
+      full queue drops capture records and counts them, never reads. The serial rehearsal runs
+      the real binary with it and finds the start sequence as sent and a tag report as received.
+      **Unticked until a real session has been captured**, which is the point of having it
 
 **Needs the module:**
 
@@ -622,7 +632,9 @@ which is exactly as open as Q9 was. Every criterion below is M3's, verbatim.
 - Handle **both** `UTCTimestamp` and `Uptime` correctly — an uptime value must never be
   interpreted as a date ([clock discipline § 6](clock-and-time-discipline.md#6-llrp-timestamp-specifics))
 - Continuous offset and skew measurement into `clock_samples`
-- Raw protocol captures behind an explicit diagnostic flag
+- Raw protocol captures behind an explicit diagnostic flag. **The serial reader has one**
+  ([ADR-0040](adr/0040-a-serial-session-can-be-captured-byte-for-byte.md)): `--capture` wraps
+  the port factory, so an LLRP capture wraps a socket the same way and keeps its file format
 - Reconnect safely after cable removal, reader reboot, and Wi-Fi interruption
 - A network outage cannot erase already persisted reads
 - Measure CPU, memory, write latency, and recovery behavior on the Pi

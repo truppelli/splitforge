@@ -170,6 +170,19 @@ names the step. `/health` reports the power the module applied under `reader.rea
 hundredths of a dBm, and each start records the configuration on the audit trail as
 `reader.configured`. Changing it means restarting the service.
 
+**At the bench, add `--capture`** ([ADR-0040](adr/0040-a-serial-session-can-be-captured-byte-for-byte.md)):
+
+```ini
+ExecStart=/usr/local/bin/splitforge-edge --serial /dev/splitforge-reader --region na --read-power 20 --capture /var/lib/splitforge/session.capture
+```
+
+It writes every byte the service sends to the module and every byte it receives, one line
+each, with the time and the direction, so a frame nobody expected is kept rather than counted
+and dropped. It is a diagnostic, not evidence: nothing reads it back, it is not fsynced, and it
+drops records rather than make the port wait. It holds every chip identifier the module
+reported, so it is created `0640`, and it is not safe to attach to a public issue the way a
+diagnostic bundle is. It has no rotation, so leave it off for an event.
+
 **Name the port `/dev/splitforge-reader`, never `/dev/ttyUSB0`.** The udev rule creates that
 name and moves it with the device. `ttyUSB0` becomes `ttyUSB1` if the bridge re-enumerates
 while the old node is still held open, which is what a pulled cable does, and a service

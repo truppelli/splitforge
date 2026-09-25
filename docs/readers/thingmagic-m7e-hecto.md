@@ -170,6 +170,10 @@ The same four questions the Pico was asked, answered for this board:
 
 ### Only answerable with hardware in hand
 
+Run the first sessions with `--capture` ([ADR-0040](../adr/0040-a-serial-session-can-be-captured-byte-for-byte.md)).
+Every item below is answered in bytes, and a frame that surprises the decoder can then be pasted
+into a test, as `CAPTURED_FRAME` was.
+
 - Whether the module accepts the start sequence. A command sequence copied from source code is
   believed when a module answers it.
 - Whether the empty-field frame, `0x22` with status `0x0400`, arrives about once a second

@@ -301,6 +301,20 @@ struct Service {
 
 impl Service {
     async fn start(device: &str) -> Self {
+        Self::start_with(device, false).await
+    }
+
+    /// The service with `--capture` writing to [`Self::capture`].
+    async fn start_capturing(device: &str) -> Self {
+        Self::start_with(device, true).await
+    }
+
+    /// Where `start_capturing` writes its capture.
+    fn capture(&self) -> PathBuf {
+        self.directory.path().join("session.capture")
+    }
+
+    async fn start_with(device: &str, capture: bool) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         let database = directory.path().join("event.db");
         let socket = directory.path().join("api.sock");
@@ -309,14 +323,18 @@ impl Service {
         splitforge_cli::load_fixture(&mut store, "test", FIXTURE).expect("load the fixture");
         drop(store);
 
-        let child = Process::new(SERVICE)
+        let capture_file = directory.path().join("session.capture");
+        let mut command = Process::new(SERVICE);
+        command
             .args(["--database", database.to_str().expect("utf-8")])
             .args(["--socket", socket.to_str().expect("utf-8")])
             .args(["--serial", device])
             .args(["--region", "na"])
-            .args(["--read-power", "22.5"])
-            .spawn()
-            .expect("start splitforge-edge");
+            .args(["--read-power", "22.5"]);
+        if capture {
+            command.args(["--capture", capture_file.to_str().expect("utf-8")]);
+        }
+        let child = command.spawn().expect("start splitforge-edge");
 
         for _ in 0..400 {
             if socket.exists() {
@@ -443,6 +461,92 @@ async fn the_service_opens_a_device_starts_a_stream_and_journals_what_arrives() 
 
     module.unplug();
     let _ = service.stop().await;
+}
+
+#[tokio::test]
+async fn a_capture_holds_what_the_service_sent_and_what_the_module_said() {
+    // ADR-0040. The bytes a first session with a real module would need: the start sequence
+    // as sent, and every answer and report as it arrived.
+    let pty = pty();
+    let device = pty.device.clone();
+    let tag = [0xE2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15, 0x07];
+    let mut module = FakeModule::answering(pty, Answers::Everything, vec![tag]);
+    let service = Service::start_capturing(&device).await;
+    service
+        .poll_until(|health| health["reader"]["reads_persisted"] == 1)
+        .await
+        .unwrap_or_else(|| panic!("the read never arrived"));
+
+    let mut text = String::new();
+    for _ in 0..200 {
+        text = std::fs::read_to_string(service.capture()).expect("the capture exists");
+        if text.contains(&hex(&tag_report(tag))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert!(text.starts_with("# splitforge serial capture"), "{text}");
+    let tags: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.splitn(3, ' ').nth(2))
+        .collect();
+    assert_eq!(tags.first(), Some(&"open"), "{text}");
+
+    let sent: String = tags
+        .iter()
+        .filter_map(|tag| tag.strip_prefix("> "))
+        .collect();
+    let mut expected = Vec::new();
+    for command in StartSequence::gen2(Region::Na, "22.5".parse().expect("a power")).commands() {
+        let mut out = [0_u8; 255];
+        expected.extend_from_slice(command.encode(&mut out).expect("encode"));
+    }
+    assert_eq!(
+        sent,
+        hex(&expected),
+        "the start sequence, as sent:
+{text}"
+    );
+
+    let received: String = tags
+        .iter()
+        .filter_map(|tag| tag.strip_prefix("< "))
+        .collect();
+    assert!(
+        received.contains(&hex(&tag_report(tag))),
+        "the tag report, as it arrived:
+{text}"
+    );
+
+    let trail = ConfigStore::open(service.database())
+        .expect("open the configuration")
+        .audit_trail(20)
+        .expect("read the audit trail");
+    let configured = trail
+        .iter()
+        .find(|entry| entry.action == "reader.configured")
+        .expect("the configuration is on the audit trail");
+    assert!(
+        configured
+            .detail
+            .as_deref()
+            .expect("detail")
+            .contains("session.capture"),
+        "the audit row names the capture: {configured:?}"
+    );
+
+    module.unplug();
+    let _ = service.stop().await;
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
 }
 
 #[tokio::test]

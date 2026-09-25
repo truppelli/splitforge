@@ -71,7 +71,8 @@ use splitforge_reader::{
 };
 use splitforge_storage::{ConfigStore, RaceSelection, SqliteJournal};
 use splitforge_thingmagic::{
-    ReadPower, Region, SerialSettings, StartSequence, StreamDecoder, ThingMagicReader,
+    Capture, PortFactory, ReadPower, Region, SerialSettings, StartSequence, StreamDecoder,
+    ThingMagicReader, capturing,
 };
 use splitforge_timesource::ClockReading;
 use tokio::sync::mpsc::Receiver;
@@ -162,6 +163,16 @@ struct Args {
     /// did not start. The M7E-HECTO accepts 0 to 27 dBm.
     #[arg(long, value_name = "DBM", requires = "serial")]
     read_power: Option<ReadPower>,
+
+    /// Write every byte `--serial` sends and receives to this file, with when and which way
+    /// ([ADR-0040](../../../docs/adr/0040-a-serial-session-can-be-captured-byte-for-byte.md)).
+    ///
+    /// A bench flag, off unless given. **Not evidence**: nothing reads it back, it is not
+    /// fsynced, and it can lose records rather than make the port wait. It holds every chip
+    /// identifier the module reports, so it is created `0640` and is not safe to post where a
+    /// diagnostic bundle is.
+    #[arg(long, value_name = "PATH", requires = "serial")]
+    capture: Option<PathBuf>,
 
     /// Bits per second for `--serial`. The module's own default is 115200.
     #[arg(long, value_name = "BAUD", default_value_t = 115_200)]
@@ -1172,7 +1183,7 @@ async fn main() -> Result<()> {
                 path,
                 args.serial_baud,
                 (region, power),
-                args.reader.as_deref(),
+                (args.reader.as_deref(), args.capture.as_deref()),
                 &args.database,
             )?;
         }
@@ -1330,7 +1341,7 @@ fn compose_serial_reader(
     path: &str,
     baud: u32,
     (region, power): (Region, ReadPower),
-    reader: Option<&str>,
+    (reader, capture): (Option<&str>, Option<&std::path::Path>),
     database: &std::path::Path,
 ) -> Result<()> {
     let mut store = ConfigStore::open(database)
@@ -1398,11 +1409,22 @@ fn compose_serial_reader(
     // What every read taken from here on means against: where it was, how it was asked, and
     // at what power. Once per start, because all of it comes from the command line and changes
     // only when the service restarts (ADR-0038).
+    // Opened before anything is recorded, so a capture that was asked for and cannot be written
+    // stops the service at start rather than leaving a bench session without it.
+    let capture = capture
+        .map(|file| {
+            Capture::create(file)
+                .with_context(|| format!("opening the capture file {}", file.display()))
+                .map(|opened| (file, opened))
+        })
+        .transpose()?;
+
     let configured_detail = serde_json::json!({
         "device": path,
         "baud": baud,
         "region": region.name(),
         "read_power_centi_dbm": power.centi_dbm(),
+        "capture": capture.as_ref().map(|(file, _)| file.display().to_string()),
     });
     store
         .record_audit(
@@ -1421,14 +1443,19 @@ fn compose_serial_reader(
         region.name()
     );
 
-    let provider: Box<dyn ReaderProvider> = Box::new(
-        ThingMagicReader::new(
-            reader_id.clone(),
-            splitforge_thingmagic::serial(settings),
-            StreamDecoder::new(reader_id.clone()),
-        )
-        .with_start(StartSequence::gen2(region, power)),
-    );
+    let start = StartSequence::gen2(region, power);
+    let port = splitforge_thingmagic::serial(settings);
+    let provider = match capture {
+        Some((file, capture)) => {
+            eprintln!(
+                "splitforge-edge: capturing every byte to and from the reader in {}. It is a \
+                 diagnostic and not evidence (ADR-0040)",
+                file.display()
+            );
+            serial_provider(&reader_id, capturing(port, capture), start)
+        }
+        None => serial_provider(&reader_id, port, start),
+    };
     let receiver = provider.start();
 
     device.update_reader(|status| {
@@ -1447,6 +1474,23 @@ fn compose_serial_reader(
     std::thread::spawn(move || read_into_journal(&device, receiver, ingest));
 
     Ok(())
+}
+
+/// The ThingMagic reader over `factory`, captured or not: the two are different types, and
+/// nothing above the port tells them apart.
+fn serial_provider<P: PortFactory + 'static>(
+    reader_id: &ReaderId,
+    factory: P,
+    start: StartSequence,
+) -> Box<dyn ReaderProvider> {
+    Box::new(
+        ThingMagicReader::new(
+            reader_id.clone(),
+            factory,
+            StreamDecoder::new(reader_id.clone()),
+        )
+        .with_start(start),
+    )
 }
 
 /// Hundredths of a dBm as dBm, exactly: `2250` is `22.50`.
@@ -2205,7 +2249,7 @@ mod tests {
             "/dev/null",
             115_200,
             (Region::Na, "22.5".parse().expect("a power")),
-            Some("nope"),
+            (Some("nope"), None),
             &database,
         )
         .expect_err("an unknown reader cannot be composed");
@@ -2244,7 +2288,7 @@ mod tests {
             "/dev/null",
             115_200,
             (Region::Na, "22.5".parse().expect("a power")),
-            None,
+            (None, None),
             &database,
         )
         .expect_err("two readers and no --reader cannot be resolved");
@@ -2273,7 +2317,7 @@ mod tests {
             "/dev/null",
             115_200,
             (Region::Na, "22.5".parse().expect("a power")),
-            Some("mat"),
+            (Some("mat"), None),
             &database,
         )
         .expect("the fixture's reader composes");
@@ -2334,6 +2378,8 @@ mod tests {
         .expect_err("a module transmits at a power too, and that has no default either");
         Args::try_parse_from(["splitforge-edge", "--read-power", "20"])
             .expect_err("a power with nothing to set it on is a mistake worth refusing");
+        Args::try_parse_from(["splitforge-edge", "--capture", "session.capture"])
+            .expect_err("a capture with no port to capture is a mistake worth refusing");
         Args::try_parse_from([
             "splitforge-edge",
             "--serial",
