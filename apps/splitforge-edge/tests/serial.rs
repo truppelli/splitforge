@@ -152,6 +152,8 @@ impl FakeModule {
             let plugged_in = Arc::clone(&plugged_in);
             move || {
                 let mut pending = Vec::new();
+                // The read power it was last set to, in hundredths of a dBm, big-endian.
+                let mut power = [0x00_u8, 0x00];
                 let mut chunk = [0_u8; 512];
 
                 while plugged_in.load(Ordering::SeqCst) {
@@ -198,9 +200,16 @@ impl FakeModule {
                         let refuse = answers == Answers::ButNotTheRegion
                             && opcode == OpCode::SetRegion.to_byte();
                         let status = if refuse { 0x0105 } else { 0x0000 };
-                        // A multi-protocol answer echoes the option byte it was given.
+                        // A multi-protocol answer echoes the option byte it was given. The read
+                        // power it reports is the one it was last set to, with the Hecto's range
+                        // (ADR-0038), laid out as MercuryAPI's GetReadTxPowerWithLimits reads it.
+                        if opcode == OpCode::SetReadTxPower.to_byte() {
+                            power = [body[0], body[1]];
+                        }
                         let echo: Vec<u8> = if opcode == OpCode::MultiProtocolTagOp.to_byte() {
                             vec![body[2]]
+                        } else if opcode == OpCode::GetReadTxPower.to_byte() {
+                            vec![0x01, power[0], power[1], 0x0A, 0x8C, 0x00, 0x00]
                         } else {
                             Vec::new()
                         };
@@ -305,6 +314,7 @@ impl Service {
             .args(["--socket", socket.to_str().expect("utf-8")])
             .args(["--serial", device])
             .args(["--region", "na"])
+            .args(["--read-power", "22.5"])
             .spawn()
             .expect("start splitforge-edge");
 
@@ -400,15 +410,35 @@ async fn the_service_opens_a_device_starts_a_stream_and_journals_what_arrives() 
 
     // And the service sent the start sequence, byte for byte.
     let mut expected = Vec::new();
-    for command in StartSequence::gen2(Region::Na).commands() {
+    let power = "22.5".parse().expect("a power");
+    for command in StartSequence::gen2(Region::Na, power).commands() {
         let mut out = [0_u8; 255];
         expected.extend_from_slice(command.encode(&mut out).expect("encode"));
     }
     assert_eq!(
         module.heard(),
         expected,
-        "stop, version, Gen2, region, read filter off, start"
+        "stop, version, Gen2, region, read power, its read-back, read filter off, start"
     );
+    assert_eq!(
+        health["reader"]["read_power"],
+        serde_json::json!({"centi_dbm": 2250, "min_centi_dbm": 0, "max_centi_dbm": 2700}),
+        "the power the module reported applying, from --read-power by way of the module"
+    );
+
+    // And what the reads are to be read against is on the audit trail, once.
+    let trail = ConfigStore::open(service.database())
+        .expect("open the configuration")
+        .audit_trail(20)
+        .expect("read the audit trail");
+    let configured: Vec<_> = trail
+        .iter()
+        .filter(|entry| entry.action == "reader.configured")
+        .collect();
+    assert_eq!(configured.len(), 1, "{trail:?}");
+    let detail = configured[0].detail.as_deref().expect("detail");
+    assert!(detail.contains("\"read_power_centi_dbm\":2250"), "{detail}");
+    assert!(detail.contains("\"region\":\"na\""), "{detail}");
     assert!(module.is_streaming());
 
     module.unplug();

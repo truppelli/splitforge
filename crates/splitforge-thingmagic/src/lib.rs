@@ -83,7 +83,10 @@ pub mod reassembly;
 pub mod start;
 pub mod tag_report;
 
-pub use command::{Command, OpCode, Region, UnknownRegion, antenna_ports, search_flag};
+pub use command::{
+    Command, InvalidReadPower, OpCode, PowerReport, ReadPower, Region, UnknownRegion,
+    antenna_ports, search_flag,
+};
 pub use crc::crc16;
 pub use frame::{
     COMMAND_HEADER_LEN, CRC_LEN, Decoded, EncodeError, FrameError, MAX_COMMAND_DATA_LEN,

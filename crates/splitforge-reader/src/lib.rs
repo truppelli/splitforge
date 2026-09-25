@@ -241,6 +241,21 @@ pub struct ReaderFaults {
     pub decoding: u64,
 }
 
+/// The read transmit power a reader says it is using, and the range it says it accepts.
+///
+/// In hundredths of a dBm, as readers report it: `2700` is 27.00 dBm. What the reader reports
+/// rather than what it was asked for, because a reader may apply something close to the request
+/// instead of the request itself (ADR-0038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransmitPower {
+    /// The read power in force.
+    pub centi_dbm: i16,
+    /// The lowest the reader accepts.
+    pub min_centi_dbm: i16,
+    /// The highest the reader accepts.
+    pub max_centi_dbm: i16,
+}
+
 /// What a provider reports.
 ///
 /// **A channel of reads alone cannot say the port died**, and that silence is the whole
@@ -275,6 +290,9 @@ pub enum ReaderEvent {
     /// nor a sign of life: a reader sending bytes nobody can decode is recording nothing, and
     /// the silence watchdog is right to say so.
     Faults(ReaderFaults),
+    /// The read power the reader reported on this connection. Neither a read nor a sign of
+    /// life: it arrives during the start, before the reader is recording.
+    TransmitPower(TransmitPower),
 }
 
 /// A source of reads.

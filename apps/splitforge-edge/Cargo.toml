@@ -25,6 +25,9 @@ splitforge-domain.workspace = true
 # ThingMagic adapter arrives as a different value passed to the same loop.
 splitforge-reader.workspace = true
 splitforge-storage.workspace = true
+# The detail of the `reader.configured` audit row: a device path and a region, which a string
+# built by hand would have to escape. Already in the tree through `splitforge-storage`.
+serde_json.workspace = true
 # The serial adapter, composed by `--serial`. **This is the only crate in the workspace
 # allowed to name a protocol adapter** — `dependency_rules.rs` has a test saying so, and it
 # is what keeps the engine unable to tell one reader protocol from another (ADR-0001,
@@ -49,7 +52,6 @@ rusqlite.workspace = true
 # A pseudo-terminal for the serial rehearsal: a real device for `--serial` to open, with a
 # fake module on the other end. `openpty` by hand would need `unsafe`, denied workspace-wide.
 rustix.workspace = true
-serde_json.workspace = true
 # The tests spawn the real service binary, but build its fixture database through library
 # calls — `splitforge-cli` is a dependency above, so they reach for it directly. Shelling out
 # to the `splitforge` executable by path instead made `cargo test -p splitforge-edge` depend

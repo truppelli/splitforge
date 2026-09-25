@@ -149,8 +149,11 @@ cross-checked against, names this module and branches for it once: North America
   11.15 dBiC, and lists a circularly polarized patch. § 5.8 allows the same type at equal or
   lower gain without further testing. The 6 dBi circular panel in the order is that case, on the
   guide's reading. Check the FCC filing before relying on it.
-- **Transmit power is not set by the adapter**, so the module runs at its default. The maximum
-  is +27 dBm ([finding 28](vendor-documents.md#28-27-dbm-and-what-it-takes-to-reach-it)).
+- **Read power is set on every connection**, from `--read-power`, which has no default
+  ([ADR-0038](../adr/0038-each-connection-sets-the-read-power-the-operator-chose.md)). The
+  maximum is +27 dBm ([finding 28](vendor-documents.md#28-27-dbm-and-what-it-takes-to-reach-it)),
+  and the module refuses more. After setting it, the service asks what the module applied and
+  the range it accepts, and reports both on `/health`.
 
 ## Known unknowns
 
@@ -175,7 +178,9 @@ The same four questions the Pico was asked, answered for this board:
 - What an idle and an unplugged CH340C `ttyUSB` return. A pseudo-terminal returns `TimedOut` and
   `BrokenPipe` ([finding 20](vendor-documents.md#20-an-idle-port-times-out-and-a-closed-one-does-not)).
   A USB bridge may not.
-- The module's default transmit power, and whether a region setting persists.
+- Whether a region setting persists. The default read power no longer matters: it is set on
+  every connection. Whether the module accepts the power command, and what it reports applying,
+  are first-session checks.
 - Whether the CH340C reports a USB serial number. CH340-family bridges are not expected to.
 - What a streaming module sends when it overheats.
 - Read range and detection rate across a real lane, at the power finally chosen.

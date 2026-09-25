@@ -414,6 +414,14 @@ pair of facts rather than a contradiction.
       guide contradicts ([finding 18](readers/vendor-documents.md#18-sparkfun-and-the-user-guide-disagree-on-what-the-tag-timestamp-counts-from)).
       Still unticked: no module has answered one of these commands. **A fake one has**, over a
       pseudo-terminal — see *Compose the module* above
+      **Two steps were added by
+      [ADR-0038](adr/0038-each-connection-sets-the-read-power-the-operator-chose.md)**, between the
+      region and the read filter: the read power, from a required `--read-power` with no
+      default, and a question the module answers with the power it applied and the range it
+      accepts. Power sets the read zone and what a read's signal strength means, so an RSSI
+      threshold calibrated at the bench is now calibrated at a power somebody chose and the
+      audit trail records. The fake module answers both, and the rehearsal checks `/health`
+      and the audit row. A real one has not
 
 **Needs the module:**
 

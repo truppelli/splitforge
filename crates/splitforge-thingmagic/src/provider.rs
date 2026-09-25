@@ -49,10 +49,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use splitforge_domain::ReaderId;
-use splitforge_reader::{Disconnection, ReaderEvent, ReaderFaults, ReaderMessage, ReaderProvider};
+use splitforge_reader::{
+    Disconnection, ReaderEvent, ReaderFaults, ReaderMessage, ReaderProvider, TransmitPower,
+};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
+use crate::command::PowerReport;
 use crate::frame::Response;
 use crate::port::{Port, PortFactory};
 use crate::reassembly::Reassembler;
@@ -503,6 +506,7 @@ where
         let anchor = Cell::new(opened);
         let mut chunk = [0_u8; 512];
         let mut reads: Vec<ReaderMessage> = Vec::new();
+        let mut power: Option<PowerReport> = None;
         let mut announced = false;
 
         let mut starting = self.start.as_ref().map(Starting::new);
@@ -534,6 +538,9 @@ where
                     match sequence.answer(response, &mut port, Instant::now()) {
                         Ok(step) => progress = step,
                         Err(error) => written = Err(error),
+                    }
+                    if let Some(report) = sequence.take_power_report() {
+                        power = Some(report);
                     }
                     if !was_starting && sequence.is_starting() {
                         anchor.set(SessionAnchor::now());
@@ -600,6 +607,19 @@ where
                     return Pumped::ConsumerGone;
                 }
                 announced = true;
+            }
+
+            // Before the reads, and before the connection is announced below it. Sent once per
+            // connection, when the module answers the start sequence's question.
+            if let Some(report) = power.take() {
+                let event = ReaderEvent::TransmitPower(TransmitPower {
+                    centi_dbm: report.centi_dbm,
+                    min_centi_dbm: report.min_centi_dbm,
+                    max_centi_dbm: report.max_centi_dbm,
+                });
+                if sender.blocking_send(event).is_err() {
+                    return Pumped::ConsumerGone;
+                }
             }
 
             for message in reads.drain(..) {
@@ -743,7 +763,8 @@ mod tests {
                 ReaderEvent::Read(message) => return message,
                 ReaderEvent::Connected
                 | ReaderEvent::Disconnected { .. }
-                | ReaderEvent::Faults(_) => {}
+                | ReaderEvent::Faults(_)
+                | ReaderEvent::TransmitPower(_) => {}
             }
         }
     }
@@ -1049,6 +1070,8 @@ mod tests {
         refuse: Option<(u8, u16)>,
         streams: Vec<Vec<u8>>,
         quiet_reads: usize,
+        /// What it answers `0x62` with, beyond the status. Nothing unless a test sets it.
+        power_report: Vec<u8>,
     }
 
     impl FakeModule {
@@ -1059,6 +1082,7 @@ mod tests {
                 refuse: None,
                 streams: Vec::new(),
                 quiet_reads: 3,
+                power_report: Vec::new(),
             }
         }
     }
@@ -1077,10 +1101,10 @@ mod tests {
                 Some((refused, status)) if refused == opcode => status,
                 _ => 0x0000,
             };
-            let echo: Vec<u8> = if opcode == 0x2F {
-                vec![body[2]]
-            } else {
-                Vec::new()
+            let echo: Vec<u8> = match opcode {
+                0x2F => vec![body[2]],
+                0x62 => self.power_report.clone(),
+                _ => Vec::new(),
             };
             self.pending.extend(answer(opcode, status, &echo));
 
@@ -1119,7 +1143,10 @@ mod tests {
     fn starting_reader<P: PortFactory + 'static>(factory: P) -> Box<dyn ReaderProvider> {
         Box::new(
             ThingMagicReader::new(ReaderId::new("mat"), factory, StubDecoder)
-                .with_start(StartSequence::gen2(crate::command::Region::Na))
+                .with_start(StartSequence::gen2(
+                    crate::command::Region::Na,
+                    "22.5".parse().expect("a power"),
+                ))
                 .with_backoff(Backoff {
                     first: Duration::from_millis(1),
                     max: Duration::from_secs(1),
@@ -1131,7 +1158,10 @@ mod tests {
     /// The bytes of the whole start sequence, as the command builders encode it.
     fn the_start_sequence() -> Vec<u8> {
         let mut bytes = Vec::new();
-        for command in StartSequence::gen2(crate::command::Region::Na).commands() {
+        for command in
+            StartSequence::gen2(crate::command::Region::Na, "22.5".parse().expect("a power"))
+                .commands()
+        {
             let mut out = [0_u8; crate::frame::MAX_FRAME_LEN];
             bytes.extend_from_slice(command.encode(&mut out).expect("encode"));
         }
@@ -1167,8 +1197,32 @@ mod tests {
         assert_eq!(
             &sent[..sequence.len()],
             &sequence[..],
-            "stop, version, Gen2, region, read filter off, start, byte for byte"
+            "stop, version, Gen2, region, read power, its read-back, read filter off, start,              byte for byte"
         );
+    }
+
+    #[tokio::test]
+    async fn the_power_the_module_reports_is_passed_on_before_the_connection_is() {
+        // ADR-0038: what the module applied, from its own answer, for health and the log.
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = Arc::clone(&written);
+        let factory = move || -> io::Result<Port> {
+            let mut module = FakeModule::new(&record);
+            module.power_report = vec![0x01, 0x08, 0xCA, 0x0A, 0x8C, 0x00, 0x00];
+            Ok(Box::new(module) as Port)
+        };
+
+        let mut receiver = starting_reader(factory).start();
+
+        assert_eq!(
+            receiver.recv().await,
+            Some(ReaderEvent::TransmitPower(TransmitPower {
+                centi_dbm: 2250,
+                min_centi_dbm: 0,
+                max_centi_dbm: 2700,
+            }))
+        );
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Connected));
     }
 
     #[tokio::test]
