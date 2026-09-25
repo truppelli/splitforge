@@ -347,8 +347,20 @@ pub fn router(source: Arc<dyn HealthSource>) -> Router {
 /// Degraded answers carry HTTP 503 so that `curl --fail`, a systemd watchdog, and a
 /// monitoring script all agree without parsing the body. The body says the same thing for
 /// anyone who is reading it.
+///
+/// **The reading is taken on a blocking thread**, not on the runtime. It queries a database,
+/// and a query on an SD card can wait on a write; on the runtime that wait would stall every
+/// other task it drives. A reading that panics is answered with a 500 and a sentence rather
+/// than a dropped connection, because a monitor reads a dropped connection as a service that
+/// is not there.
 async fn health(State(source): State<Arc<dyn HealthSource>>) -> Response {
-    let health = source.health();
+    let Ok(health) = tokio::task::spawn_blocking(move || source.health()).await else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the health check failed before it could report; see the service's log",
+        )
+            .into_response();
+    };
     let code = if health.is_degraded() {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
@@ -363,6 +375,45 @@ mod tests {
 
     fn sample() -> Health {
         Health::ok("0.0.0", 42, "event.db", 4, 638, 256)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_health_check_runs_off_the_thread_that_serves_requests() {
+        // A reading queries a database, and on an SD card a query can wait on a write. Run on
+        // the thread that drives the runtime, that wait stops every other request and timer
+        // this runtime owns; the single-threaded runtime here makes that thread this one.
+        let serving = std::thread::current().id();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let recorder = Arc::clone(&seen);
+        let source: Arc<dyn HealthSource> = Arc::new(move || {
+            *recorder.lock().expect("record the thread") = Some(std::thread::current().id());
+            sample()
+        });
+
+        let response = health(State(source)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let checked = seen
+            .lock()
+            .expect("read the thread")
+            .expect("the check ran");
+        assert_ne!(
+            checked, serving,
+            "the health check ran on the thread that serves requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_health_check_that_panics_still_gets_an_answer() {
+        // The trait's promise is that the endpoint always says something. A reading that
+        // panics cannot say what is wrong, but a 500 still tells `curl --fail` and a watchdog
+        // that something is, where a dropped connection looks like a service that is gone.
+        let source: Arc<dyn HealthSource> =
+            Arc::new(|| -> Health { panic!("the reading fell over") });
+
+        let response = health(State(source)).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
