@@ -99,8 +99,11 @@ pub(crate) fn check_free_space(
 /// What a reconciliation moved, as the operator sees it.
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct RecoveryView {
-    /// Reads the sidecar holds and verified.
+    /// Reads the sidecar holds and verified, in the part of it that was read.
     pub sidecar_records: u64,
+    /// Where that part began: `0` for the whole file, or the offset of the checkpoint a
+    /// writer's start resumed from (ADR-0037). `splitforge recover` always reads it all.
+    pub sidecar_scanned_from_byte: u64,
     /// Reads replayed out of the sidecar into the database.
     pub replayed_into_database: u64,
     /// Reads copied into the sidecar so it is a superset again.
@@ -118,6 +121,7 @@ impl RecoveryView {
     pub(crate) const fn of(report: &RecoveryReport) -> Self {
         Self {
             sidecar_records: report.found.records,
+            sidecar_scanned_from_byte: report.scanned_from_byte,
             replayed_into_database: report.replayed_into_database,
             backfilled_into_sidecar: report.backfilled_into_sidecar,
             corrupt_lines: report.found.corrupt_lines,

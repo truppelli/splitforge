@@ -16,7 +16,7 @@ pub struct Migration {
 }
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Every migration, in order.
 pub const MIGRATIONS: &[Migration] = &[
@@ -54,6 +54,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 7,
         name: "reader_gap_events",
         sql: READER_GAP_EVENTS,
+    },
+    Migration {
+        version: 8,
+        name: "sidecar_checkpoints",
+        sql: SIDECAR_CHECKPOINTS,
     },
 ];
 
@@ -546,6 +551,36 @@ CREATE TRIGGER reader_gap_events_no_delete
 BEFORE DELETE ON reader_gap_events
 BEGIN
     SELECT RAISE(ABORT, 'reader_gap_events is append-only: DELETE is not permitted');
+END;
+";
+
+/// How far the sidecar and `raw_reads` are known to agree (ADR-0037).
+const SIDECAR_CHECKPOINTS: &str = r"
+-- Each row claims: every read in the sidecar before `sidecar_bytes` is in raw_reads, and
+-- every raw_reads row up to `through_seq` is in the sidecar before `sidecar_bytes`. A writer
+-- starting up reads the sidecar only past the latest row, after checking the file still
+-- matches it: the complete line ending at `sidecar_bytes` carries `last_line_sha256`.
+--
+-- Append-only like the evidence it describes. A row that was true when written stays true
+-- of the file it was written about, and a later row supersedes it rather than editing it.
+CREATE TABLE sidecar_checkpoints (
+    seq               INTEGER PRIMARY KEY AUTOINCREMENT,
+    sidecar_bytes     INTEGER NOT NULL CHECK (sidecar_bytes > 0),
+    last_line_sha256  TEXT    NOT NULL CHECK (length(last_line_sha256) = 64),
+    through_seq       INTEGER NOT NULL CHECK (through_seq >= 0),
+    recorded_at_us    INTEGER NOT NULL
+) STRICT;
+
+CREATE TRIGGER sidecar_checkpoints_no_update
+BEFORE UPDATE ON sidecar_checkpoints
+BEGIN
+    SELECT RAISE(ABORT, 'sidecar_checkpoints is append-only: UPDATE is not permitted');
+END;
+
+CREATE TRIGGER sidecar_checkpoints_no_delete
+BEFORE DELETE ON sidecar_checkpoints
+BEGIN
+    SELECT RAISE(ABORT, 'sidecar_checkpoints is append-only: DELETE is not permitted');
 END;
 ";
 

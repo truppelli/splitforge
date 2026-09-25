@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -16,7 +17,7 @@ use uuid::Uuid;
 
 use crate::StorageError;
 use crate::connection::{self, from_micros, to_micros};
-use crate::sidecar::{self, Sidecar, SidecarRead};
+use crate::sidecar::{self, Sidecar, SidecarRead, Tip};
 
 const SELECT_COLUMNS: &str = "seq, id, source, antenna, chip, reader_timestamp_us, \
      reader_uptime_us, received_at_us, received_at_monotonic_ns, rssi_dbm, \
@@ -29,7 +30,8 @@ const SELECT_COLUMNS: &str = "seq, id, source, antenna, chip, reader_timestamp_u
 /// that a writer would repair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SidecarStatus {
-    /// Reads the sidecar holds and verified.
+    /// Reads the sidecar holds and verified, in the part of it that was read: all of it for
+    /// [`SqliteJournal::survey`], and what follows the latest checkpoint for a writer's start.
     pub records: u64,
     /// Lines that failed their digest or could not be decoded. Real damage.
     pub corrupt_lines: u64,
@@ -65,7 +67,32 @@ pub struct RecoveryReport {
     pub replayed_into_database: u64,
     /// Reads copied from the database into the sidecar, restoring its superset property.
     pub backfilled_into_sidecar: u64,
+    /// Where in the sidecar the pass started: `0` for the whole file, or the offset of the
+    /// checkpoint it resumed from (ADR-0037).
+    pub scanned_from_byte: u64,
 }
+
+/// How far the sidecar and the database were known to agree, as recorded (ADR-0037).
+///
+/// Claims that every read in the sidecar before [`Self::sidecar_bytes`] is in `raw_reads`, and
+/// every row up to [`Self::through_seq`] is in the sidecar before it. A writer's start trusts
+/// the latest one only if the complete line ending at that offset still carries
+/// [`Self::last_line_sha256`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarCheckpoint {
+    /// An offset in the sidecar, just past a complete line's newline.
+    pub sidecar_bytes: u64,
+    /// The digest the line ending there carries.
+    pub last_line_sha256: String,
+    /// The highest `raw_reads.seq` when it was recorded.
+    pub through_seq: u64,
+    /// When it was recorded.
+    pub recorded_at: OffsetDateTime,
+}
+
+/// How often a writer records a checkpoint, at most (ADR-0037). Bounds how much of the sidecar
+/// a restart after a power cut has to read.
+pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 
 impl RecoveryReport {
     /// Whether anything was moved in either direction.
@@ -81,6 +108,16 @@ pub struct SqliteJournal {
     conn: Connection,
     /// `None` only for in-memory journals, which promise no durability of any kind.
     sidecar: Option<Sidecar>,
+    /// A sidecar line has been written whose database row has not been committed.
+    ///
+    /// Set before the sidecar is written and cleared by the commit. While it is set, a
+    /// checkpoint would claim a read is in `raw_reads` that is not, so none is recorded. A retry
+    /// after a database-only failure (ADR-0031) clears it when it succeeds.
+    unconfirmed: bool,
+    /// When this handle last recorded a checkpoint, or was opened.
+    last_checkpoint: Instant,
+    /// [`CHECKPOINT_INTERVAL`], unless a test has shortened it.
+    checkpoint_every: Duration,
 }
 
 impl SqliteJournal {
@@ -116,6 +153,9 @@ impl SqliteJournal {
         Ok(Self {
             conn: connection::open(path)?,
             sidecar: Some(Sidecar::open(sidecar.into())?),
+            unconfirmed: false,
+            last_checkpoint: Instant::now(),
+            checkpoint_every: CHECKPOINT_INTERVAL,
         })
     }
 
@@ -125,6 +165,11 @@ impl SqliteJournal {
     /// rather than only when somebody notices a problem — is what keeps the recovery path
     /// exercised. A mechanism that only ever runs during a disaster is a mechanism whose
     /// first real execution is during a disaster.
+    ///
+    /// **It reads the sidecar from the latest checkpoint the file still matches** (ADR-0037),
+    /// and all of it when there is none. After a power cut that is the reads since the last
+    /// checkpoint, not every read of the event. [`SqliteJournal::reconcile`] always reads the
+    /// whole file.
     ///
     /// `actor` is recorded on the audit row a replay writes; see [`SqliteJournal::reconcile`].
     ///
@@ -136,7 +181,11 @@ impl SqliteJournal {
         actor: &str,
     ) -> Result<(Self, RecoveryReport), StorageError> {
         let mut journal = Self::open(path)?;
-        let report = journal.reconcile(actor)?;
+        let start = match journal.usable_checkpoint()? {
+            Some(checkpoint) => Start::After(checkpoint),
+            None => Start::Beginning,
+        };
+        let report = journal.repair(actor, &start)?;
         Ok((journal, report))
     }
 
@@ -152,6 +201,9 @@ impl SqliteJournal {
         Ok(Self {
             conn: connection::open_in_memory()?,
             sidecar: None,
+            unconfirmed: false,
+            last_checkpoint: Instant::now(),
+            checkpoint_every: CHECKPOINT_INTERVAL,
         })
     }
 
@@ -163,16 +215,22 @@ impl SqliteJournal {
 
     /// Compares the sidecar against the database without changing either.
     ///
+    /// Always the whole file, a line at a time. This is the full verification, and it is what
+    /// `doctor` runs: a writer's start reads only what follows its latest checkpoint, so this is
+    /// where damage anywhere in the file is found.
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError`] if the sidecar cannot be read or the database queried.
     pub fn survey(&self) -> Result<SidecarStatus, StorageError> {
-        Ok(self
-            .compare()?
-            .map_or_else(SidecarStatus::default, |c| c.status))
+        let Some(sidecar) = self.sidecar.as_ref() else {
+            return Ok(SidecarStatus::default());
+        };
+        Ok(pass(&self.conn, sidecar, &Start::Beginning, |_| Ok(()))?.status)
     }
 
-    /// Makes the database and the sidecar agree, in both directions.
+    /// Makes the database and the sidecar agree, in both directions, reading the whole
+    /// sidecar.
     ///
     /// Reads the sidecar holds and the database lacks are inserted; reads the database
     /// holds and the sidecar lacks are appended. Taking the union rather than picking a
@@ -180,7 +238,8 @@ impl SqliteJournal {
     /// backfill direction is also how a database written before the sidecar existed
     /// acquires one.
     ///
-    /// Idempotent: running it twice repairs nothing the second time.
+    /// Idempotent: running it twice repairs nothing the second time. Ends by recording a
+    /// checkpoint, because the union it has just taken is what a checkpoint claims.
     ///
     /// **A replay is written to the audit trail, in the same transaction as the reads**, as
     /// `journal.replay` by `actor`. Replay is a way for reads to enter the append-only journal
@@ -194,105 +253,135 @@ impl SqliteJournal {
     ///
     /// Returns [`StorageError`] if either side cannot be read or written.
     pub fn reconcile(&mut self, actor: &str) -> Result<RecoveryReport, StorageError> {
-        let Some(comparison) = self.compare()? else {
+        self.repair(actor, &Start::Beginning)
+    }
+
+    /// The latest checkpoint recorded, trusted or not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read.
+    pub fn latest_checkpoint(&self) -> Result<Option<SidecarCheckpoint>, StorageError> {
+        latest_checkpoint(&self.conn)
+    }
+
+    /// Records a checkpoint at the last line this handle wrote or recovery verified, if that
+    /// is somewhere a checkpoint has not already been recorded.
+    ///
+    /// Returns whether a row was written. None is while a sidecar line is waiting on its
+    /// database row, or when this handle has neither written nor recovered anything. For the
+    /// writing process: every append calls it once [`CHECKPOINT_INTERVAL`] has passed, and a
+    /// service calls it on a clean shutdown. It assumes it is the only process appending reads
+    /// to this database, which is how the service is deployed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or written.
+    pub fn checkpoint(&mut self) -> Result<bool, StorageError> {
+        if self.unconfirmed {
+            return Ok(false);
+        }
+        let Some(tip) = self.sidecar.as_ref().and_then(Sidecar::tip).cloned() else {
+            return Ok(false);
+        };
+        self.last_checkpoint = Instant::now();
+        if latest_checkpoint(&self.conn)?.is_some_and(|latest| {
+            latest.sidecar_bytes == tip.end && latest.last_line_sha256 == tip.digest
+        }) {
+            return Ok(false);
+        }
+        let through = max_seq(&self.conn)?;
+        self.conn.execute(
+            "INSERT INTO sidecar_checkpoints
+                (sidecar_bytes, last_line_sha256, through_seq, recorded_at_us)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                u64_to_i64(tip.end, "sidecar_bytes")?,
+                tip.digest,
+                u64_to_i64(through, "through_seq")?,
+                to_micros(OffsetDateTime::now_utc())?,
+            ],
+        )?;
+        Ok(true)
+    }
+
+    /// Shortens the checkpoint interval. For tests that cannot wait a minute.
+    #[cfg(test)]
+    pub(crate) const fn set_checkpoint_interval(&mut self, every: Duration) {
+        self.checkpoint_every = every;
+    }
+
+    /// The latest checkpoint, if the file and the database still match it.
+    ///
+    /// Not trusted, and the whole file read instead, when the database's rows stop short of
+    /// its `through_seq`, or the line ending at its offset is not the line it recorded. A
+    /// line inserted into or removed from the part before it moves that line, so a sidecar
+    /// edited there is read in full. Ignored rather than repaired: a new one is recorded when
+    /// the pass that replaces it finishes.
+    fn usable_checkpoint(&self) -> Result<Option<SidecarCheckpoint>, StorageError> {
+        let Some(sidecar) = self.sidecar.as_ref() else {
+            return Ok(None);
+        };
+        let Some(checkpoint) = latest_checkpoint(&self.conn)? else {
+            return Ok(None);
+        };
+        if max_seq(&self.conn)? < checkpoint.through_seq {
+            return Ok(None);
+        }
+        let tip = Tip {
+            end: checkpoint.sidecar_bytes,
+            digest: checkpoint.last_line_sha256.clone(),
+        };
+        Ok(sidecar.ends_with_line(&tip)?.then_some(checkpoint))
+    }
+
+    /// Takes the union from `start`, and records a checkpoint where it ends.
+    fn repair(&mut self, actor: &str, start: &Start) -> Result<RecoveryReport, StorageError> {
+        let Self { conn, sidecar, .. } = self;
+        let Some(sidecar) = sidecar.as_mut() else {
             return Ok(RecoveryReport::default());
         };
-        let Comparison {
-            status,
-            replay,
-            backfill,
-        } = comparison;
 
-        let mut report = RecoveryReport {
-            found: status,
-            ..RecoveryReport::default()
-        };
-
-        if !replay.is_empty() {
-            let tx = self.conn.transaction()?;
-            for record in &replay {
-                insert_one(&tx, &record.read, record.recorded_at)?;
-            }
+        let tx = conn.transaction()?;
+        let found = pass(&tx, sidecar, start, |record| {
+            insert_one(&tx, &record.read, record.recorded_at).map(drop)
+        })?;
+        if found.replayed.count > 0 {
             connection::insert_audit(
                 &tx,
                 actor,
                 "journal.replay",
                 None,
-                Some(&replay_detail(&replay, &status)),
+                Some(&replay_detail(&found.replayed, &found.status)),
             )?;
-            tx.commit()?;
-            report.replayed_into_database = replay.len() as u64;
         }
+        tx.commit()?;
 
-        if !backfill.is_empty()
-            && let Some(sidecar) = self.sidecar.as_mut()
-        {
-            sidecar.append_recorded(&backfill)?;
-            report.backfilled_into_sidecar = backfill.len() as u64;
-        }
-
-        Ok(report)
-    }
-
-    /// The shared half of [`SqliteJournal::survey`] and [`SqliteJournal::reconcile`], so
-    /// that what is reported and what is repaired can never disagree.
-    fn compare(&self) -> Result<Option<Comparison>, StorageError> {
-        let scan = match self.sidecar.as_ref() {
-            Some(sidecar) => sidecar.scan()?,
-            None => return Ok(None),
-        };
-        let sidecar_ids = Sidecar::ids(&scan);
-
-        let mut statement = self.conn.prepare("SELECT id FROM raw_reads")?;
-        let mut rows = statement.query([])?;
-        let mut stored_ids = HashSet::new();
-        while let Some(row) = rows.next()? {
-            stored_ids.insert(row.get::<_, String>(0)?);
-        }
-
-        // Each id once, the first line that carries it. `raw_reads.id` is unique, so a second
-        // copy would fail the replay transaction and every start after it. A retried append
-        // writes one: the sidecar half succeeded, the database half did not, and the retry
-        // writes the line again.
-        let mut replaying = HashSet::new();
-        let replay: Vec<SidecarRead> = scan
-            .records
-            .iter()
-            .filter(|record| {
-                let id = record.read.id.to_string();
-                !stored_ids.contains(&id) && replaying.insert(id)
-            })
-            .cloned()
-            .collect();
-
-        // Only pay for loading every stored read when the sidecar is actually short. In
-        // the normal case it is a superset by construction and this never runs.
-        let backfill: Vec<SidecarRead> = if stored_ids.iter().all(|id| sidecar_ids.contains(id)) {
-            Vec::new()
+        if found.backfill.is_empty() {
+            // Where the pass ends is where the next checkpoint can go. With nothing new since
+            // the checkpoint it started from, that is still the checkpoint's own line.
+            let tip = found.last_verified.or(match start {
+                Start::After(checkpoint) => Some(Tip {
+                    end: checkpoint.sidecar_bytes,
+                    digest: checkpoint.last_line_sha256.clone(),
+                }),
+                Start::Beginning => None,
+            });
+            if let Some(tip) = tip {
+                sidecar.set_tip(tip);
+            }
         } else {
-            let sql = format!("SELECT {SELECT_COLUMNS} FROM raw_reads ORDER BY seq");
-            self.select(&sql, &[])?
-                .into_iter()
-                .filter(|stored| !sidecar_ids.contains(&stored.read.id.to_string()))
-                .map(|stored| SidecarRead {
-                    read: stored.read,
-                    recorded_at: stored.recorded_at,
-                })
-                .collect()
-        };
+            sidecar.append_recorded(&found.backfill)?;
+        }
 
-        Ok(Some(Comparison {
-            status: SidecarStatus {
-                records: scan.records.len() as u64,
-                corrupt_lines: scan.corrupt_lines,
-                torn_tail_bytes: scan.torn_tail_bytes,
-                torn_writes: scan.torn_writes,
-                missing_from_database: replay.len() as u64,
-                missing_from_sidecar: backfill.len() as u64,
-            },
-            replay,
-            backfill,
-        }))
+        let report = RecoveryReport {
+            found: found.status,
+            replayed_into_database: found.replayed.count,
+            backfilled_into_sidecar: found.backfill.len() as u64,
+            scanned_from_byte: found.from_byte,
+        };
+        self.checkpoint()?;
+        Ok(report)
     }
 
     /// The schema version currently applied to this database.
@@ -785,6 +874,9 @@ impl SqliteJournal {
         // the order were reversed, the same crash would leave a read in a database nothing
         // else has a copy of — which is precisely the situation this file exists to prevent.
         if let Some(sidecar) = self.sidecar.as_mut() {
+            // Before the write, not after it: a line that reached the disk and then failed its
+            // fsync is still a line, and it has no row yet either.
+            self.unconfirmed = true;
             sidecar.append(reads, recorded_at)?;
         }
 
@@ -796,6 +888,14 @@ impl SqliteJournal {
         // Durability happens here: with synchronous = FULL the commit is fsynced, so
         // returning from this function means the reads survive a power cut.
         tx.commit()?;
+        self.unconfirmed = false;
+
+        // Best effort, and after the reads are durable. A checkpoint that cannot be written
+        // costs the next start a longer read of the sidecar; failing the append for it would
+        // cost a read.
+        if self.last_checkpoint.elapsed() >= self.checkpoint_every {
+            let _ = self.checkpoint();
+        }
         Ok(stored)
     }
 
@@ -846,11 +946,178 @@ impl RawReadJournal for SqliteJournal {
     }
 }
 
-/// The divergence, plus the work that would close it. Never leaves this module.
-struct Comparison {
+/// Where a pass over the sidecar starts.
+enum Start {
+    /// The whole file. Whether a read is stored is answered from a set of every stored id.
+    Beginning,
+    /// Just past a checkpoint the file still matches. Whether a read is stored is answered by
+    /// looking its id up, because a pass this short does not pay for loading every id.
+    After(SidecarCheckpoint),
+}
+
+/// What one pass found and did. Never leaves this module.
+struct Pass {
     status: SidecarStatus,
-    replay: Vec<SidecarRead>,
+    replayed: Replayed,
+    /// Rows the sidecar lacks, which are the only ones held in memory.
     backfill: Vec<SidecarRead>,
+    /// The last line that verified, where a checkpoint can be recorded.
+    last_verified: Option<Tip>,
+    from_byte: u64,
+}
+
+/// The reads a pass handed to `replay`, as the audit row describes them.
+#[derive(Default)]
+struct Replayed {
+    count: u64,
+    first_id: Option<RawReadId>,
+    last_id: Option<RawReadId>,
+    earliest: Option<OffsetDateTime>,
+    latest: Option<OffsetDateTime>,
+}
+
+impl Replayed {
+    fn add(&mut self, record: &SidecarRead) {
+        self.count += 1;
+        self.first_id.get_or_insert(record.read.id);
+        self.last_id = Some(record.read.id);
+        let at = record.recorded_at;
+        self.earliest = Some(self.earliest.map_or(at, |earliest| earliest.min(at)));
+        self.latest = Some(self.latest.map_or(at, |latest| latest.max(at)));
+    }
+}
+
+/// The one comparison behind [`SqliteJournal::survey`] and [`SqliteJournal::reconcile`], so
+/// that what is reported and what is repaired can never disagree.
+///
+/// Reads the sidecar a line at a time from `start`. Each verified read the database does not
+/// hold is handed to `replay` once, by id, as it is found: a survey counts it, a repair inserts
+/// it. `raw_reads.id` is unique, so a second copy would fail the replay transaction and every
+/// start after it. A retried append writes one: the sidecar half succeeded, the database half
+/// did not, and the retry writes the line again.
+fn pass(
+    conn: &Connection,
+    sidecar: &Sidecar,
+    start: &Start,
+    mut replay: impl FnMut(&SidecarRead) -> Result<(), StorageError>,
+) -> Result<Pass, StorageError> {
+    let (from_byte, stored) = match start {
+        Start::Beginning => (0, Some(stored_ids(conn)?)),
+        Start::After(checkpoint) => (checkpoint.sidecar_bytes, None),
+    };
+    let mut lookup = conn.prepare("SELECT 1 FROM raw_reads WHERE id = ?1")?;
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    let mut replaying: HashSet<Uuid> = HashSet::new();
+    let mut replayed = Replayed::default();
+
+    let tally = sidecar.scan_from(from_byte, |record| {
+        let id = *record.read.id.as_uuid();
+        seen.insert(id);
+        let already = match stored.as_ref() {
+            Some(ids) => ids.contains(&id),
+            None => lookup.exists([id.to_string()])?,
+        };
+        if !already && replaying.insert(id) {
+            replay(&record)?;
+            replayed.add(&record);
+        }
+        Ok(())
+    })?;
+
+    // Only pay for reading stored rows when some are missing from the sidecar. From the
+    // beginning that is known from the ids already held; after a checkpoint, the rows since it
+    // are few enough to read.
+    let backfill = match (start, stored.as_ref()) {
+        (Start::Beginning, Some(ids)) if ids.iter().all(|id| seen.contains(id)) => Vec::new(),
+        (Start::After(checkpoint), _) => missing_from(conn, checkpoint.through_seq, &seen)?,
+        _ => missing_from(conn, 0, &seen)?,
+    };
+
+    Ok(Pass {
+        status: SidecarStatus {
+            records: tally.records,
+            corrupt_lines: tally.corrupt_lines,
+            torn_tail_bytes: tally.torn_tail_bytes,
+            torn_writes: tally.torn_writes,
+            missing_from_database: replayed.count,
+            missing_from_sidecar: backfill.len() as u64,
+        },
+        replayed,
+        backfill,
+        last_verified: tally.last_verified,
+        from_byte,
+    })
+}
+
+/// Every stored read id, as 16-byte values rather than strings.
+fn stored_ids(conn: &Connection) -> Result<HashSet<Uuid>, StorageError> {
+    let mut statement = conn.prepare("SELECT id FROM raw_reads")?;
+    let mut rows = statement.query([])?;
+    let mut ids = HashSet::new();
+    while let Some(row) = rows.next()? {
+        ids.insert(parse_uuid(&row.get::<_, String>(0)?, "raw read id")?);
+    }
+    Ok(ids)
+}
+
+/// Stored reads after `after_seq` whose id is not in `seen`, read a row at a time.
+fn missing_from(
+    conn: &Connection,
+    after_seq: u64,
+    seen: &HashSet<Uuid>,
+) -> Result<Vec<SidecarRead>, StorageError> {
+    let sql = format!("SELECT {SELECT_COLUMNS} FROM raw_reads WHERE seq > ?1 ORDER BY seq");
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.query([u64_to_i64(after_seq, "seq")?])?;
+    let mut missing = Vec::new();
+    while let Some(row) = rows.next()? {
+        let stored = row_to_stored(row)?;
+        if !seen.contains(stored.read.id.as_uuid()) {
+            missing.push(SidecarRead {
+                read: stored.read,
+                recorded_at: stored.recorded_at,
+            });
+        }
+    }
+    Ok(missing)
+}
+
+/// The highest `raw_reads.seq`, or `0` for an empty journal.
+fn max_seq(conn: &Connection) -> Result<u64, StorageError> {
+    let seq: i64 = conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM raw_reads", [], |row| {
+        row.get(0)
+    })?;
+    u64::try_from(seq).map_err(|_| StorageError::Decode("negative row sequence".to_owned()))
+}
+
+fn latest_checkpoint(conn: &Connection) -> Result<Option<SidecarCheckpoint>, StorageError> {
+    let row = conn
+        .query_row(
+            "SELECT sidecar_bytes, last_line_sha256, through_seq, recorded_at_us
+             FROM sidecar_checkpoints ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((bytes, digest, through, recorded)) = row else {
+        return Ok(None);
+    };
+    let unsigned = |value: i64, what: &str| {
+        u64::try_from(value).map_err(|_| StorageError::Decode(format!("negative {what}")))
+    };
+    Ok(Some(SidecarCheckpoint {
+        sidecar_bytes: unsigned(bytes, "sidecar_bytes")?,
+        last_line_sha256: digest,
+        through_seq: unsigned(through, "through_seq")?,
+        recorded_at: from_micros(recorded)?,
+    }))
 }
 
 fn insert_one(
@@ -1073,18 +1340,17 @@ pub(crate) fn storable(read: &RawRead) -> Result<(), StorageError> {
 }
 
 /// The audit detail for a replay: what came in, and the span of time it claimed.
-fn replay_detail(replay: &[SidecarRead], found: &SidecarStatus) -> String {
+fn replay_detail(replayed: &Replayed, found: &SidecarStatus) -> String {
     let rfc3339 = |at: OffsetDateTime| {
         at.format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default()
     };
-    let recorded = replay.iter().map(|record| record.recorded_at);
     serde_json::json!({
-        "replayed": replay.len(),
-        "first_id": replay.first().map(|record| record.read.id.to_string()),
-        "last_id": replay.last().map(|record| record.read.id.to_string()),
-        "earliest_recorded_at": recorded.clone().min().map(rfc3339),
-        "latest_recorded_at": recorded.max().map(rfc3339),
+        "replayed": replayed.count,
+        "first_id": replayed.first_id.map(|id| id.to_string()),
+        "last_id": replayed.last_id.map(|id| id.to_string()),
+        "earliest_recorded_at": replayed.earliest.map(rfc3339),
+        "latest_recorded_at": replayed.latest.map(rfc3339),
         "corrupt_lines": found.corrupt_lines,
         "torn_tail_bytes": found.torn_tail_bytes,
         "torn_writes": found.torn_writes,
@@ -2129,5 +2395,262 @@ mod tests {
         assert_eq!(recent[0].detection, GapDetection::Suspected);
         assert!(!recent[1].is_open());
         assert_eq!(recent[1].duration_ms(), Some(10_000));
+    }
+
+    // ADR-0037: a writer's start reads what the last checkpoint did not cover.
+
+    fn sidecar_length(database: &Path) -> u64 {
+        std::fs::metadata(sidecar::path_for(database))
+            .expect("the sidecar exists")
+            .len()
+    }
+
+    /// A journal holding `reads`, with a checkpoint recorded after them.
+    fn checkpointed(database: &Path, reads: &[RawRead]) -> SidecarCheckpoint {
+        let mut journal = SqliteJournal::open(database).expect("open");
+        journal.append_batch(reads).expect("append");
+        assert!(
+            journal.checkpoint().expect("checkpoint"),
+            "a checkpoint was written"
+        );
+        journal
+            .latest_checkpoint()
+            .expect("read the checkpoint")
+            .expect("there is one")
+    }
+
+    #[test]
+    fn a_restart_reads_only_what_the_last_checkpoint_did_not_cover() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let checkpoint = checkpointed(
+            &path,
+            &[
+                sample_read("A", 0),
+                sample_read("B", 1),
+                sample_read("C", 2),
+            ],
+        );
+        assert_eq!(checkpoint.sidecar_bytes, sidecar_length(&path));
+        assert_eq!(checkpoint.through_seq, 3);
+
+        {
+            let (mut journal, report) =
+                SqliteJournal::open_recovering(&path, "test").expect("recover");
+            assert_eq!(report.scanned_from_byte, checkpoint.sidecar_bytes);
+            assert_eq!(report.found.records, 0, "nothing after the checkpoint yet");
+            journal.append(&sample_read("D", 3)).expect("append");
+        }
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
+        assert_eq!(report.scanned_from_byte, checkpoint.sidecar_bytes);
+        assert_eq!(
+            report.found.records, 1,
+            "only the read after the checkpoint"
+        );
+        assert!(report.found.is_clean(), "{:?}", report.found);
+        assert_eq!(journal.count().expect("count"), 4);
+    }
+
+    #[test]
+    fn a_read_after_the_checkpoint_that_never_reached_the_database_is_replayed() {
+        // The case a restart after a power cut exists for: the line was synced and the
+        // commit was not.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let checkpoint = checkpointed(&path, &[sample_read("A", 0), sample_read("B", 1)]);
+        let lost = sample_read("C", 2);
+        only_in_the_sidecar(&path, std::slice::from_ref(&lost));
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
+        assert_eq!(report.scanned_from_byte, checkpoint.sidecar_bytes);
+        assert_eq!(report.replayed_into_database, 1);
+        let stored = journal.read_all().expect("read all");
+        assert_eq!(stored.len(), 3);
+        assert_eq!(stored[2].read.id, lost.id);
+    }
+
+    #[test]
+    fn a_copy_of_a_stored_read_after_the_checkpoint_is_not_replayed_again() {
+        // After a checkpoint, whether a read is stored is answered by looking its id up rather
+        // than from the rows since the checkpoint. A copy of an older read found past it would
+        // otherwise be inserted twice, fail on the unique id, and fail every start after.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let old = sample_read("A", 0);
+        checkpointed(&path, &[old.clone(), sample_read("B", 1)]);
+        only_in_the_sidecar(&path, &[old]);
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test")
+            .expect("a copy of a stored read must not stop recovery");
+        assert!(report.scanned_from_byte > 0);
+        assert_eq!(report.replayed_into_database, 0);
+        assert_eq!(journal.count().expect("count"), 2);
+    }
+
+    #[test]
+    fn a_line_inserted_before_the_checkpoint_makes_the_start_read_everything() {
+        // A line inserted into the verified part moves every line after it, so the line ending
+        // at the checkpoint's offset is no longer the one it recorded. The checkpoint is not
+        // trusted, the whole file is read, and the inserted line is replayed and audited as
+        // any replay is.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        checkpointed(&path, &[sample_read("A", 0), sample_read("B", 1)]);
+
+        let sidecar_path = sidecar::path_for(&path);
+        let original = std::fs::read(&sidecar_path).expect("read the sidecar");
+        let scratch = dir.path().join("scratch.db");
+        only_in_the_sidecar(&scratch, &[sample_read("FORGED", 5)]);
+        let mut edited = std::fs::read(sidecar::path_for(&scratch)).expect("the forged line");
+        edited.extend_from_slice(&original);
+        std::fs::write(&sidecar_path, edited).expect("insert the line");
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
+        assert_eq!(
+            report.scanned_from_byte, 0,
+            "the checkpoint was not trusted"
+        );
+        assert_eq!(report.found.records, 3);
+        assert_eq!(report.replayed_into_database, 1);
+        assert_eq!(journal.count().expect("count"), 3);
+    }
+
+    #[test]
+    fn a_sidecar_shorter_than_its_checkpoint_is_read_in_full_and_backfilled() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        checkpointed(&path, &[sample_read("A", 0), sample_read("B", 1)]);
+        std::fs::write(sidecar::path_for(&path), b"").expect("empty the sidecar");
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
+        assert_eq!(
+            report.scanned_from_byte, 0,
+            "the checkpoint was not trusted"
+        );
+        assert_eq!(report.backfilled_into_sidecar, 2);
+        assert!(journal.survey().expect("survey").is_clean());
+    }
+
+    #[test]
+    fn a_restored_snapshot_recovers_what_came_after_its_checkpoint() {
+        // A snapshot carries the checkpoint it was taken with. Every read after it is in the
+        // part of the sidecar a start then reads.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let snapshot = dir.path().join("snapshot.db");
+        let checkpoint = checkpointed(&path, &[sample_read("A", 0), sample_read("B", 1)]);
+        std::fs::copy(&path, &snapshot).expect("take the snapshot");
+        {
+            let mut journal = SqliteJournal::open(&path).expect("open");
+            journal
+                .append_batch(&[sample_read("C", 2), sample_read("D", 3)])
+                .expect("append");
+        }
+
+        for suffix in ["", "-wal", "-shm"] {
+            let mut victim = path.as_os_str().to_owned();
+            victim.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(victim));
+        }
+        std::fs::copy(&snapshot, &path).expect("restore the snapshot");
+
+        let (journal, report) = SqliteJournal::open_recovering(&path, "test").expect("recover");
+        assert_eq!(report.scanned_from_byte, checkpoint.sidecar_bytes);
+        assert_eq!(report.replayed_into_database, 2);
+        assert_eq!(journal.count().expect("count"), 4);
+    }
+
+    #[test]
+    fn the_writer_records_a_checkpoint_when_one_is_due() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let mut journal = SqliteJournal::open(&path).expect("open");
+        assert_eq!(journal.latest_checkpoint().expect("read"), None);
+
+        journal.set_checkpoint_interval(std::time::Duration::ZERO);
+        journal.append(&sample_read("A", 0)).expect("append");
+        journal.append(&sample_read("B", 1)).expect("append");
+
+        let checkpoint = journal
+            .latest_checkpoint()
+            .expect("read")
+            .expect("an append that found one due recorded it");
+        assert_eq!(checkpoint.sidecar_bytes, sidecar_length(&path));
+        assert_eq!(checkpoint.through_seq, 2);
+    }
+
+    #[test]
+    fn a_checkpoint_waits_while_an_append_is_unconfirmed() {
+        // A sidecar line whose row did not commit is exactly what a checkpoint must not
+        // claim is stored. The same read twice fails on its unique id after its line is
+        // written, which is the database-only failure ADR-0031 retries.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let mut journal = SqliteJournal::open(&path).expect("open");
+        let read = sample_read("A", 0);
+        journal.append(&read).expect("append");
+        journal
+            .append(&read)
+            .expect_err("the same id twice is refused by the database");
+
+        assert!(
+            !journal.checkpoint().expect("checkpoint"),
+            "not while unconfirmed"
+        );
+        journal.append(&sample_read("B", 1)).expect("append");
+        assert!(
+            journal.checkpoint().expect("checkpoint"),
+            "a commit confirms it"
+        );
+    }
+
+    #[test]
+    fn nothing_new_since_the_last_checkpoint_records_nothing() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        checkpointed(&path, &[sample_read("A", 0)]);
+
+        let (mut journal, _) = SqliteJournal::open_recovering(&path, "test").expect("recover");
+        assert!(!journal.checkpoint().expect("checkpoint"));
+    }
+
+    #[test]
+    fn survey_and_recover_read_the_whole_sidecar_whatever_the_checkpoint() {
+        // `doctor` is the full verification, and `splitforge recover` the full repair. Neither
+        // resumes from a checkpoint.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        checkpointed(
+            &path,
+            &[
+                sample_read("A", 0),
+                sample_read("B", 1),
+                sample_read("C", 2),
+            ],
+        );
+
+        let mut journal = SqliteJournal::open(&path).expect("open");
+        assert_eq!(journal.survey().expect("survey").records, 3);
+        let report = journal.reconcile("test").expect("reconcile");
+        assert_eq!(report.scanned_from_byte, 0);
+        assert_eq!(report.found.records, 3);
+    }
+
+    #[test]
+    fn sidecar_checkpoints_are_append_only_at_the_database() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        checkpointed(&path, &[sample_read("A", 0)]);
+        let conn = Connection::open(&path).expect("a plain connection");
+
+        let update = conn
+            .execute("UPDATE sidecar_checkpoints SET sidecar_bytes = 1", [])
+            .expect_err("an update must be refused");
+        assert!(update.to_string().contains("append-only"), "{update}");
+        let delete = conn
+            .execute("DELETE FROM sidecar_checkpoints", [])
+            .expect_err("a delete must be refused");
+        assert!(delete.to_string().contains("append-only"), "{delete}");
     }
 }
