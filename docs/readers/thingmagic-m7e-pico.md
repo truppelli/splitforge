@@ -2,9 +2,17 @@
 
 - **Vendor:** JADAK / Novanta (ThingMagic)
 - **Protocol:** ThingMagic serial (Mercury API framing) over USB-UART
-- **Adapter crate:** `crates/splitforge-thingmagic/` — not yet written
-- **Status:** **experimental — under evaluation**
+- **Adapter crate:** `crates/splitforge-thingmagic/`
+- **Status:** **superseded — never bought.** [ADR-0035](../adr/0035-the-first-module-is-the-m7e-hecto.md)
+  replaced it with the [M7E-HECTO](thingmagic-m7e-hecto.md)
 - **In the support matrix:** **no**, and see [§ Why this cannot become "supported"](#why-this-cannot-become-supported)
+
+> **This page is a record, not a plan.** It was written while the Pico was the chosen module,
+> and it is kept because the adapter was built from what it found: the framing, the CRC's
+> coverage, the timestamp semantics and the command set were all read from this module's
+> documents. The [M7E-HECTO page](thingmagic-m7e-hecto.md) says which of those carry over,
+> and most of them do. Statements below in the future tense were never tested, because no
+> Pico was ever bought.
 
 > Nothing on this page has been observed on a physical device. This file exists because
 > [ADR-0024](../adr/0024-serial-reader-adapter-before-llrp.md) makes this module the first

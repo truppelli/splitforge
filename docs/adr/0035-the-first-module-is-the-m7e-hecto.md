@@ -102,9 +102,11 @@ connector, and so the 6 dBi panel antenna in the order, the **0 Ω resistor labe
 moved** to the U.FL position with a soldering iron or hot air. No command selects between them.
 This is a bench step, and it happens before any read range is measured.
 
-**One RF path.** The board connects either the trace antenna or the U.FL, never both. So
-per-antenna identity, row 5 of the support checklist, is structural again, as ADR-0024
-originally scored it. The four switched U.FL ports on the Pico's carrier board, which had put
+**One RF path.** The board connects either the trace antenna or the U.FL, never both, and the
+module behind it has one port: § 5.1.2, *"The module has one antenna port"*, and the guide's
+fault table says a command naming *"an antenna value other than 1"* is refused. So per-antenna
+identity, row 5 of the support checklist, is structural again, as ADR-0024 originally scored
+it. The four switched U.FL ports on the Pico's carrier board, which had put
 that row in doubt, belong to a board this project is no longer buying.
 
 **The antenna in the order is within the grant.** § 5.7 lists authorized antennas up to
@@ -114,16 +116,22 @@ testing. The 6 dBi circularly polarized patch in the order is that case. This re
 guide's antenna table rather than the FCC filing, and the guide has already been wrong about
 its own FCC ID. Check the filing before any claim goes on a label.
 
-**More power, and more current.** Transmit power runs from 0 to +27 dBm, against the Pico's
-+24. SparkFun gives the board's draw as over 700 mA at +27 dBm, with a 1 A limit on the board,
+**More power, and more current.** Transmit power runs from 0 to +27 dBm in 0.5 dB steps
+(§ 5.3.1), against the Pico's +24. SparkFun gives the board's draw as over 700 mA at +27 dBm, with a 1 A limit on the board,
 and warns that a 500 mA USB port may brown out above +22 dBm. The start sequence does not set
 transmit power, so the module runs at whatever it defaults to. Whether to set it on every
 connection, as the region is set, is a separate decision.
 
-**A thermal cutoff the host cannot see.** SparkFun says the module disables RF above +60 °C.
-When it does, it stops producing reads without a disconnection. The adapter would record that
-as a *suspected* gap after the silence threshold, which is the same thing it records for an
-empty field. The enclosure has a fan and heatsinks. Neither is a measurement.
+**A thermal cutoff the adapter does not surface.** § 5.4.2.2: *"If overheating occurs,
+Mercury API returns error code 0x504 to alert the user. The module protects itself by turning
+off RF until the temperature falls back within the allowed range."* So the module probably says
+so on the wire, as a response carrying status `0x0504`. That frame shape has never been
+captured. `StreamDecoder` refuses any non-zero status as a decode fault, and after the first
+decoded read decode faults do not degrade health
+([ADR-0030](0030-the-serial-adapter-waits-for-proof.md)). So a mid-race cutoff would show as a
+climbing fault count, and then as a *suspected* gap once the silence threshold passes, which is
+also what an empty field produces. Naming the status is a small change, and it waits until a
+capture shows the frame. The enclosure has a fan and heatsinks. Neither is a measurement.
 
 ## Consequences
 

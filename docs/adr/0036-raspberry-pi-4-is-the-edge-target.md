@@ -10,7 +10,7 @@
 [ADR-0002](0002-raspberry-pi-target.md) chose the Raspberry Pi 3 Model B/B+ because it is the
 constrained case: *"if it works there, it works everywhere."* Every document since has assumed
 a Pi 3 was on hand. The Phase 0 budget carried one in kind, and
-[hardware-plan.md](../hardware-plan.md#compute-compute-module-for-the-product-pi-3-stays-the-support-floor)
+[hardware-plan.md](../hardware-plan.md#compute-compute-module-for-the-product-the-pi-4-until-then)
 kept it as the minimum supported platform for a future product.
 
 There is no Pi 3 on hand. The Phase 0 order now buys a **Raspberry Pi 4 Model B, 2 GB**
@@ -61,7 +61,8 @@ shipped platform stays open.
   into memory ([roadmap](../roadmap.md#hygiene)) is not closed by a bigger board. It is still an
   out-of-memory crash loop on a large enough journal.
 - **Heat.** The Pi 4 throttles when hot, and it shares a closed enclosure with a radio that
-  disables itself above +60 °C. A throttled Pi adds receive-time jitter, which is what bounds
+  turns its RF off when it overheats
+  ([ADR-0035](0035-the-first-module-is-the-m7e-hecto.md)). A throttled Pi adds receive-time jitter, which is what bounds
   accuracy on this hardware ([ADR-0024](0024-serial-reader-adapter-before-llrp.md)). The
   heatsinks and fan in the order are the mitigation. Whether they are enough is something to
   measure.

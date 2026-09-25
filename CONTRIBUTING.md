@@ -74,7 +74,7 @@ errors, never panic — a single corrupt frame from a reader may not take down t
 - Write commit subjects in the imperative mood: `Add duplicate suppression window`.
 - Keep PRs scoped to one concern. A PR that renames things *and* changes behavior is two
   PRs.
-- Describe what you tested, and on what. "Tested on a Pi 3 with a simulated reader" and
+- Describe what you tested, and on what. "Tested on a Pi 4 with a simulated reader" and
   "compiles" are different claims — say which one is true.
 - Do not claim hardware support in docs or release notes for a device you have not
   physically tested. See [`docs/hardware-support.md`](docs/hardware-support.md).

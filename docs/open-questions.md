@@ -283,7 +283,7 @@ materials around a scavenged component.
 cannot close two of the nine support criteria — there is no reader clock to measure offset
 and skew against, and there is one RF port, so no per-antenna identity. Neither is "not yet";
 both are structural. So the module enters
-[`docs/readers/thingmagic-m7e-pico.md`](readers/thingmagic-m7e-pico.md) as *experimental —
+[`docs/readers/thingmagic-m7e-hecto.md`](readers/thingmagic-m7e-hecto.md) as *experimental —
 under evaluation*, the support matrix stays empty, and
 [Q3](#q3-reader-clock-trust-defaults) stays open because this module cannot supply the
 measurements it asks for.

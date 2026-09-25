@@ -60,6 +60,47 @@ sha256sum m7e-pico-deka-user-guide.pdf
 # b4659cfdf69f5bf1af0671214d2a519228bace7f1b0a68fcae56b30f07b58a4c
 ```
 
+### M7E-HECTO User Guide
+
+| | |
+|---|---|
+| Title | THINGMAGIC M7E-HECTO USER GUIDE |
+| Document number | 875-0106-01 Rev 1.4 (revision history ends December 15, 2023) |
+| Copyright | © 2023 Novanta Inc. and its affiliated companies |
+| Source | `https://cdn.sparkfun.com/assets/8/5/2/4/d/M7E_HECTO_User_Guide.pdf` |
+| Retrieved | 2026-09-24, HTTP 200 |
+| Size / pages | 1,666,035 bytes · 55 pages |
+| SHA-256 | `3bfc8d92933418c38fb3b6af314071dfbe6f7f5842aa440fd491b7b489882774` |
+| Depended on by | [ADR-0035](../adr/0035-the-first-module-is-the-m7e-hecto.md), [thingmagic-m7e-hecto.md](thingmagic-m7e-hecto.md) |
+
+Hosted by SparkFun, not by the vendor. A later **Rev 1.8** is listed at
+`https://www.jadaktech.com/wp-content/uploads/2024/06/TM_HECTO-UG-Rev_06142024.pdf`, which
+returned an empty body on the same day. Nothing here rests on it.
+
+### M7E-HECTO Specification Sheet
+
+| | |
+|---|---|
+| Title | ThingMagic M7E-HECTO UHF RAIN RFID Module spec sheet (06/26/2023) |
+| Source | `https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/5735/M7E-HECTO-Spec-Sheet_06262023.pdf` |
+| Retrieved | 2026-09-24, HTTP 200 |
+| Size / pages | 231,778 bytes · 2 pages |
+| SHA-256 | `b303026d8f15c220c31175c74cca9889271e67f83429a1a054a09206e3eae709` |
+| Depended on by | [thingmagic-m7e-hecto.md](thingmagic-m7e-hecto.md) |
+
+### SparkFun's pages for its M7E Hecto board
+
+The module guide describes the module. SparkFun's board, WRL-24738, is what connects to the Pi,
+and its facts come from SparkFun's own pages, retrieved 2026-09-24:
+
+- product page, `https://www.sparkfun.com/sparkfun-simultaneous-rfid-reader-m7e-hecto.html`
+- hardware overview, `https://docs.sparkfun.com/SparkFun_Simultaneous_RFID_Reader_M7E/hardware_overview/`
+- external antenna, `https://docs.sparkfun.com/SparkFun_Simultaneous_RFID_Reader_M7E/external_antenna/`
+
+They are HTML pages that change without a revision number, so no hash is recorded. The claims
+taken from them are quoted in [the reader notes](thingmagic-m7e-hecto.md#the-board), which is
+the record if the pages change.
+
 ### MercuryAPI — `serial_reader_l3.c`
 
 The vendor's own implementation of the protocol above, and the authority on everything § 7
@@ -1149,6 +1190,97 @@ service hands the service a copy of the controller end. Dropping every copy in t
 then closes nothing: the device stays open, the service reads on undisturbed, and the cable
 cannot be pulled. `rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC)` is the fix, and the symptom to
 recognise is a disconnection that never arrives.
+
+## What the Hecto's documents settled
+
+[ADR-0035](../adr/0035-the-first-module-is-the-m7e-hecto.md) replaced the M7e-Pico with the
+M7E-HECTO. The adapter was written from the Pico's guide, so every section it cites was read
+again in the Hecto's. Everything above that quotes *"User Guide"* means the Pico's guide,
+875-0093-01. **None of this is from a device.**
+
+### 23. The protocol sections are the Pico guide's, one section later in § 8
+
+The sections the code rests on say the same thing in the Hecto guide:
+
+| Claim | Pico guide | Hecto guide |
+|---|---|---|
+| Command frame, 0 to 250 data bytes | § 7.1 | § 7.1, same diagram |
+| Response frame, 0 to 248 data bytes | § 7.2 | § 7.2, same diagram |
+| CRC covers length, command, status and data, not the header | § 7.3 | § 7.3, same words |
+| *"Flow control is not supported"*, 255 bytes at a time | § 5.1.4.1 | § 5.1.4.1, same words |
+| Default baud 115200 | § 5.1.4.2 | § 5.1.4.2 |
+| The module cannot detect a broken connection and keeps streaming | § 8.8.2 | **§ 8.9.2**, same note |
+| Timestamp relative to the read command, in milliseconds | § 8.8.3 | **§ 8.9.3**, same words |
+| Tag buffer of about 52 EPCs, duplicates not added | § 8.8.1 | **§ 8.9.1**, same words |
+
+§ 8 gained a section, so the Pico's § 8.8.x is the Hecto's § 8.9.x. Citations elsewhere in
+this repository use the Pico's numbers.
+
+§ 7.3 is also still titled *"CCITT CRC-16 Calculation"*. [Finding 8](#8-the-crc-was-not-ccitt-false-and-the-codec-computed-the-wrong-checksum)
+applies unchanged: the guide names the algorithm wrongly, and the captured frame is what the
+code is anchored on.
+
+### 24. The guide's regulatory section names the Pico's IDs
+
+The labeling text gives *"FCC ID: QV5MERCURY7EP"* and *"IC ID: 5407A-MERCURY7EP"*. Those are
+the Pico's. The FCC's record for the Hecto is
+[`QV5MERCURY7EH`](https://fccid.io/QV5MERCURY7EH). The section was carried over from the Pico's
+guide without being corrected, so the rest of this guide is a transcription that can be wrong
+too, as the Pico guide's CRC section was.
+
+### 25. The Hecto supports neither EU nor EU2
+
+Table 8, § 8.1: *"The EU and EU2 regions offered for other modules are for legacy applications
+using old ETSI regulations. These are not supported in the M7E-HECTO module."* `Region::Eu`
+and `Region::Eu2` still parse, because they come from `tmr_region.h` and are right for other
+modules. On this one, the module should refuse the region step, and the connection ends as
+`NotStarted` naming it. EU3 is the European region for this module.
+
+### 26. One antenna port, stated twice
+
+§ 5.1.2: *"The module has one antenna port, and the connection is only through the edge vias of
+the module."* And the fault table, beside `FAULT_MSG_INVALID_PARAMETER_VALUE` (`105h`):
+*"currently the module supports one antenna. If the module receives a message with an antenna
+value other than 1, it returns this error."* That agrees with sending no antenna-port command
+([finding 16](#16-the-two-sources-disagree-on-the-antenna-port-for-this-module)): the only
+value the module accepts is the one it starts with.
+
+### 27. Overheating is reported, as `0x504`
+
+§ 5.4.2.2: *"If overheating occurs, Mercury API returns error code 0x504 to alert the user. The
+module protects itself by turning off RF until the temperature falls back within the allowed
+range."* § 5.4.2.3 puts the cutoff at +85 °C on the module's own sensor, above the +60 °C
+case-temperature operating limit. The guide does not say what a streaming module sends when
+this happens. If it is a `0x22` response with status `0x0504`, `StreamDecoder` counts it as a
+decode fault, the same as any other non-zero status. See
+[ADR-0035](../adr/0035-the-first-module-is-the-m7e-hecto.md#what-the-board-changes).
+
+### 28. +27 dBm, and what it takes to reach it
+
+§ 5.1.2: *"The maximum RF power that can be delivered to a 50-ohm load from the antenna port of
+the module is 0.50 Watts, or +27 dBm."* § 5.3.1 sets power *"from 0 dBm to +27 dBm, in 0.5 dB
+increments"*, calibrated at 0.5 dB and interpolated between. That is why SparkFun's page can
+quote 0.01 dB steps. § 5.2.1: *"The input Voltage should be maintained above 3.7V if the RF
+output power setting is above +26 dBm"*, and above the module's 1 A input limit the RF output
+*"is no longer reflecting the desired setting."* SparkFun's board runs from USB's 5 V.
+
+`command.rs` still says `SetReadTxPower` is *"Capped at 24 dBm on this module"*, which was the
+Pico's 0.25 W.
+
+### 29. SparkFun's library branches for this module once, and only for the region
+
+`SparkFun_UHF_RFID_Reader.h` declares `ThingMagic_M7E_HECTO` beside `ThingMagic_M6E_NANO`. The
+`.cpp` is byte-identical to the [archived copy](#sparkfun-simultaneous-rfid-tag-reader-library),
+and reads the module type in one place, `setRegion`:
+
+```c
+if(region == REGION_NORTHAMERICA && _moduleType == ThingMagic_M6E_NANO)
+    region = REGION_NORTHAMERICA2;
+```
+
+So for the Hecto it sends North America as `0x01`, which is `TMR_REGION_NA` and what
+`Region::Na` sends. The Hecto guide's Table 8 lists NA1 as its North American region. Nothing
+else on the start path SparkFun's library shares with the adapter depends on the module.
 
 ## Adding a document here
 

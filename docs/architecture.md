@@ -18,10 +18,10 @@ must keep working with the uplink unplugged.
 flowchart TB
   subgraph field["Checkpoint LAN — no Internet required"]
     direction TB
-    r1["Serial RFID module<br/>ThingMagic M7e-Pico · M3a"]
+    r1["Serial RFID module<br/>ThingMagic M7E-HECTO · M3a"]
     r2["Networked RFID reader<br/>LLRP over TCP · M3b"]
     r3["Simulator<br/><i>the only provider today</i>"]
-    pi["<b>Raspberry Pi 3</b><br/>splitforge-edge"]
+    pi["<b>Raspberry Pi 4</b><br/>splitforge-edge"]
     op["Operator<br/>CLI over SSH · local API"]
     r1 -.-> pi
     r2 -.-> pi
@@ -349,7 +349,7 @@ in SplitForge, not an outage.
 ## 6. Deployment
 
 ```text
-Raspberry Pi 3 · 64-bit Raspberry Pi OS
+Raspberry Pi 4 · 64-bit Raspberry Pi OS
 └── systemd
     └── splitforge-edge.service   Restart=always
         │                         After=network.target time-sync.target

@@ -223,8 +223,13 @@ measurements — stopped being held hostage to one.
 ### Milestone 3a — One serial reader
 
 **Gated on buying the module.** [Q9a](open-questions.md#q9a-first-serial-module) is closed —
-the ThingMagic M7e-Pico — but nothing has been ordered. The steps below that need no
-hardware did not wait for it, exactly as
+the ThingMagic M7E-HECTO, on SparkFun's USB board
+([ADR-0035](adr/0035-the-first-module-is-the-m7e-hecto.md)), with a Raspberry Pi 4 to run it
+([ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md)) — but nothing has been ordered. It
+replaced the M7e-Pico, which was chosen first and never bought, so the work below was written
+from the Pico's documents. The Hecto's say the same thing wherever this code depends on them
+([finding 23](readers/vendor-documents.md#23-the-protocol-sections-are-the-pico-guides-one-section-later-in--8)).
+The steps below that need no hardware did not wait for it, exactly as
 [ADR-0004](adr/0004-llrp-first-reader-adapter.md) argues for writing a parser against
 captures. There are nine of them, not the three this paragraph once claimed or the seven it
 claimed later.
@@ -304,11 +309,11 @@ pair of facts rather than a contradiction.
       over. Each is a counted decode fault, so a wrong assumption surfaces as no reads and a
       climbing error count on `/health` rather than as a plausible, wrong chip id in an
       append-only table. **Still unticked**: one M6e frame is not a stream
-      from an M7e-Pico, and *"believed when a capture agrees"* is a weaker claim than the one
+      from an M7E-HECTO, and *"believed when a capture agrees"* is a weaker claim than the one
       this box is for
 - [ ] Session-anchored timestamps — the module's relative value is preserved as evidence and
       is **not** authoritative; the Pi's receipt time is
-      ([the reader notes](readers/thingmagic-m7e-pico.md#timestamps)). `SessionAnchor` captures
+      ([the reader notes](readers/thingmagic-m7e-hecto.md#timestamps)). `SessionAnchor` captures
       both clocks at the instant a connection opens, per connection because that is the scope
       over which the module's counter is continuous — and the wall clock only says *when*,
       because the subtraction rests on the monotonic one
@@ -351,7 +356,9 @@ pair of facts rather than a contradiction.
       is the first time the composition root has named a protocol adapter, which is the
       dependency rule `dependency_rules.rs` reserves for it alone.
       **It records no reads**, and is worth having anyway: it is composed with
-      `UndecodedReports`, a decoder that counts frames and produces nothing, so what runs is
+      `UndecodedReports`, a decoder that counts frames and produces nothing,
+      *(since replaced: `StreamDecoder` is composed now, and reads are journaled — see
+      *Decode a tag report* above)* so what runs is
       the *connection* half of this milestone — a port that opens, a cable pulled out, a
       reconnection, each recorded as a confirmed gap. That half needs a real cable and no
       parser, and waiting for the decoder would have left it untested on hardware for no
@@ -426,7 +433,10 @@ pair of facts rather than a contradiction.
       `deploy/splitforge.modules-load.conf` loads `usbserial` at boot to prevent it. It also found
       the service had been throwing away the reason a port would not open. **Still unticked**: no
       `ttyUSB` port has been opened, because the container's kernel has no `usbserial`, and the udev
-      rule matches any USB serial adapter until the USB-UART bridge is chosen and its IDs are known
+      rule matches any USB serial adapter. The bridge is now known — the CH340C on SparkFun's
+      board, `1a86:7523` — so the rule can be narrowed; it cannot tell two identical boards apart,
+      because CH340-family bridges are not expected to carry a serial number
+      ([the reader notes](readers/thingmagic-m7e-hecto.md#deployment-notes))
 - [ ] Measure what M5 could not: whether the SD card honors `fsync`, what the second sync per
       reader report costs on real flash, what a full day's journal weighs, and what happens to
       a write in flight when the power goes
@@ -580,17 +590,17 @@ rule rather than discovered.
 **What M3a explicitly does not do:** put anything in the support matrix. Two of the nine
 criteria — a reader clock to measure offset and skew against, and per-antenna identity — are
 **structurally** unclosable on a single-port module with no clock, not merely untested. The
-gaps are named in [the reader notes](readers/thingmagic-m7e-pico.md#why-this-cannot-become-supported),
+gaps are named in [the reader notes](readers/thingmagic-m7e-hecto.md#why-this-cannot-become-supported),
 where the module sits as *experimental — under evaluation*.
 
-**One of those two is now in doubt, in the direction of being closable.** Answering the
-pre-order questions turned up vendor documentation that the *carrier board* — as opposed to
-the module — carries four switched U.FL antenna ports, which would make per-antenna identity
-reachable on one module and that criterion not structural at all. Nothing above is rewritten
-on the strength of a distributor's forum post, and it would still be a time-shared radio
-rather than two live antennas; the case is laid out in
-[the reader notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above).
-**The reader-clock criterion is untouched** — there is no clock, and no wiring changes that.
+**One of those two was briefly in doubt, and is not any more.** The Pico's pre-order questions
+had turned up documentation that its *carrier board* carried four switched U.FL ports, which
+would have made per-antenna identity reachable on one module
+([the Pico's notes](readers/thingmagic-m7e-pico.md#question-1-also-challenges-row-5-of-the-checklist-above)).
+SparkFun's Hecto board has one RF path, and the Hecto guide says the module refuses any antenna
+but 1 ([finding 26](readers/vendor-documents.md#26-one-antenna-port-stated-twice)), so the
+criterion is structural again. **The reader-clock criterion was never in doubt** — there is no
+clock, and no wiring changes that.
 
 ---
 
@@ -1587,10 +1597,11 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       **The log line is fixed**, by the start-the-stream change, which rewrote it to name the
       region and the stream it starts. **The deployment.md line is fixed** too, by the change that
       let the unit open the reader's port
-      ([ADR-0034](adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)). The M3a
-      bullet remains, and so does `crates/splitforge-thingmagic/src/provider.rs`'s module
-      documentation, which still says the crate *"ships no implementation"* of a tag-report
-      decoder.
+      ([ADR-0034](adr/0034-the-service-opens-the-readers-port-and-nothing-else.md)). **The M3a
+      bullet is annotated**, by the change that recorded the Hecto: its history stays, with a
+      note that `StreamDecoder` replaced `UndecodedReports`. What remains is
+      `crates/splitforge-thingmagic/src/provider.rs`'s module documentation, which still says the
+      crate *"ships no implementation"* of a tag-report decoder.
 
 **Checked and held**, so nobody repeats the work: every SQL statement except the `VACUUM
 INTO` above binds its parameters. There is no `unsafe`. Frame length is bounded by the wire
