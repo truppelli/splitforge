@@ -36,6 +36,12 @@
 //!
 //! `format_version` is last because appending is the one column change a positional reader
 //! survives: anything reading fields 0..12 is untouched by it.
+//!
+//! **A text cell a spreadsheet would run is written with `'` in front**
+//! ([ADR-0044](../../../docs/adr/0044-a-csv-cell-is-never-a-formula.md)): `bib`, `name` and
+//! `status_reason`, when one starts with `=`, `+`, `-`, `@`, a tab or a carriage return. Names
+//! come from public registration and this file is built to be opened in Excel. The JSON is
+//! not escaped, and neither are the columns SplitForge formats itself.
 
 // No panicking on any path reachable during an event: a corrupt frame, a missing
 // field, or an out-of-range value must become an error the caller can act on, never a
@@ -152,11 +158,11 @@ pub fn results_csv(revision: &ResultRevision) -> Result<String, ExportError> {
                 .place
                 .map(|place| place.to_string())
                 .unwrap_or_default(),
-            entry.bib.as_str().to_owned(),
-            entry.name.clone(),
+            spreadsheet_safe(entry.bib.as_str()).into_owned(),
+            spreadsheet_safe(&entry.name).into_owned(),
             entry.status.as_str().to_owned(),
             status_source(entry).to_owned(),
-            entry.status_reason.clone().unwrap_or_default(),
+            spreadsheet_safe(entry.status_reason.as_deref().unwrap_or_default()).into_owned(),
             format_optional_ms(entry.gun_time_ms),
             format_optional_ms(entry.chip_time_ms),
             format_optional_ms(entry.scoring_time_ms),
@@ -185,6 +191,21 @@ fn status_source(entry: &ResultEntry) -> &'static str {
     match entry.status_source {
         splitforge_domain::StatusSource::Derived => "derived",
         splitforge_domain::StatusSource::Declared => "declared",
+    }
+}
+
+/// `cell` as a spreadsheet will show it rather than run it: with `'` in front when it starts
+/// with a character Excel, LibreOffice or Google Sheets would read as the start of a formula
+/// (ADR-0044).
+///
+/// For text that came from outside, such as a registered name. Not for a number SplitForge
+/// formatted: an RSSI of `-60` is a number, and escaping it would make it text.
+#[must_use]
+pub fn spreadsheet_safe(cell: &str) -> std::borrow::Cow<'_, str> {
+    if cell.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        std::borrow::Cow::Owned(format!("'{cell}"))
+    } else {
+        std::borrow::Cow::Borrowed(cell)
     }
 }
 
@@ -328,6 +349,68 @@ mod tests {
                 "every row ends with the contract version: {row}"
             );
         }
+    }
+
+    #[test]
+    fn a_cell_a_spreadsheet_would_run_is_written_as_text() {
+        // The 2026-09-13 review: names come from public registration, and a runner
+        // registered as a formula became a live one on the organizer's machine.
+        for (given, written) in [
+            (
+                "=HYPERLINK(\"http://x\",\"click\")",
+                "'=HYPERLINK(\"http://x\",\"click\")",
+            ),
+            ("+1+1", "'+1+1"),
+            ("-2+3", "'-2+3"),
+            ("@SUM(A1)", "'@SUM(A1)"),
+            ("\t=1", "'\t=1"),
+            ("\r=1", "'\r=1"),
+            ("Ada Lovelace", "Ada Lovelace"),
+            ("O'Brien", "O'Brien"),
+            ("Smith-Jones", "Smith-Jones"),
+            ("", ""),
+        ] {
+            assert_eq!(spreadsheet_safe(given), written, "{given:?}");
+        }
+    }
+
+    #[test]
+    fn the_results_csv_escapes_its_text_columns_and_nothing_else() {
+        let mut runner = entry("=1+1", Some(1), ResultStatus::Finished, Some(1_100_000));
+        runner.name = "=HYPERLINK(\"http://x\")".to_owned();
+        runner.status_reason = Some("@reason".to_owned());
+        let csv = results_csv(&revision(vec![runner])).expect("csv");
+
+        let mut reader = csv::Reader::from_reader(csv.as_bytes());
+        let row = reader
+            .records()
+            .next()
+            .expect("a row")
+            .expect("a valid row");
+        let column = |name: &str| {
+            let index = RESULTS_CSV_COLUMNS
+                .iter()
+                .position(|column| *column == name)
+                .expect("a column");
+            row[index].to_owned()
+        };
+        assert_eq!(column("bib"), "'=1+1");
+        assert_eq!(column("name"), "'=HYPERLINK(\"http://x\")");
+        assert_eq!(column("status_reason"), "'@reason");
+        assert_eq!(column("place"), "1");
+        assert_eq!(column("scoring_time_ms"), "1100000");
+        assert_eq!(column("format_version"), RESULTS_VERSION.to_string());
+    }
+
+    #[test]
+    fn the_json_carries_a_name_as_it_was_registered() {
+        let mut runner = entry("101", Some(1), ResultStatus::Finished, Some(1_100_000));
+        runner.name = "=HYPERLINK(\"http://x\")".to_owned();
+        let json = results_json(&revision(vec![runner])).expect("json");
+        assert!(
+            json.contains(r#""name": "=HYPERLINK(\"http://x\")""#),
+            "{json}"
+        );
     }
 
     #[test]

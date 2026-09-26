@@ -94,6 +94,12 @@ impl Console {
 
     /// Configures a complete 5K through the CLI alone.
     async fn configure_a_five_k(&self) {
+        self.configure_a_five_k_named(|bib| format!("Runner {bib}"))
+            .await;
+    }
+
+    /// The same 5K, with each runner registered under `name_of(bib)`.
+    async fn configure_a_five_k_named(&self, name_of: impl Fn(u32) -> String) {
         self.run(&["init"]).await;
         self.run(&["event", "create", "--name", "Spring Series"])
             .await;
@@ -111,12 +117,17 @@ impl Console {
         self.run(&["checkpoint", "add", "--name", "finish", "--kind", "finish"])
             .await;
 
-        let mut roster = String::from("bib,name\n");
+        // Written with a CSV writer, so a name with a comma or a quote in it survives.
+        let mut roster = csv::Writer::from_writer(Vec::new());
+        roster.write_record(["bib", "name"]).expect("header");
         let mut chips = String::from("bib,chip\n");
         for bib in 101_u32..=112 {
-            roster.push_str(&format!("{bib},Runner {bib}\n"));
+            roster
+                .write_record([bib.to_string(), name_of(bib)])
+                .expect("row");
             chips.push_str(&format!("{bib},{}\n", chip_for(bib)));
         }
+        let roster = String::from_utf8(roster.into_inner().expect("finish")).expect("utf-8");
         let roster = self.write("participants.csv", &roster);
         let chips = self.write("assignments.csv", &chips);
 
@@ -583,6 +594,65 @@ async fn crossings_export_as_csv_with_a_row_per_crossing() {
     // JSON is the same data in the other shape.
     let json = console.json(&["export", "crossings", "--as", "json"]).await;
     assert_eq!(json.as_array().expect("an array").len(), 24);
+}
+
+#[tokio::test]
+async fn a_runner_registered_as_a_formula_is_text_in_the_crossings_csv() {
+    // The 2026-09-13 review: names come from public registration, and the CSV is opened in
+    // Excel, so a runner registered as a formula became a live one on the organizer's machine.
+    const FORMULA: &str = r#"=HYPERLINK("http://example.invalid","Runner 104")"#;
+    let console = Console::new();
+    console
+        .configure_a_five_k_named(|bib| {
+            if bib == 104 {
+                FORMULA.to_owned()
+            } else {
+                format!("Runner {bib}")
+            }
+        })
+        .await;
+    console.run(&["simulate", "--scenario", "five-k"]).await;
+
+    let destination = console.path("crossings.csv");
+    console
+        .run(&[
+            "export",
+            "crossings",
+            "--as",
+            "csv",
+            "--output",
+            &destination,
+        ])
+        .await;
+
+    let rows: Vec<csv::StringRecord> = csv::Reader::from_path(&destination)
+        .expect("read export")
+        .records()
+        .map(|record| record.expect("a valid row"))
+        .collect();
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|row| &row[3])
+        .filter(|name| name.contains("HYPERLINK"))
+        .collect();
+    assert!(!names.is_empty(), "runner 104 crossed");
+    for name in &names {
+        assert_eq!(*name, format!("'{FORMULA}"));
+    }
+    assert!(
+        rows.iter().any(|row| row[6].starts_with('-')),
+        "a negative RSSI is a number, and is not escaped"
+    );
+
+    // The JSON is not a spreadsheet, and carries the name as registered.
+    let json = console.json(&["export", "crossings", "--as", "json"]).await;
+    assert!(
+        json.as_array()
+            .expect("an array")
+            .iter()
+            .any(|row| row["name"] == FORMULA),
+        "{json}"
+    );
 }
 
 #[tokio::test]
