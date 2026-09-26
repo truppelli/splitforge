@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 use splitforge_domain::{
     Bib, Checkpoint, CheckpointId, CheckpointKind, Participant, ParticipantId, ResultEntry,
     ResultFlag, ResultStatus, ScoringPolicy, StartMode, StatusDeclaration, StatusSource,
-    TimingEvent, TimingEventId,
+    TimingEvent, TimingEventId, TimingEventOrigin,
 };
 use time::OffsetDateTime;
 
@@ -175,6 +175,9 @@ struct Crossings<'a> {
     /// The latest crossing before the gun — the one closest to it. Set aside, but kept,
     /// because it can still be the only evidence a runner started.
     before_gun: Option<&'a TimingEvent>,
+    /// The earliest chip crossing at or after the gun. When [`Self::counted`] is a manual
+    /// entry and this is set, a hand was used over a chip (ADR-0042).
+    counted_chip: Option<&'a TimingEvent>,
 }
 
 impl<'a> Crossings<'a> {
@@ -187,10 +190,43 @@ impl<'a> Crossings<'a> {
             {
                 self.before_gun = Some(event);
             }
-        } else if self.counted.is_none_or(|held| order(event) < order(held)) {
-            self.counted = Some(event);
+        } else {
+            if self.counted.is_none_or(|held| order(event) < order(held)) {
+                self.counted = Some(event);
+            }
+            if !is_manual(event)
+                && self
+                    .counted_chip
+                    .is_none_or(|held| order(event) < order(held))
+            {
+                self.counted_chip = Some(event);
+            }
         }
     }
+
+    /// The flags saying the event used from this checkpoint was typed, and whether a chip
+    /// crossing was passed over for it (ADR-0042).
+    fn manual_flags(
+        &self,
+        used: Option<&TimingEvent>,
+        manual: ResultFlag,
+        over_chip: ResultFlag,
+        flags: &mut Vec<ResultFlag>,
+    ) {
+        let Some(used) = used.filter(|event| is_manual(event)) else {
+            return;
+        };
+        flags.push(manual);
+        let used_is_counted = self.counted.is_some_and(|counted| counted.id == used.id);
+        if used_is_counted && self.counted_chip.is_some() {
+            flags.push(over_chip);
+        }
+    }
+}
+
+/// Whether an operator entered this event rather than a chip producing it.
+const fn is_manual(event: &TimingEvent) -> bool {
+    matches!(event.origin, TimingEventOrigin::Manual { .. })
 }
 
 /// Finds the one checkpoint of a kind, or reports that there are several.
@@ -265,9 +301,21 @@ fn build_entry(
         }
         _ => (None, None),
     };
+    at_start.manual_flags(
+        start_event,
+        ResultFlag::ManualStart,
+        ResultFlag::ManualStartOverChip,
+        &mut flags,
+    );
 
     // A finish detected only before the gun is a warm-up, not a finish.
     let finish_event = at_finish.counted;
+    at_finish.manual_flags(
+        finish_event,
+        ResultFlag::ManualFinish,
+        ResultFlag::ManualFinishOverChip,
+        &mut flags,
+    );
     if finish_event.is_none() && at_finish.before_gun.is_some() {
         flags.push(ResultFlag::FinishReadBeforeGun);
     }
@@ -535,6 +583,129 @@ mod tests {
             policy,
         })
         .expect("scoreable course")
+    }
+
+    fn typed(participant: &Participant, checkpoint: &Checkpoint, seconds: i64) -> TimingEvent {
+        TimingEvent::from_manual(
+            participant.id,
+            checkpoint.id,
+            at(seconds),
+            1,
+            splitforge_domain::ManualEntryId::new(),
+        )
+    }
+
+    #[test]
+    fn a_finish_typed_in_for_a_chip_that_missed_is_used_and_says_so() {
+        // ADR-0023's case: the chip stopped reporting, a marshal saw the finish.
+        let course = course();
+        let runner = runner(&course, "109");
+        let events = vec![
+            crossing(&runner, &course.start, 5),
+            typed(&runner, &course.finish, 1_600),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(entries[0].gun_time_ms, Some(1_600_000));
+        assert_eq!(entries[0].place, Some(1));
+        assert_eq!(entries[0].flags, vec![ResultFlag::ManualFinish]);
+    }
+
+    #[test]
+    fn a_typed_finish_that_beats_a_chip_finish_is_flagged_for_it() {
+        // The 2026-09-13 review's reproduction: a chip finish at 20:00, a manual entry at 18:20
+        // for the same checkpoint. Scoring still takes the earlier (ADR-0042), and the result
+        // now says a hand was used over a chip, where before it was identical to a chip result.
+        let course = course();
+        let runner = runner(&course, "104");
+        let events = vec![
+            crossing(&runner, &course.start, 5),
+            crossing(&runner, &course.finish, 1_200),
+            typed(&runner, &course.finish, 1_100),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(
+            entries[0].gun_time_ms,
+            Some(1_100_000),
+            "scoring is unchanged"
+        );
+        assert_eq!(
+            entries[0].flags,
+            vec![ResultFlag::ManualFinish, ResultFlag::ManualFinishOverChip]
+        );
+    }
+
+    #[test]
+    fn a_typed_finish_later_than_the_chip_finish_changes_nothing_and_flags_nothing() {
+        let course = course();
+        let runner = runner(&course, "101");
+        let events = vec![
+            crossing(&runner, &course.start, 5),
+            crossing(&runner, &course.finish, 1_200),
+            typed(&runner, &course.finish, 1_300),
+        ];
+
+        let entries = run(&course, &[runner], &events, &[], &gun_policy());
+
+        assert_eq!(entries[0].gun_time_ms, Some(1_200_000));
+        assert!(entries[0].flags.is_empty(), "{:?}", entries[0].flags);
+    }
+
+    #[test]
+    fn a_typed_start_is_flagged_and_so_is_one_used_over_a_chip_start() {
+        let course = course();
+        let alone = runner(&course, "201");
+        let over = runner(&course, "202");
+        let events = vec![
+            typed(&alone, &course.start, 10),
+            crossing(&alone, &course.finish, 1_200),
+            crossing(&over, &course.start, 30),
+            typed(&over, &course.start, 20),
+            crossing(&over, &course.finish, 1_250),
+        ];
+
+        let entries = run(
+            &course,
+            &[alone.clone(), over.clone()],
+            &events,
+            &[],
+            &chip_policy(),
+        );
+        let flags_of = |bib: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.bib.as_str() == bib)
+                .expect("an entry")
+                .flags
+                .clone()
+        };
+
+        assert_eq!(flags_of("201"), vec![ResultFlag::ManualStart]);
+        assert_eq!(
+            flags_of("202"),
+            vec![ResultFlag::ManualStart, ResultFlag::ManualStartOverChip]
+        );
+    }
+
+    #[test]
+    fn the_new_flags_have_the_names_the_exports_carry() {
+        // The labels are the export contract's vocabulary (ADR-0042 § 4).
+        for (flag, label) in [
+            (ResultFlag::ManualStart, "manual_start"),
+            (ResultFlag::ManualFinish, "manual_finish"),
+            (ResultFlag::ManualStartOverChip, "manual_start_over_chip"),
+            (ResultFlag::ManualFinishOverChip, "manual_finish_over_chip"),
+        ] {
+            assert_eq!(flag.label(), label);
+            assert_eq!(
+                serde_json::to_value(flag).expect("serialize"),
+                serde_json::json!({ "flag": label }),
+                "the serde tag the JSON export carries"
+            );
+        }
     }
 
     #[test]

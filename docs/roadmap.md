@@ -1564,7 +1564,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       [Threat model § 5](threat-model.md#5-design-decisions-that-follow-from-this-model)
       relies on detecting insider fabrication afterward, and that detection depends on
       attribution. *Fix:* record `SUDO_USER` and the uid beside the claimed actor.
-- [ ] **A manual finish replaces a chip finish, and nothing in the published result says
+- [x] **A manual finish replaces a chip finish, and nothing in the published result says
       so.** *Reproduced.* Scoring the same runner with a chip finish at 20:00 alone, then with
       a manual entry at 18:20 added, gave identical rows apart from the time. Both had
       place 1 and no flags. `score` chooses the earliest event regardless of
@@ -1575,6 +1575,18 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       refuses an empty reason and the CLI help calls it *"Required"*. *Fix:* add a
       `manual_start`/`manual_finish` flag. Flag it more strongly when a manual entry beats a
       chip crossing at the same checkpoint. Refuse a blank reason the way `declare` does.
+      **Fixed by [ADR-0042](adr/0042-a-result-says-when-its-time-was-typed.md), without
+      changing what is scored.** An operator may type a time on purpose, so the earliest crossing
+      at or after the gun still counts whatever produced it. What changed is that the result says
+      so: `manual_start` and `manual_finish` when a time in use was typed, and
+      `manual_start_over_chip` or `manual_finish_over_chip` beside them when a chip crossed the
+      same line at or after the gun and the typed time beat it. They reach the CSV's `flags`
+      column, the JSON and `results show`. `RESULTS_VERSION` stays 1, by the contract's own rule:
+      `flags` keeps its meaning and gains values. `manual add` now refuses a blank reason, as
+      `results declare` does. Six scoring tests hold the flags. Two CLI tests reproduce the finding
+      end to end, a typed 08:10:00 over bib 104's chip finish reaching the exported CSV flagged, and
+      the blank reason refused. Both fail against `1ebf2be`, and the scoring tests use flags that
+      did not exist there
 - [x] **The CI advisory gate audits a different lockfile from the one that ships.** *From
       code.* `cargo generate-lockfile` in `.github/workflows/ci.yml` re-resolves every
       dependency before `cargo audit` runs. A vulnerable version pinned in the committed

@@ -409,6 +409,106 @@ async fn an_unknown_checkpoint_is_refused_and_lists_the_ones_there_are() {
 }
 
 /// Runs the binary and returns its stderr and whether it succeeded.
+#[tokio::test]
+async fn an_entry_with_no_reason_is_refused_before_anything_is_written() {
+    // The 2026-09-13 review: `results declare` refused a blank reason and `manual add` did not,
+    // although its help calls the reason required.
+    let device = Device::new().await;
+
+    for blank in ["", "   "] {
+        let (stderr, ok) = run(
+            &[
+                "manual",
+                "add",
+                "--bib",
+                UNFINISHED,
+                "--checkpoint",
+                "finish",
+                "--at",
+                "2026-04-11T08:26:41Z",
+                "--reason",
+                blank,
+            ],
+            &device.database,
+        )
+        .await;
+        assert!(!ok, "a typed time with no reason must not be recorded");
+        assert!(
+            stderr.contains("--reason must say something"),
+            "got: {stderr}"
+        );
+        assert!(!stderr.contains("  "), "a lost line continuation: {stderr}");
+    }
+
+    let listing = device.json(&["manual", "list"]).await;
+    assert_eq!(listing["entries"], 0, "nothing may be left behind");
+}
+
+#[tokio::test]
+async fn a_typed_finish_that_beats_a_chip_finish_says_so_in_what_is_published() {
+    // The 2026-09-13 review's reproduction, end to end (ADR-0042). Bib 104's chip finished at
+    // 08:17:32. A time typed for the same checkpoint at 08:10:00 is still the one scored, and
+    // the published row and the exported CSV now both say a hand was used over a chip.
+    let device = Device::new().await;
+    device
+        .run_ok(&[
+            "manual",
+            "add",
+            "--bib",
+            "104",
+            "--checkpoint",
+            "finish",
+            "--at",
+            "2026-04-11T08:10:00Z",
+            "--reason",
+            "copied from the marshal sheet",
+        ])
+        .await;
+    device
+        .run_ok(&[
+            "results",
+            "publish",
+            "--status",
+            "provisional",
+            "--reason",
+            "provisional results",
+        ])
+        .await;
+
+    let row = device.row_for("1", "104").await;
+    assert_eq!(
+        row["finish_at"], "2026-04-11T08:10:00Z",
+        "scoring is unchanged: {row}"
+    );
+    let shown = row.to_string();
+    assert!(shown.contains("manual_finish_over_chip"), "{row}");
+    assert!(shown.contains("\"manual_finish\""), "{row}");
+
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("results.csv");
+    device
+        .run_ok(&[
+            "export",
+            "results",
+            "--as",
+            "csv",
+            "--output",
+            path.to_str().expect("utf-8"),
+        ])
+        .await;
+    let csv = std::fs::read_to_string(&path).expect("read the export");
+    let line = csv
+        .lines()
+        .find(|line| line.split(',').nth(1) == Some("104"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no row for 104:
+{csv}"
+            )
+        });
+    assert!(line.contains("manual_finish_over_chip"), "{line}");
+}
+
 async fn run(args: &[&str], database: &Path) -> (String, bool) {
     let output = Command::new(BINARY)
         .args(args)

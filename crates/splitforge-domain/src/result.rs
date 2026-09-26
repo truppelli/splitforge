@@ -254,6 +254,24 @@ pub enum ResultFlag {
     /// Usually a warm-up through the finish arch. The detection is set aside rather than
     /// discarded, and this flag is how the entry says so.
     FinishReadBeforeGun,
+    /// The start this result is measured from was entered by hand (ADR-0042).
+    ///
+    /// The entry is one `manual list` away, with who typed it and why.
+    ManualStart,
+    /// The finish was entered by hand (ADR-0042).
+    ManualFinish,
+    /// A chip crossed the start line at or after the gun, and an earlier manual entry was used
+    /// instead (ADR-0042).
+    ///
+    /// Carried beside [`Self::ManualStart`]. A hand beating a chip is the combination most
+    /// likely to be a typo.
+    ManualStartOverChip,
+    /// A chip crossed the finish at or after the gun, and an earlier manual entry was used
+    /// instead (ADR-0042).
+    ///
+    /// Carried beside [`Self::ManualFinish`]. The case the 2026-09-13 review reproduced: a
+    /// typed time that moves a runner up the results.
+    ManualFinishOverChip,
 }
 
 impl ResultFlag {
@@ -267,6 +285,10 @@ impl ResultFlag {
             Self::DeclaredFinishedWithoutFinishRead => "declared_finished_without_finish_read",
             Self::StartReadBeforeGun => "start_read_before_gun",
             Self::FinishReadBeforeGun => "finish_read_before_gun",
+            Self::ManualStart => "manual_start",
+            Self::ManualFinish => "manual_finish",
+            Self::ManualStartOverChip => "manual_start_over_chip",
+            Self::ManualFinishOverChip => "manual_finish_over_chip",
         }
     }
 }
