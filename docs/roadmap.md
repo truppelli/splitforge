@@ -453,7 +453,11 @@ pair of facts rather than a contradiction.
       each read's `raw_payload` with the journal's reads received in the capture's span, set-aside
       reads included. The verdict is `agree`, `disagree` or `incomplete`, and so is the exit
       status. Ticked as a tool: `apps/splitforge-edge/tests/capture_check.rs` runs it over each
-      verdict, and the replay reads back a capture a real `Capture` wrote
+      verdict, and the replay reads back a capture a real `Capture` wrote.
+      **It also times the module now**, for [Q14](open-questions.md#q14-reader-silence-threshold):
+      the interval between end-of-cycle frames and between frames of any kind, per connection, on
+      the capture's monotonic offsets. The first bench session reads the period Q14 waits on
+      from its own capture
 
 **Needs the module:**
 

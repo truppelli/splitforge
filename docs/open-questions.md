@@ -245,6 +245,14 @@ it: start the stream with nothing in the field, and time the end-of-cycle frames
 once a second, this question stops being a race policy, and the threshold becomes a small
 multiple of the period.
 
+**The timing is one command now — 2026-09-26.** `splitforge-capture check` reports
+`end_of_cycle_every`, the interval from one end-of-cycle frame to the next, and
+`between_frames`, from one frame of any kind to the next, each with its count, shortest, mean and
+longest in milliseconds. Both are measured within a connection on the capture's monotonic
+offsets. [Session 2](readers/thingmagic-m7e-hecto-bench.md#session-2-first-contact) of the bench
+runbook reads them. Nothing is decided by it: it makes the measurement this question waits on
+cheap to take and hard to take wrongly.
+
 ---
 
 ## Resolved

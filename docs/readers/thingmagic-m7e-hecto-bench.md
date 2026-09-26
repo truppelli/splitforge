@@ -91,17 +91,21 @@ journalctl -u splitforge-edge -f
 *"the reader applied a read power of … dBm, and accepts … to … dBm"*, and no refusal. On
 `/health`: `reader.state` `connected`, and `reader.read_power` present.
 
-With **no tag near the board**, for two minutes:
+With **no tag near the board**, for two minutes, then check the capture:
 
 ```bash
-grep -c '< ff[0-9a-f]\{2\}220400' /var/lib/splitforge/session-2.capture
+sudo splitforge-capture check /var/lib/splitforge/session-2.capture --reader mat   | jq '.capture | {end_of_cycle, end_of_cycle_every, between_frames}'
 ```
 
-A count near 120 is the end-of-cycle frame at about one a second
+`end_of_cycle` near 120, and `end_of_cycle_every.mean_ms` near 1000, is the end-of-cycle frame
+at about one a second
 ([finding 17](vendor-documents.md#17-an-empty-field-produces-a-frame-at-the-end-of-every-search-cycle)),
 and the liveness signal [Q14](../open-questions.md#q14-reader-silence-threshold) waits on. Zero
-means it does not exist on this module, which is as useful to know. (A frame split across two
-reads is missed by the `grep`, so the count is a floor.)
+means it does not exist on this module, which is as useful to know. `between_frames.longest_ms`
+is the longest the module went without sending anything while connected, which is the number a
+threshold for presuming it gone has to sit comfortably above. The intervals are measured within
+each connection, on the capture's monotonic offsets, so a clock step or an unplugged cable does
+not move them. Ignore the verdict for now: no tag has been read, so there is nothing to compare.
 
 **Then one tag against the board**, for thirty seconds:
 
@@ -123,7 +127,7 @@ frame was split.
   chip, antenna and RSSI it decodes to. The decoder is then anchored on this module, not an M6e.
 - *Framing before semantics*: every frame verified, so the CRC is this module's too.
 - The power read-back: what the module says it applied, and the range it accepts.
-- Finding 17, either way.
+- Finding 17, either way, with the period and the longest quiet: Q14's measurement.
 
 If a step is refused, the log names it and the status. That is a finding, not a failure: keep
 the capture, and stop.
