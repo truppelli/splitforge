@@ -7,6 +7,7 @@ use std::time::Duration as StdDuration;
 use anyhow::{Context, Result, bail};
 use splitforge_domain::{CheckpointKind, RaceConfig, RawReadJournal, StartMode};
 use splitforge_engine::{DerivationInput, derive};
+use splitforge_export::spreadsheet_safe;
 use splitforge_storage::{ConfigStore, DiskSpace, RecoveryReport, SqliteJournal};
 
 use crate::cli::{ExportFormat, Format};
@@ -599,13 +600,15 @@ pub(crate) fn export_crossings(
             for row in &rows {
                 writer
                     .write_record([
-                        row.checkpoint.clone(),
+                        // Text from outside is escaped as the results CSV escapes it
+                        // (ADR-0044); the RSSI is a number and is negative, so it is not.
+                        spreadsheet_safe(&row.checkpoint).into_owned(),
                         row.at
                             .format(&time::format_description::well_known::Rfc3339)
                             .unwrap_or_default(),
-                        row.bib.clone().unwrap_or_default(),
-                        row.name.clone().unwrap_or_default(),
-                        row.chip.as_str().to_owned(),
+                        spreadsheet_safe(row.bib.as_deref().unwrap_or_default()).into_owned(),
+                        spreadsheet_safe(row.name.as_deref().unwrap_or_default()).into_owned(),
+                        spreadsheet_safe(row.chip.as_str()).into_owned(),
                         row.lap.map(|lap| lap.to_string()).unwrap_or_default(),
                         row.rssi_dbm.map(|r| r.to_string()).unwrap_or_default(),
                         row.burst_reads.to_string(),

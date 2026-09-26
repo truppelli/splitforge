@@ -1519,12 +1519,23 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       start of a line, or zeros, are still damage, and the line behind them is still kept.
       Nothing writes to the file, and a sidecar already in this state reads correctly
       ([ADR-0018, amended](adr/0018-write-ahead-sidecar-journal.md#the-line-format)).
-- [ ] **CSV exports do not neutralize spreadsheet formulas.** *From code.* `results_csv` and
+- [x] **CSV exports do not neutralize spreadsheet formulas.** *From code.* `results_csv` and
       the crossings export write names as given, and names come from public registration.
       The results CSV is built to be opened in Excel (see Milestone 6), so a runner registered
       as `=HYPERLINK(…)` becomes a live formula on the organizer's machine. *Fix:* prefix
       cells that start with `=` `+` `-` `@`, tab, or carriage return. That changes values in a
       stable contract, so decide it under `RESULTS_VERSION`'s rules.
+      **Fixed by [ADR-0044](adr/0044-a-csv-cell-is-never-a-formula.md), and `RESULTS_VERSION`
+      stays 1.** `spreadsheet_safe` puts `'` in front of such a cell. It is applied to the text
+      that came from outside: `bib`, `name` and `status_reason` in the results CSV, and
+      `checkpoint`, `bib`, `name` and `chip` in the crossings CSV. Columns SplitForge formats are
+      not escaped, because the crossings RSSI is a negative number. The JSON is not escaped. No
+      column changed meaning, so the contract's rule does not ask for a bump, as ADR-0042 read it
+      for flags. Two tests reproduce the finding and fail on `74a6aab`, where both CSV writers
+      are as they were at `b457991`: a results row whose bib is `=1+1` was written `=1+1`, and a
+      runner registered as `=HYPERLINK(…)` reached the crossings CSV as a live formula. One more
+      test holds the JSON unescaped and passes on both. A fourth lists the escaped characters and
+      calls the function this change added
 - [x] **`backup restore` trusts the snapshot's schema.** *From code.* `verify` checks
       `integrity_check` and the maximum migration version and nothing else. A snapshot whose
       `*_no_update` or `*_no_delete` triggers were dropped, or that adds triggers of its own,
