@@ -1,6 +1,6 @@
 # ADR-0045: A reader that says nothing at all is a different gap from one that reads nothing
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Extends:** [ADR-0025](0025-m3a-proves-durability-above-the-transport.md), [ADR-0026](0026-a-reader-gap-is-two-rows.md)
 
