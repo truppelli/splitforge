@@ -21,6 +21,11 @@ thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true
 
+# The process's real uid for the audit trail (ADR-0043). `getuid` by hand would need
+# `unsafe`, denied workspace-wide. Already in the tree for the pseudo-terminal tests.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [lints]
 workspace = true
 

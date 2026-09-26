@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use time::OffsetDateTime;
 
 use crate::StorageError;
+use crate::identity::ProcessIdentity;
 use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
 
 /// Opens (creating if absent) the event database at `path`, applying pending migrations.
@@ -200,7 +201,8 @@ fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Appends one row to the audit trail on `conn`.
+/// Appends one row to the audit trail on `conn`, with who the operating system says wrote it
+/// beside who `actor` claims did (ADR-0043).
 ///
 /// Shared by both connection holders, and taking a plain connection so a [`rusqlite::Transaction`]
 /// can pass itself. That is what lets the journal write its audit row inside the transaction
@@ -213,10 +215,22 @@ pub(crate) fn insert_audit(
     detail: Option<&str>,
 ) -> Result<(), StorageError> {
     let now = to_micros(OffsetDateTime::now_utc())?;
+    let identity = ProcessIdentity::current();
     conn.execute(
-        "INSERT INTO audit_log (at_us, actor, action, subject, detail_json, recorded_at_us)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![now, actor, action, subject, detail, now],
+        "INSERT INTO audit_log (at_us, actor, action, subject, detail_json, recorded_at_us,
+                                process_uid, sudo_user, sudo_uid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            now,
+            actor,
+            action,
+            subject,
+            detail,
+            now,
+            identity.uid,
+            identity.sudo_user,
+            identity.sudo_uid
+        ],
     )?;
     Ok(())
 }

@@ -116,6 +116,15 @@ CLI has to run as the service account:
 sudo -u splitforge splitforge --database /var/lib/splitforge/event.db doctor
 ```
 
+**Every audit row records who ran it, as well as who it says ran it**
+([ADR-0043](adr/0043-the-audit-trail-records-who-the-system-says-acted.md)). `--actor` is a
+name the command is told, and defaults to `operator`. Beside it, `splitforge audit` shows the
+uid the command ran as and, when sudo started it, the login and uid sudo was invoked from. So
+each operator should run the CLI through `sudo` from their own login, not from a shared one,
+and not from a shell as `splitforge`. **Leave sudo's `env_reset` on for this account**, and do
+not add `SUDO_USER` or `SUDO_UID` to `env_keep` or allow `SETENV`. Those would let the caller
+choose what the audit trail records as the invoking login.
+
 > **Known gap.** Files the CLI creates follow the invoking shell's umask, which on a default
 > Raspberry Pi OS install is `0022` — world-readable. The service's own `UMask=0007` does not
 > apply to it. The sidecar is the exception, because it asks for `0640` whoever creates it.

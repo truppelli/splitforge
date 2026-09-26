@@ -50,6 +50,7 @@ this?" two years from now, the ADR is the answer.
 | [0040](0040-a-serial-session-can-be-captured-byte-for-byte.md) | A serial session can be captured byte for byte, beside the evidence and never in it | Accepted |
 | [0041](0041-a-capture-is-checked-against-the-journal-by-payload.md) | A capture is checked against the journal by what each read was decoded from | Accepted |
 | [0042](0042-a-result-says-when-its-time-was-typed.md) | A result says when its time was typed | Accepted |
+| [0043](0043-the-audit-trail-records-who-the-system-says-acted.md) | The audit trail records who the system says acted, beside who the command was told | Proposed |
 
 ## Process
 
