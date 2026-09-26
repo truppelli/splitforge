@@ -37,6 +37,12 @@
 //! Output is JSON on stdout, unconditionally, except for CSV exports. Being scriptable and
 //! diffable is what lets "re-derive after a restart and compare" be an assertion.
 
+// No panicking on any path reachable during an event: a corrupt frame, a missing
+// field, or an out-of-range value must become an error the caller can act on, never a
+// timer that stops mid-race. Test code is exempt, where panicking on the unexpected is
+// the point. See CONTRIBUTING.md, "Code standards".
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 mod bundle;
 mod cli;
 mod clock_source;
