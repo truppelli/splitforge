@@ -313,6 +313,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                     )
                 }
                 ReaderCommand::List => emit(&store.readers()?, format),
+                ReaderCommand::Gaps { limit } => {
+                    let journal = open_journal(&database)?;
+                    let gaps = journal.recent_reader_gaps(limit)?;
+                    emit(&report::ReaderGapsView::of(&gaps), format)
+                }
                 ReaderCommand::Status { window_secs } => {
                     let journal = open_journal(&database)?;
                     let reads = journal.read_all()?;

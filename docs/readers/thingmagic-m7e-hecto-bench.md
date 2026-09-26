@@ -140,19 +140,14 @@ With the service running and a tag against the board:
 capture an `error` or `eof` line and a `close`. On each return, `connected`, the gap closed, and
 reads resuming. On each restart, recovery reports nothing to replay.
 
-**Keep:** the capture, the log, and the gaps, until a command lists them (see
-[Tooling still missing](#tooling-still-missing)):
+**Keep:** the capture, the log, and the gaps:
 
 ```bash
-sf backup create /tmp/snap.db
-sudo sqlite3 /tmp/snap.db "
-  SELECT o.seq, o.detection,
-         datetime(o.observed_at_us / 1e6, 'unixepoch') AS opened,
-         (c.observed_at_us - o.observed_at_us) / 1000 AS lasted_ms
-  FROM reader_gap_events o
-  LEFT JOIN reader_gap_events c ON c.closes_seq = o.seq
-  WHERE o.edge = 'opened' ORDER BY o.seq;"
+sf reader gaps
 ```
+
+It lists them newest first with how each was noticed and how long it lasted, and counts the
+confirmed, the suspected, and any still open at the top.
 
 **Closes:**
 - *`ReaderProvider` on top of the codec*: what an unplugged CH340C returns, which the capture's
@@ -268,7 +263,7 @@ sf status                     # raw_reads
 ls -l /var/lib/splitforge     # what a day weighs: the database, the sidecar, the capture
 ```
 
-and the gap query from session 3: one confirmed, bounded gap per pull, and suspected ones only
+and `sf reader gaps --limit 200`: one confirmed, bounded gap per pull, and suspected ones only
 where the stream was quiet.
 
 **Closes**, once the reconciliation below can be done:
@@ -279,11 +274,10 @@ where the stream was quiet.
 
 ## Tooling still missing
 
-Writing this runbook found three things the exit run needs that do not exist yet. Each can be
-built without hardware, and should be before session 7:
+Writing this runbook found three things the exit run needs. Each can be built without hardware,
+and should be before session 7:
 
-1. **A command that lists reader gaps.** `/health` shows the one open now. Everything else is the
-   SQL in session 3, against a snapshot.
+1. ~~**A command that lists reader gaps.**~~ Built: `splitforge reader gaps`.
 2. **Reconciling a capture with the journal.** *"The journal never disagrees with what arrived"*
    is proved by decoding every frame the capture holds, with the same reassembler and decoder,
    and comparing the reads with `raw_reads`. Nothing does that yet. Until it does, the proof is

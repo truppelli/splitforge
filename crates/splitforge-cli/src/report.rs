@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use splitforge_domain::{
     AcceptedRead, AcceptedReadId, Checkpoint, ChipId, Derivation, DeviceClockState, Event,
-    ManualEntryId, ParticipantId, Race, RaceConfig, RaceSession, RawReadId, Reader, ReaderId,
-    StoredClockStep, StoredManualEntry, StoredRawRead, TimestampSource, TimingEventOrigin,
-    TimingPolicy,
+    GapDetection, ManualEntryId, ParticipantId, Race, RaceConfig, RaceSession, RawReadId, Reader,
+    ReaderGap, ReaderId, StoredClockStep, StoredManualEntry, StoredRawRead, TimestampSource,
+    TimingEventOrigin, TimingPolicy,
 };
 use splitforge_storage::{AuditEntry, ImportSummary};
 use time::OffsetDateTime;
@@ -30,6 +30,85 @@ pub struct InitReport {
     pub reads: u64,
     /// Races already configured.
     pub races: usize,
+}
+
+/// Recorded reader gaps, newest first, with the counts an operator reads first.
+///
+/// The question it answers after a bench session with pulled cables is *was every
+/// disconnection recorded, and did each end*: one confirmed gap per pull, and `open` at zero
+/// once the reader is back.
+#[derive(Debug, Serialize)]
+pub(crate) struct ReaderGapsView {
+    /// How many are listed here.
+    pub(crate) gaps: usize,
+    /// Of those, how many have not ended.
+    pub(crate) open: usize,
+    /// Of those, how many a transport reported: the port went, which is a fact.
+    pub(crate) confirmed: usize,
+    /// Of those, how many silence suggested: a quiet stream, which a checkpoint nobody is
+    /// crossing also produces.
+    pub(crate) suspected: usize,
+    /// The longest that ended, in milliseconds.
+    pub(crate) longest_ms: Option<u64>,
+    /// The gaps themselves.
+    pub(crate) entries: Vec<ReaderGapView>,
+}
+
+/// One recorded gap.
+#[derive(Debug, Serialize)]
+pub(crate) struct ReaderGapView {
+    /// The sequence of its opening row, which is its identity.
+    pub(crate) seq: u64,
+    /// Which reader stopped producing.
+    pub(crate) reader: ReaderId,
+    /// How it was noticed. Never revised.
+    pub(crate) detection: GapDetection,
+    /// When the reader stopped producing.
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) started_at: OffsetDateTime,
+    /// When it resumed, or `null` while it has not.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub(crate) ended_at: Option<OffsetDateTime>,
+    /// How long it lasted by the wall clock, or `null` while open.
+    pub(crate) duration_ms: Option<u64>,
+    /// Whether it has not ended.
+    pub(crate) open: bool,
+    /// What the opening row could say about the cause.
+    pub(crate) detail: Option<String>,
+}
+
+impl ReaderGapsView {
+    /// Builds the view from what storage returned.
+    #[must_use]
+    pub(crate) fn of(gaps: &[ReaderGap]) -> Self {
+        let entries: Vec<ReaderGapView> = gaps
+            .iter()
+            .map(|gap| ReaderGapView {
+                seq: gap.opened_seq,
+                reader: gap.reader_id.clone(),
+                detection: gap.detection,
+                started_at: gap.started_at,
+                ended_at: gap.ended_at,
+                duration_ms: gap.duration_ms(),
+                open: gap.is_open(),
+                detail: gap.detail.clone(),
+            })
+            .collect();
+        let counting = |detection| {
+            entries
+                .iter()
+                .filter(|entry| entry.detection == detection)
+                .count()
+        };
+        Self {
+            gaps: entries.len(),
+            open: entries.iter().filter(|entry| entry.open).count(),
+            confirmed: counting(GapDetection::Confirmed),
+            suspected: counting(GapDetection::Suspected),
+            longest_ms: entries.iter().filter_map(|entry| entry.duration_ms).max(),
+            entries,
+        }
+    }
 }
 
 /// One recorded wall-clock discontinuity, as an operator wants to see it.
