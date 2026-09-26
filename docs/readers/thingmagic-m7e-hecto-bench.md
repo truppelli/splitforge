@@ -266,7 +266,20 @@ ls -l /var/lib/splitforge     # what a day weighs: the database, the sidecar, th
 and `sf reader gaps --limit 200`: one confirmed, bounded gap per pull, and suspected ones only
 where the stream was quiet.
 
-**Closes**, once the reconciliation below can be done:
+and, for the criterion's middle clause, the whole capture against the journal
+([ADR-0041](../adr/0041-a-capture-is-checked-against-the-journal-by-payload.md)):
+
+```bash
+sudo splitforge-capture check /var/lib/splitforge/session-7.capture --reader mat
+```
+
+It replays the capture with the service's own reassembler and decoder, and compares the reads,
+payload for payload, with the journal's reads received in the same span. `agree` (exit 0) is the
+criterion met. `disagree` (exit 1) lists the payloads on one side and not the other. `incomplete`
+(exit 2) means the capture dropped records, so it cannot vouch for the journal: run it again with
+a sparser stream.
+
+**Closes**:
 - the M3a exit criterion;
 - the *Needs the module* measurements: whether the card honours `fsync` (the power cuts), what
   the second sync costs (`recorded_at_us - received_at_us` on the snapshot), what a day's
@@ -274,14 +287,12 @@ where the stream was quiet.
 
 ## Tooling still missing
 
-Writing this runbook found three things the exit run needs. Each can be built without hardware,
-and should be before session 7:
+Writing this runbook found three things the exit run needs. Two are built. The third can be built
+without hardware, and should be before session 7:
 
 1. ~~**A command that lists reader gaps.**~~ Built: `splitforge reader gaps`.
-2. **Reconciling a capture with the journal.** *"The journal never disagrees with what arrived"*
-   is proved by decoding every frame the capture holds, with the same reassembler and decoder,
-   and comparing the reads with `raw_reads`. Nothing does that yet. Until it does, the proof is
-   `reads_received` against `reads_persisted` per process, which a restart resets.
+2. ~~**Reconciling a capture with the journal.**~~ Built: `splitforge-capture check`, in
+   session 7.
 3. **`doctor` and the bundle within the Pi's memory** on a journal of millions of reads, or a
    stream kept small enough that it does not matter.
 

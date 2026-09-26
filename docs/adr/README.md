@@ -48,6 +48,7 @@ this?" two years from now, the ADR is the answer.
 | [0038](0038-each-connection-sets-the-read-power-the-operator-chose.md) | Each connection sets the read power the operator chose | Accepted |
 | [0039](0039-raceday-connect-publishes-what-splitforge-derived.md) | RaceDay Connect publishes what SplitForge derived, a runner at a time | Proposed |
 | [0040](0040-a-serial-session-can-be-captured-byte-for-byte.md) | A serial session can be captured byte for byte, beside the evidence and never in it | Accepted |
+| [0041](0041-a-capture-is-checked-against-the-journal-by-payload.md) | A capture is checked against the journal by what each read was decoded from | Accepted |
 
 ## Process
 

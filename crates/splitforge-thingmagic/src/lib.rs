@@ -84,7 +84,7 @@ pub mod reassembly;
 pub mod start;
 pub mod tag_report;
 
-pub use capture::{Capture, capturing};
+pub use capture::{Capture, Replay, capturing, replay};
 pub use command::{
     Command, InvalidReadPower, OpCode, PowerReport, ReadPower, Region, UnknownRegion,
     antenna_ports, search_flag,
