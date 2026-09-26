@@ -1525,12 +1525,26 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       as `=HYPERLINK(…)` becomes a live formula on the organizer's machine. *Fix:* prefix
       cells that start with `=` `+` `-` `@`, tab, or carriage return. That changes values in a
       stable contract, so decide it under `RESULTS_VERSION`'s rules.
-- [ ] **`backup restore` trusts the snapshot's schema.** *From code.* `verify` checks
+- [x] **`backup restore` trusts the snapshot's schema.** *From code.* `verify` checks
       `integrity_check` and the maximum migration version and nothing else. A snapshot whose
       `*_no_update` or `*_no_delete` triggers were dropped, or that adds triggers of its own,
       restores cleanly, and migrations do not run again. No connection sets
       `PRAGMA trusted_schema=OFF`. *Fix:* compare `sqlite_master` with the schema the
       migrations produce, in `restore` and in `doctor`, and turn off trusted schema.
+      **Fixed.** Every table, index, trigger and view in the file is compared, by kind, name and
+      SQL, with what the migrations create at the version the file records. So a snapshot from an
+      older build is compared with its own version's schema, and migrated when opened. Each
+      difference is one line: missing, defined differently, or not one the migrations create.
+      `backup restore` refuses a snapshot with any, as `SchemaAltered`, before anything is
+      displaced. `doctor` reports each as a `database.schema` error. It is kept off the bundle's
+      allowlist, because an added object's name is whatever its author chose. Every connection
+      SplitForge opens, and the one `verify` opens on a snapshot, sets `trusted_schema = OFF`.
+      `backup create` does not compare, so a live database somebody altered can still be
+      snapshotted. Five storage tests cover a dropped trigger, an added one, a rewritten one, an
+      older snapshot, and the pragma. They call what this change added, so they have nothing to
+      run against at `b457991`. Two CLI tests run the binary. On `e0c3c48`, where `verify` and
+      `doctor` look at the schema exactly as they did at `b457991`, both fail: `doctor` found nothing wrong with a dropped
+      `raw_reads_no_update`, and `backup restore --replace` restored the snapshot that lacked it
 - [x] **Framing and decode fault counts never leave the provider thread.** *From code.*
       `Reassembler::stats()` and `StreamDecoder::errors()` are read only in tests, and a
       single `eprintln!` reports the first fault. So M3a's claim that a wrong assumption shows

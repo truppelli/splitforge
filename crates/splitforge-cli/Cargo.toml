@@ -51,5 +51,8 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+# To alter a database the way somebody with the file and `sqlite3` could, which the schema
+# check exists to catch. Already in the tree through `splitforge-storage`.
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "rt-multi-thread"] }

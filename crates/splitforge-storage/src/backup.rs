@@ -202,6 +202,8 @@ pub fn restore(
 /// verification step that writes to the thing it is verifying is not a verification step.
 fn verify(snapshot: &Path) -> Result<u64, StorageError> {
     let conn = Connection::open(snapshot)?;
+    // Before anything is read: the snapshot's own schema is the thing not yet trusted.
+    connection::distrust_the_schema(&conn)?;
 
     let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if !integrity.eq_ignore_ascii_case("ok") {
@@ -221,6 +223,14 @@ fn verify(snapshot: &Path) -> Result<u64, StorageError> {
             found: version,
             supported: SCHEMA_VERSION,
         });
+    }
+
+    // A snapshot whose append-only triggers were dropped passes the integrity check, restores,
+    // and migrations never put them back, because its version says they already ran. So it is
+    // compared with what the migrations make at that version, before it can replace anything.
+    let differences = connection::schema_differences(&conn)?;
+    if !differences.is_empty() {
+        return Err(StorageError::SchemaAltered(differences));
     }
 
     let reads: i64 = conn.query_row("SELECT COUNT(*) FROM raw_reads", [], |row| row.get(0))?;
@@ -374,6 +384,113 @@ mod tests {
                 .count()
                 .expect("count"),
             1
+        );
+    }
+
+    /// A snapshot of a journal holding one read, altered by `tamper` through a plain
+    /// connection, as somebody with the file and `sqlite3` could.
+    fn tampered_snapshot(tamper: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let live = dir.path().join("event.db");
+        let snapshot = dir.path().join("backup.db");
+        {
+            let mut journal = SqliteJournal::open(&live).expect("open");
+            journal.append(&read("A")).expect("append");
+        }
+        create(
+            &ConfigStore::open(&live).expect("open the store"),
+            &snapshot,
+        )
+        .expect("snapshot");
+        Connection::open(&snapshot)
+            .expect("open the snapshot")
+            .execute_batch(tamper)
+            .expect("tamper with it");
+        (dir, live, snapshot)
+    }
+
+    fn refused_because(snapshot: &Path, live: &Path) -> Vec<String> {
+        let before = std::fs::read(live).expect("read the live database");
+        let error = restore(snapshot, live, true).expect_err("an altered snapshot is refused");
+        assert_eq!(
+            std::fs::read(live).expect("read it again"),
+            before,
+            "nothing is displaced before the refusal"
+        );
+        match error {
+            StorageError::SchemaAltered(differences) => differences,
+            other => panic!("refused for the wrong reason: {other}"),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_whose_append_only_trigger_was_dropped_is_refused() {
+        // The 2026-09-13 review, from code: integrity_check and the version were all verify
+        // looked at, so this restored, migrations did not run again, and raw_reads accepted
+        // the UPDATE its trigger exists to refuse.
+        let (_dir, live, snapshot) = tampered_snapshot("DROP TRIGGER raw_reads_no_update;");
+        assert_eq!(
+            refused_because(&snapshot, &live),
+            ["trigger raw_reads_no_update is missing"]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_with_a_trigger_of_its_own_is_refused() {
+        let (_dir, live, snapshot) = tampered_snapshot(
+            "CREATE TRIGGER quietly AFTER INSERT ON raw_reads
+             BEGIN SELECT 1; END;",
+        );
+        assert_eq!(
+            refused_because(&snapshot, &live),
+            ["trigger quietly is not one the migrations create"]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_whose_trigger_was_rewritten_is_refused() {
+        // Same name, different body: a trigger that no longer refuses anything.
+        let (_dir, live, snapshot) = tampered_snapshot(
+            "DROP TRIGGER raw_reads_no_delete;
+             CREATE TRIGGER raw_reads_no_delete BEFORE DELETE ON raw_reads BEGIN SELECT 1; END;",
+        );
+        assert_eq!(
+            refused_because(&snapshot, &live),
+            ["trigger raw_reads_no_delete is not defined the way its migration defines it"]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_from_an_older_build_is_compared_with_the_schema_of_its_own_version() {
+        // A snapshot taken before a migration existed is sound, not altered: it is compared
+        // with what the migrations made at its version, and migrated when it is opened.
+        let dir = tempdir().expect("tempdir");
+        let snapshot = dir.path().join("old.db");
+        let live = dir.path().join("event.db");
+        {
+            let conn = Connection::open(&snapshot).expect("create");
+            let older = crate::migrations::SCHEMA_VERSION - 1;
+            for migration in crate::migrations::MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= older)
+            {
+                conn.execute_batch(migration.sql).expect("migrate");
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at_us) \
+                     VALUES (?1, ?2, 0)",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record it");
+            }
+        }
+
+        restore(&snapshot, &live, false).expect("an older, unaltered snapshot restores");
+        let restored = Connection::open(&live).expect("open");
+        assert!(
+            connection::schema_differences(&restored)
+                .expect("compare")
+                .is_empty(),
+            "and it is migrated to the current schema"
         );
     }
 

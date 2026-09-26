@@ -91,6 +91,15 @@ pub enum StorageError {
     #[error("the read cannot be stored: {0}")]
     Unstorable(String),
 
+    /// The database's tables, indexes, triggers or views are not the ones its migrations
+    /// produce at its version. Its append-only triggers may be missing, or something may have
+    /// been added (ADR-0011).
+    #[error(
+        "the database's schema is not the one its migrations produce: {}",
+        .0.join("; ")
+    )]
+    SchemaAltered(Vec<String>),
+
     /// The database was created by a newer build than this one.
     #[error("database schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew {

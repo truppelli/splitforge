@@ -77,7 +77,87 @@ fn configure(conn: &Connection) -> Result<(), StorageError> {
     // costs write latency and SD card wear, and both are the correct trade here.
     conn.pragma_update(None, "synchronous", "FULL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    distrust_the_schema(conn)?;
     Ok(())
+}
+
+/// `PRAGMA trusted_schema = OFF`: a trigger or view in the file may not call a function with
+/// side effects.
+///
+/// The schema travels inside the database file, and a restored snapshot is a file somebody
+/// handed over. SQLite's own guidance for an application that opens files it did not create is
+/// to turn this off. Nothing SplitForge defines needs it on.
+pub(crate) fn distrust_the_schema(conn: &Connection) -> Result<(), StorageError> {
+    conn.pragma_update(None, "trusted_schema", "OFF")?;
+    Ok(())
+}
+
+/// Every object in `conn`'s schema that SQLite did not make itself, by kind and name, with the
+/// SQL that created it.
+fn schema_objects(
+    conn: &Connection,
+) -> Result<std::collections::BTreeMap<(String, String), String>, StorageError> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, sql FROM sqlite_master
+         WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut objects = std::collections::BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let kind: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let sql: String = row.get(2)?;
+        objects.insert((kind, name), sql.trim().to_owned());
+    }
+    Ok(objects)
+}
+
+/// How `conn`'s schema differs from the one the migrations produce at its version, one line per
+/// object: missing, added, or defined differently. Empty when they match.
+///
+/// The append-only guarantee is a set of triggers ([ADR-0011](../../../docs/adr/0011-append-only-enforced-by-triggers.md)),
+/// and triggers travel in the file. A snapshot with one dropped would restore and then accept
+/// the `UPDATE` it exists to refuse, and migrations would not put it back, because the version
+/// says they already ran. So the schema is compared with what the migrations make, object for
+/// object, at whatever version the file says it is.
+pub(crate) fn schema_differences(conn: &Connection) -> Result<Vec<String>, StorageError> {
+    let has_migrations_table = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    let version = if has_migrations_table {
+        schema_version(conn)?
+    } else {
+        0
+    };
+
+    let expected = Connection::open_in_memory()?;
+    for migration in MIGRATIONS.iter().filter(|m| m.version <= version) {
+        expected.execute_batch(migration.sql)?;
+    }
+    let expected = schema_objects(&expected)?;
+    let actual = schema_objects(conn)?;
+
+    let mut differences = Vec::new();
+    for ((kind, name), sql) in &expected {
+        match actual.get(&(kind.clone(), name.clone())) {
+            None => differences.push(format!("{kind} {name} is missing")),
+            Some(found) if found != sql => differences.push(format!(
+                "{kind} {name} is not defined the way its migration defines it"
+            )),
+            Some(_) => {}
+        }
+    }
+    for (kind, name) in actual.keys() {
+        if !expected.contains_key(&(kind.clone(), name.clone())) {
+            differences.push(format!("{kind} {name} is not one the migrations create"));
+        }
+    }
+    Ok(differences)
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
@@ -313,5 +393,25 @@ mod tests {
             .execute("UPDATE race_sessions SET at_us = 0", [])
             .expect_err("a published gun time must not be editable");
         assert!(error.to_string().contains("append-only"), "got: {error}");
+    }
+
+    #[test]
+    fn a_schema_the_migrations_made_has_no_differences() {
+        let conn = open_in_memory().expect("open");
+        assert_eq!(
+            schema_differences(&conn).expect("compare"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_trigger_or_view_may_not_call_a_function_with_side_effects() {
+        // The schema travels in the file, and a restored snapshot is a file somebody handed
+        // over. SQLite's guidance for that case is trusted_schema = OFF.
+        let conn = open_in_memory().expect("open");
+        let trusted: i64 = conn
+            .query_row("PRAGMA trusted_schema", [], |row| row.get(0))
+            .expect("read the pragma");
+        assert_eq!(trusted, 0);
     }
 }
