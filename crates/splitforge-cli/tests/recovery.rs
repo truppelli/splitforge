@@ -461,6 +461,70 @@ fn destroy(database: &Path) {
 }
 
 /// Runs the binary and returns stdout plus whether it succeeded.
+#[tokio::test]
+async fn a_database_whose_append_only_trigger_was_dropped_is_an_error_to_doctor() {
+    // The 2026-09-13 review: nothing compared the schema with what the migrations make, so a
+    // dropped trigger passed doctor's integrity check.
+    let race = timed_race().await;
+    rusqlite::Connection::open(&race.database)
+        .expect("open the database")
+        .execute_batch("DROP TRIGGER raw_reads_no_update;")
+        .expect("drop the trigger");
+
+    let (stdout, ok) = run(&["doctor"], &race.database).await;
+    assert!(!ok, "an altered schema is an error: {stdout}");
+    let report = json(&stdout);
+    let schema: Vec<&serde_json::Value> = report["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|finding| finding["check"] == "database.schema")
+        .collect();
+    assert_eq!(schema.len(), 1, "{report}");
+    assert_eq!(schema[0]["severity"], "error");
+    assert_eq!(
+        schema[0]["detail"],
+        "trigger raw_reads_no_update is missing"
+    );
+}
+
+#[tokio::test]
+async fn a_snapshot_whose_append_only_trigger_was_dropped_is_not_restored() {
+    // The restore drill's own snapshot, altered. Before, it restored cleanly, migrations did not
+    // run again, and raw_reads accepted the UPDATE its trigger exists to refuse.
+    let race = timed_race().await;
+    rusqlite::Connection::open(&race.snapshot)
+        .expect("open the snapshot")
+        .execute_batch("DROP TRIGGER raw_reads_no_update;")
+        .expect("drop the trigger");
+    let before = std::fs::read(&race.database).expect("read the live database");
+
+    let output = Command::new(BINARY)
+        .args([
+            "backup",
+            "restore",
+            race.snapshot.to_str().expect("utf-8"),
+            "--replace",
+        ])
+        .arg("--database")
+        .arg(&race.database)
+        .output()
+        .await
+        .expect("run splitforge");
+
+    assert!(!output.status.success(), "an altered snapshot is refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("trigger raw_reads_no_update is missing"),
+        "the refusal names what is missing: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&race.database).expect("read it again"),
+        before,
+        "the live database is left where it was"
+    );
+}
+
 async fn run(args: &[&str], database: &Path) -> (String, bool) {
     let output = Command::new(BINARY)
         .args(args)

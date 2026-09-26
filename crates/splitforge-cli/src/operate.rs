@@ -156,6 +156,15 @@ pub(crate) fn doctor(
         findings.push(Finding::error("database.foreign_keys", problem));
     }
 
+    // The append-only guarantee is a set of triggers, and they travel in the file. One that is
+    // missing, rewritten, or joined by one nobody wrote passes the integrity check, and would
+    // pass a restore too if `backup restore` did not compare the schema as this does. Not on
+    // the bundle's allowlist: an added object's name is whatever its author chose.
+    checks_run += 1;
+    for difference in journal.schema_differences()? {
+        findings.push(Finding::error("database.schema", difference));
+    }
+
     // Free space is the check with the longest fuse. A journal grows all event and an SD
     // card does not, and nothing announces the moment the next read cannot be written — so
     // the useful place to say it is here, before the gun, while the answer is still

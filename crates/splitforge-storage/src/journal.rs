@@ -282,6 +282,16 @@ impl SqliteJournal {
         Ok(())
     }
 
+    /// How this database's schema differs from the one its migrations produce, one line per
+    /// object. Empty when they match. For `doctor`, which reports what `backup restore` refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the schema cannot be read.
+    pub fn schema_differences(&self) -> Result<Vec<String>, StorageError> {
+        connection::schema_differences(&self.conn)
+    }
+
     /// The latest checkpoint recorded, trusted or not.
     ///
     /// # Errors
