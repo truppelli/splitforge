@@ -223,6 +223,9 @@ boards share a Pi:
 
 ## Validation plan
 
+**The first sessions are written down** in [the bench runbook](thingmagic-m7e-hecto-bench.md):
+what to do, what to expect, what to keep, and which box each closes.
+
 Do not invent one. [hardware-support.md](../hardware-support.md#what-supported-requires) has the
 checklist and [hardware-plan.md § 7](../hardware-plan.md#7-software-plan) has the order. Two
 steps come before any of it: set the **UART** switch to **USB**, and move the **RF** resistor to
