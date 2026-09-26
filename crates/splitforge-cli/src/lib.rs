@@ -461,6 +461,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                     at,
                     reason,
                 } => {
+                    if reason.trim().is_empty() {
+                        bail!(
+                            "--reason must say something: a time typed in with no stated \
+                             reason cannot be defended"
+                        );
+                    }
                     let config = load_config(&store, race.race.as_deref())?;
                     let participant = config.participant(&bib).with_context(|| {
                         format!(
