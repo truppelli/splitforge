@@ -14,6 +14,7 @@ runs as live in [`deploy/`](../deploy).
 |---|---|---|
 | `target/aarch64-unknown-linux-gnu/release/splitforge-edge` | `/usr/local/bin/splitforge-edge` | The service |
 | `target/aarch64-unknown-linux-gnu/release/splitforge` | `/usr/local/bin/splitforge` | The operator CLI |
+| `target/aarch64-unknown-linux-gnu/release/splitforge-capture` | `/usr/local/bin/splitforge-capture` | Checks a `--capture` against the journal, at the bench ([ADR-0041](adr/0041-a-capture-is-checked-against-the-journal-by-payload.md)) |
 | `deploy/splitforge.sysusers.conf` | `/usr/lib/sysusers.d/splitforge.conf` | The unprivileged account the service runs as |
 | `deploy/splitforge-edge.service` | `/etc/systemd/system/splitforge-edge.service` | The unit |
 | `deploy/99-splitforge-reader.rules` | `/etc/udev/rules.d/99-splitforge-reader.rules` | The reader's port: a stable name, owned by the service's group |
@@ -50,7 +51,7 @@ cross-toolchain is the thing that is broken.
 Copy the six files to the device, then:
 
 ```bash
-sudo install -m 0755 splitforge-edge splitforge /usr/local/bin/
+sudo install -m 0755 splitforge-edge splitforge splitforge-capture /usr/local/bin/
 sudo install -m 0644 splitforge.sysusers.conf /usr/lib/sysusers.d/splitforge.conf
 sudo install -m 0644 splitforge-edge.service /etc/systemd/system/
 sudo install -m 0644 99-splitforge-reader.rules /etc/udev/rules.d/

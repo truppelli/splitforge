@@ -256,6 +256,32 @@ impl SqliteJournal {
         self.repair(actor, &Start::Beginning)
     }
 
+    /// Hands every read received between `from` and `to`, inclusive, to `each`, a row at a time.
+    ///
+    /// For comparing a span of the journal with something else without loading all of it: the
+    /// capture check in `splitforge-capture` (ADR-0041) holds only a count per payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or a row cannot be decoded.
+    pub fn for_each_read_received_between(
+        &self,
+        from: OffsetDateTime,
+        to: OffsetDateTime,
+        mut each: impl FnMut(StoredRawRead),
+    ) -> Result<(), StorageError> {
+        let sql = format!(
+            "SELECT {SELECT_COLUMNS} FROM raw_reads
+             WHERE received_at_us >= ?1 AND received_at_us <= ?2 ORDER BY seq"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let mut rows = statement.query([to_micros(from)?, to_micros(to)?])?;
+        while let Some(row) = rows.next()? {
+            each(row_to_stored(row)?);
+        }
+        Ok(())
+    }
+
     /// The latest checkpoint recorded, trusted or not.
     ///
     /// # Errors
@@ -2635,6 +2661,30 @@ mod tests {
         let report = journal.reconcile("test").expect("reconcile");
         assert_eq!(report.scanned_from_byte, 0);
         assert_eq!(report.found.records, 3);
+    }
+
+    #[test]
+    fn reads_are_handed_over_by_when_they_were_received() {
+        let mut journal = SqliteJournal::open_in_memory().expect("open");
+        for offset in [0, 10, 20, 30] {
+            journal
+                .append(&sample_read(&format!("C{offset}"), offset))
+                .expect("append");
+        }
+        let at =
+            |offset: i64| OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_700_000_000 + offset);
+
+        let mut chips = Vec::new();
+        journal
+            .for_each_read_received_between(at(10), at(20), |stored| {
+                chips.push(stored.read.chip.as_str().to_owned());
+            })
+            .expect("read the span");
+        assert_eq!(
+            chips,
+            ["C10", "C20"],
+            "both ends included, nothing outside them"
+        );
     }
 
     #[test]

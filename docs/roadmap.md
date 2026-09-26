@@ -441,11 +441,19 @@ pair of facts rather than a contradiction.
       wall clock, and counts the open, confirmed and suspected at the top. Ticked because it is a
       tool rather than a claim about the module: `crates/splitforge-cli/tests/gaps.rs` runs the
       binary over recorded gaps
-- [ ] **Reconcile a capture with the journal.** *"The journal never disagrees with what
+- [x] **Reconcile a capture with the journal.** *"The journal never disagrees with what
       arrived"* is proved by decoding every frame a capture holds with the same reassembler and
       decoder and comparing the reads with `raw_reads`. Nothing does that yet; until something
       does, the proof is `reads_received` against `reads_persisted` per process, which a restart
-      resets. Also found by the runbook
+      resets. Also found by the runbook.
+      **Built** ([ADR-0041](adr/0041-a-capture-is-checked-against-the-journal-by-payload.md)):
+      `splitforge-capture check <capture>`, a second binary in the composition root's package,
+      because only it may name the adapter. `capture::replay` reads a capture back a line at a
+      time with a fresh reassembler per connection and `StreamDecoder`, and the check compares
+      each read's `raw_payload` with the journal's reads received in the capture's span, set-aside
+      reads included. The verdict is `agree`, `disagree` or `incomplete`, and so is the exit
+      status. Ticked as a tool: `apps/splitforge-edge/tests/capture_check.rs` runs it over each
+      verdict, and the replay reads back a capture a real `Capture` wrote
 
 **Needs the module:**
 
