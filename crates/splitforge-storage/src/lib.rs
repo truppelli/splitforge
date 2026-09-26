@@ -36,6 +36,7 @@
 mod backup;
 mod config;
 mod connection;
+mod identity;
 mod journal;
 mod migrations;
 mod results;
@@ -49,6 +50,7 @@ pub use backup::{
     sidecar_path_for,
 };
 pub use config::{AuditEntry, ConfigStore, ImportSummary, RaceSelection, parse_checkpoint_kind};
+pub use identity::ProcessIdentity;
 pub use journal::{
     CHECKPOINT_INTERVAL, RecoveryReport, SidecarCheckpoint, SidecarStatus, SqliteJournal,
 };

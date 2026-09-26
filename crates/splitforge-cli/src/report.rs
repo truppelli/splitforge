@@ -444,7 +444,7 @@ pub struct AuditView {
     /// When.
     #[serde(with = "time::serde::rfc3339")]
     pub at: OffsetDateTime,
-    /// Who.
+    /// Who, as the command was told: `--actor`, which nothing checks.
     pub actor: String,
     /// What.
     pub action: String,
@@ -452,6 +452,13 @@ pub struct AuditView {
     pub subject: Option<String>,
     /// Structured detail, when the action recorded any.
     pub detail: Option<serde_json::Value>,
+    /// The uid the process that wrote the row ran as, from the kernel (ADR-0043). Null on
+    /// rows written before it was recorded.
+    pub process_uid: Option<u32>,
+    /// The login sudo was invoked from, when sudo started that process.
+    pub sudo_user: Option<String>,
+    /// The uid sudo was invoked from, likewise.
+    pub sudo_uid: Option<u32>,
 }
 
 impl AuditView {
@@ -468,6 +475,9 @@ impl AuditView {
                 .detail
                 .as_deref()
                 .and_then(|text| serde_json::from_str(text).ok()),
+            process_uid: entry.identity.uid,
+            sudo_user: entry.identity.sudo_user.clone(),
+            sudo_uid: entry.identity.sudo_uid,
         }
     }
 }
@@ -879,6 +889,7 @@ pub fn reader_status(
 mod tests {
     use super::*;
     use splitforge_domain::{ChipId, RejectedRead, RejectionReason};
+    use splitforge_storage::ProcessIdentity;
 
     fn config() -> RaceConfig {
         splitforge_testkit::five_k().config
@@ -982,6 +993,7 @@ mod tests {
             action: "roster.import".to_owned(),
             subject: Some("5K".to_owned()),
             detail: Some("not json at all".to_owned()),
+            identity: ProcessIdentity::default(),
         };
         assert_eq!(AuditView::of(&entry).detail, None);
     }

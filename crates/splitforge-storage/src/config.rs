@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 use crate::StorageError;
 use crate::connection::{self, from_micros, to_micros};
+use crate::identity::ProcessIdentity;
 use crate::space::DEFAULT_MIN_FREE_BYTES;
 
 /// Key under which the free-space floor is stored in `device_settings`.
@@ -82,6 +83,9 @@ pub struct AuditEntry {
     pub subject: Option<String>,
     /// Structured before/after detail, as JSON.
     pub detail: Option<String>,
+    /// Who the operating system says wrote the row, where `actor` is who it claims
+    /// (ADR-0043).
+    pub identity: ProcessIdentity,
 }
 
 /// Which race a command should act on, when several exist.
@@ -957,7 +961,8 @@ impl ConfigStore {
     /// Returns [`StorageError`] if a row cannot be decoded.
     pub fn audit_trail(&self, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
         let mut statement = self.conn.prepare(
-            "SELECT seq, at_us, actor, action, subject, detail_json
+            "SELECT seq, at_us, actor, action, subject, detail_json,
+                    process_uid, sudo_user, sudo_uid
              FROM audit_log ORDER BY seq DESC LIMIT ?1",
         )?;
         let mut rows = statement.query([i64::try_from(limit).unwrap_or(i64::MAX)])?;
@@ -971,6 +976,11 @@ impl ConfigStore {
                 action: row.get("action")?,
                 subject: row.get("subject")?,
                 detail: row.get("detail_json")?,
+                identity: ProcessIdentity {
+                    uid: row.get("process_uid")?,
+                    sudo_user: row.get("sudo_user")?,
+                    sudo_uid: row.get("sudo_uid")?,
+                },
             });
         }
         Ok(out)
@@ -1483,6 +1493,39 @@ mod tests {
         assert_eq!(trail[0].action, "policy.set");
         assert_eq!(trail[0].detail.as_deref(), Some(r#"{"a":1}"#));
         assert_eq!(trail[1].action, "roster.import");
+    }
+
+    #[test]
+    fn an_audit_row_records_the_process_that_wrote_it() {
+        // ADR-0043: `actor` is a claim, so the row carries the kernel's account of the writer
+        // beside it. The sudo half is exercised end to end by the CLI, where the environment
+        // is the child's own rather than this test binary's.
+        let (mut store, _, _) = seeded();
+        store
+            .record_audit("anybody at all", "roster.import", None, None)
+            .expect("audit");
+
+        let trail = store.audit_trail(1).expect("read");
+        assert_eq!(trail[0].actor, "anybody at all");
+        assert_eq!(trail[0].identity, ProcessIdentity::current());
+        #[cfg(unix)]
+        assert!(trail[0].identity.uid.is_some());
+    }
+
+    #[test]
+    fn an_audit_row_from_before_the_identity_was_recorded_reads_back_without_one() {
+        let (store, _, _) = seeded();
+        store
+            .conn
+            .execute(
+                "INSERT INTO audit_log (at_us, actor, action, recorded_at_us)
+                 VALUES (0, 'operator', 'roster.import', 0)",
+                [],
+            )
+            .expect("an old-style row");
+
+        let trail = store.audit_trail(1).expect("read");
+        assert_eq!(trail[0].identity, ProcessIdentity::default());
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub struct Migration {
 }
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Every migration, in order.
 pub const MIGRATIONS: &[Migration] = &[
@@ -59,6 +59,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "sidecar_checkpoints",
         sql: SIDECAR_CHECKPOINTS,
+    },
+    Migration {
+        version: 9,
+        name: "audit_os_identity",
+        sql: AUDIT_OS_IDENTITY,
     },
 ];
 
@@ -582,6 +587,18 @@ BEFORE DELETE ON sidecar_checkpoints
 BEGIN
     SELECT RAISE(ABORT, 'sidecar_checkpoints is append-only: DELETE is not permitted');
 END;
+";
+
+/// Who the operating system says wrote each audit row, beside who the row claims (ADR-0043).
+const AUDIT_OS_IDENTITY: &str = r"
+-- `actor` is what the command was told: `--actor`, which defaults to `operator`. These are
+-- what the process was. `process_uid` is the kernel's real uid for the process that wrote
+-- the row, which it cannot claim to be another. `sudo_user` and `sudo_uid` are what sudo set
+-- when it started that process, and are NULL when it did not. NULL throughout on rows
+-- written before this migration, which recorded none of it.
+ALTER TABLE audit_log ADD COLUMN process_uid INTEGER CHECK (process_uid >= 0);
+ALTER TABLE audit_log ADD COLUMN sudo_user   TEXT;
+ALTER TABLE audit_log ADD COLUMN sudo_uid    INTEGER CHECK (sudo_uid >= 0);
 ";
 
 #[cfg(test)]

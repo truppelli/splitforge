@@ -1573,11 +1573,22 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       being served over five seconds later, the file deleted. The stale-socket test had staged
       its leftover as a regular file, which is the behavior removed. It now leaves a real
       socket, as a killed process does.
-- [ ] **Audit attribution is whatever `--actor` says.** *From code.* It defaults to
+- [x] **Audit attribution is whatever `--actor` says.** *From code.* It defaults to
       `operator`, and since the CLI runs as `sudo -u splitforge`, no OS identity is recorded.
       [Threat model § 5](threat-model.md#5-design-decisions-that-follow-from-this-model)
       relies on detecting insider fabrication afterward, and that detection depends on
       attribution. *Fix:* record `SUDO_USER` and the uid beside the claimed actor.
+      **Fixed by [ADR-0043](adr/0043-the-audit-trail-records-who-the-system-says-acted.md).**
+      Migration 9 gives `audit_log` three nullable columns: `process_uid` from `getuid()`, and
+      `sudo_user` and `sudo_uid` from what sudo put in the environment. They are filled in by
+      storage's one audit insert, so recovery's and the service's rows carry them too, and
+      `splitforge audit` shows them. `--actor` stays, as the claim. Older rows read back with
+      all three null, which means *not recorded*. The sudo half is only as good as sudo's
+      `env_reset`, which [deployment.md](deployment.md#who-can-do-what) now says to leave on,
+      and anyone who can write the file can still write any row. Two CLI tests run the binary
+      as sudo would start it, and without sudo. Both fail on `dee3c29`, where `audit_log` and
+      `--actor` are as they were at `b457991`: the identity fields are absent. Two storage
+      tests hold the insert and an old row, and use the type this change added
 - [x] **A manual finish replaces a chip finish, and nothing in the published result says
       so.** *Reproduced.* Scoring the same runner with a chip finish at 20:00 alone, then with
       a manual entry at 18:20 added, gave identical rows apart from the time. Both had
