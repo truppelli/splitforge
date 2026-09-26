@@ -433,9 +433,14 @@ pair of facts rather than a contradiction.
       the real binary with it and finds the start sequence as sent and a tag report as received.
       **Unticked until a real session has been captured**, which is the point of having it
 
-- [ ] **List the reader gaps from the CLI.** The exit criterion asks that every disconnection
+- [x] **List the reader gaps from the CLI.** The exit criterion asks that every disconnection
       is recorded as a bounded gap, and only `/health`'s one open gap is visible without SQL
-      against a snapshot. Found by writing [the bench runbook](readers/thingmagic-m7e-hecto-bench.md)
+      against a snapshot. Found by writing [the bench runbook](readers/thingmagic-m7e-hecto-bench.md).
+      **Built:** `splitforge reader gaps [--limit N]` lists them newest first, by sequence rather
+      than by a clock that may have moved, with how each was noticed and how long it lasted by the
+      wall clock, and counts the open, confirmed and suspected at the top. Ticked because it is a
+      tool rather than a claim about the module: `crates/splitforge-cli/tests/gaps.rs` runs the
+      binary over recorded gaps
 - [ ] **Reconcile a capture with the journal.** *"The journal never disagrees with what
       arrived"* is proved by decoding every frame a capture holds with the same reassembler and
       decoder and comparing the reads with `raw_reads`. Nothing does that yet; until something

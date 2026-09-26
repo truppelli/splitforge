@@ -415,6 +415,17 @@ pub enum ReaderCommand {
         #[arg(long, value_name = "SECONDS", default_value_t = 60)]
         window_secs: u64,
     },
+    /// List the gaps the journal has recorded, newest first: which reader stopped producing,
+    /// how that was noticed, and how long it lasted.
+    ///
+    /// A gap is two append-only rows, opened and closed (ADR-0026). One still open has no end
+    /// and no duration, which is a statement about now rather than an omission. Durations are
+    /// taken from the wall clock, the only pair of readings comparable across a restart.
+    Gaps {
+        /// How many to show.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
 }
 
 /// Timing policy management.
