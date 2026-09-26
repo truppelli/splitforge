@@ -340,7 +340,15 @@ pair of facts rather than a contradiction.
       it is the last of this bullet that could be written without the module. **The box stays
       unchecked deliberately**: what remains is inducing a real disconnection, and this
       milestone does not tick a box because the code exists — it ticks one when the behavior
-      has been observed
+      has been observed.
+      **"The last of this bullet" was not quite**: a third detector is built, off by default
+      ([ADR-0045](adr/0045-a-reader-that-says-nothing-at-all-is-a-different-gap.md)). A reader
+      that has been heard on a connection and then says nothing at all, not even the
+      end-of-cycle frame finding 17 expects about once a second, opens a *suspected* gap after
+      `reader_heartbeat_ms`, without waiting for a race. It answers *is the reader there?* and
+      leaves *is it reading?* to the read-silence watchdog, because a loose antenna goes on
+      sending end-of-cycle frames and reads nothing. It stays off until a bench session has
+      timed the frames
 - [x] **`splitforge-edge` has a read path**, in the ordering
       [architecture § 3](architecture.md#3-data-flow) fixes: sidecar append + fsync completes
       first, always, then the journal append, then notify — `reads_persisted` moves only after
@@ -453,7 +461,11 @@ pair of facts rather than a contradiction.
       each read's `raw_payload` with the journal's reads received in the capture's span, set-aside
       reads included. The verdict is `agree`, `disagree` or `incomplete`, and so is the exit
       status. Ticked as a tool: `apps/splitforge-edge/tests/capture_check.rs` runs it over each
-      verdict, and the replay reads back a capture a real `Capture` wrote
+      verdict, and the replay reads back a capture a real `Capture` wrote.
+      **It also times the module now**, for [Q14](open-questions.md#q14-reader-silence-threshold):
+      the interval between end-of-cycle frames and between frames of any kind, per connection, on
+      the capture's monotonic offsets. The first bench session reads the period Q14 waits on
+      from its own capture
 
 **Needs the module:**
 

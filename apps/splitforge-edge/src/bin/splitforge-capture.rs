@@ -184,6 +184,8 @@ fn run(args: Args) -> Result<ExitCode> {
             "tag_reports": found.tag_reports,
             "refused": found.refused,
             "end_of_cycle": found.end_of_cycle,
+            "end_of_cycle_every": intervals(&found.end_of_cycle_every),
+            "between_frames": intervals(&found.between_frames),
             "other_status": found.other_status,
             "answers": found.answers,
             "framing_faults": found.framing_faults,
@@ -209,6 +211,17 @@ fn run(args: Args) -> Result<ExitCode> {
         serde_json::to_string_pretty(&report).context("encoding the report")?
     );
     Ok(ExitCode::from(code))
+}
+
+/// Intervals in milliseconds, which is the unit `reader_silence_ms` is set in.
+fn intervals(found: &splitforge_thingmagic::Intervals) -> serde_json::Value {
+    let ms = |micros: Option<u64>| micros.map(|micros| micros as f64 / 1000.0);
+    serde_json::json!({
+        "count": found.count,
+        "shortest_ms": ms(found.shortest_us),
+        "mean_ms": ms(found.mean_us()),
+        "longest_ms": ms(found.longest_us),
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {

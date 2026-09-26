@@ -239,3 +239,38 @@ fn a_capture_that_cannot_be_opened_is_not_a_verdict() {
         "the error names the file"
     );
 }
+
+#[test]
+fn the_check_reports_how_often_the_module_spoke_into_an_empty_field() {
+    // Q14 waits on this period, and the first bench session is where it is measured: a stream
+    // started with nothing in the field, captured, and checked. Three end-of-cycle frames a
+    // second apart, then one a second and a half later.
+    let mut cycle = vec![0xFF, 0x00, 0x22, 0x04, 0x00];
+    let crc = crc16(&cycle[1..]);
+    cycle.extend_from_slice(&crc.to_be_bytes());
+    let cycle = hex(&cycle);
+
+    let bench = Bench::new();
+    let at = stamp(OffsetDateTime::now_utc());
+    std::fs::write(
+        &bench.capture,
+        format!(
+            "{at} +0.000ms open\n\
+             {at} +1000.000ms < {cycle}\n\
+             {at} +2000.000ms < {cycle}\n\
+             {at} +3000.000ms < {cycle}\n\
+             {at} +4500.000ms < {cycle}\n\
+             {at} +5000.000ms close\n"
+        ),
+    )
+    .expect("write the capture");
+    bench.journal(&[]);
+
+    let (_, report) = bench.check();
+    let every = &report["capture"]["end_of_cycle_every"];
+    assert_eq!(every["count"], 3, "{report:#}");
+    assert_eq!(every["shortest_ms"], 1000.0);
+    assert_eq!(every["mean_ms"], 1166.666);
+    assert_eq!(every["longest_ms"], 1500.0);
+    assert_eq!(report["capture"]["between_frames"], *every);
+}

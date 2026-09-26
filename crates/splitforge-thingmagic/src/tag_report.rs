@@ -140,8 +140,10 @@ enum StreamResponse {
 /// with this status and a payload is still a fault until something shows its layout.
 ///
 /// Arriving about once a second into an empty field, this is very likely the liveness signal
-/// [Q14](../../../docs/open-questions.md) asks about. It is counted here and not yet treated as
-/// one, until a module shows the period.
+/// [Q14](../../../docs/open-questions.md) asks about. It is counted, and reported to the service
+/// as [`ReaderEvent::Alive`](splitforge_reader::ReaderEvent::Alive), which feeds a heartbeat check
+/// that is off until a module has shown the period
+/// ([ADR-0045](../../../docs/adr/0045-a-reader-that-says-nothing-at-all-is-a-different-gap.md)).
 pub const NO_TAGS_FOUND: u16 = 0x0400;
 
 /// Why a tag report could not be decoded.
@@ -299,6 +301,7 @@ pub struct StreamDecoder {
     reads: u64,
     errors: u64,
     cycles: u64,
+    heard: u64,
     reported: bool,
 }
 
@@ -315,6 +318,7 @@ impl StreamDecoder {
             reads: 0,
             errors: 0,
             cycles: 0,
+            heard: 0,
             reported: false,
         }
     }
@@ -550,6 +554,13 @@ impl TagReportDecoder for StreamDecoder {
         self.errors
     }
 
+    /// End-of-cycle frames, status reports and stream-ends: every frame this decoder accepted
+    /// that was not a tag. A frame it refused is not counted, so a module speaking a layout
+    /// nobody has captured never arms the heartbeat detector (ADR-0045).
+    fn heard(&self) -> u64 {
+        self.heard
+    }
+
     fn decode(
         &mut self,
         response: &Response<'_>,
@@ -561,9 +572,13 @@ impl TagReportDecoder for StreamDecoder {
         let outcome = Self::classify(response).and_then(|kind| match kind {
             // Both are successful decodes that carry no tag, and neither is a fault: a status
             // report is reader statistics and a stream-end is the module saying it is done.
-            StreamResponse::Status | StreamResponse::End => Ok(None),
+            StreamResponse::Status | StreamResponse::End => {
+                self.heard = self.heard.saturating_add(1);
+                Ok(None)
+            }
             StreamResponse::EndOfCycle => {
                 self.cycles = self.cycles.saturating_add(1);
+                self.heard = self.heard.saturating_add(1);
                 Ok(None)
             }
             StreamResponse::Tag => self.read_tag(response.data, anchor).map(Some),

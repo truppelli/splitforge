@@ -53,7 +53,8 @@ pub use entity::{
 };
 pub use error::DomainError;
 pub use gap::{
-    DEFAULT_SILENCE_THRESHOLD_MS, GapDetection, GapEdge, ReaderGap, SilenceVerdict, assess_silence,
+    DEFAULT_HEARTBEAT_THRESHOLD_MS, DEFAULT_SILENCE_THRESHOLD_MS, GapDetection, GapEdge,
+    HeartbeatVerdict, ReaderGap, SilenceVerdict, assess_heartbeat, assess_silence,
 };
 pub use ids::{
     AcceptedReadId, Bib, CheckpointId, ChipId, EventId, ManualEntryId, ParticipantId, RaceId,

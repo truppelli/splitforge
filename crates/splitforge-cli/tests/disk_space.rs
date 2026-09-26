@@ -229,6 +229,41 @@ async fn the_floor_round_trips_through_device_show() {
     );
 }
 
+#[tokio::test]
+async fn the_heartbeat_is_off_until_set_and_round_trips_through_device_show() {
+    // ADR-0045: off until a bench session has timed the frames it listens for.
+    let (_dir, database) = configured().await;
+
+    let before = json(&run_ok(&["device", "show"], &database).await);
+    assert_eq!(before["reader_heartbeat_ms"], 0, "off by default");
+
+    let changed = json(
+        &run_ok(
+            &["device", "set", "--reader-heartbeat-ms", "5000"],
+            &database,
+        )
+        .await,
+    );
+    assert_eq!(changed["reader_heartbeat_ms"], 5000);
+    let after = json(&run_ok(&["device", "show"], &database).await);
+    assert_eq!(after["reader_heartbeat_ms"], 5000);
+    assert_eq!(
+        after["reader_silence_ms"], before["reader_silence_ms"],
+        "a different check, left where it was"
+    );
+
+    let audit = json(&run_ok(&["audit"], &database).await);
+    assert!(
+        audit
+            .as_array()
+            .expect("an array")
+            .iter()
+            .any(|entry| entry["action"] == "device.set"
+                && entry["subject"] == "reader_heartbeat_ms"),
+        "{audit}"
+    );
+}
+
 // ---- helpers --------------------------------------------------------------------
 
 fn json(text: &str) -> serde_json::Value {
