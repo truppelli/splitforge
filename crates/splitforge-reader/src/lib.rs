@@ -293,6 +293,15 @@ pub enum ReaderEvent {
     /// The read power the reader reported on this connection. Neither a read nor a sign of
     /// life: it arrives during the start, before the reader is recording.
     TransmitPower(TransmitPower),
+    /// The reader said something that was not a read: proof that it is there, and of nothing
+    /// more ([ADR-0045](../../../docs/adr/0045-a-reader-that-says-nothing-at-all-is-a-different-gap.md)).
+    ///
+    /// A ThingMagic module's end-of-cycle frame, or an LLRP keepalive. **It is not proof that
+    /// the reader can read**: a module whose antenna cable has come loose goes on sending these
+    /// and reads nothing. So it feeds the detector that asks whether the reader is there, and
+    /// never the one that asks whether it is reading. Sent at most once per batch of frames,
+    /// not once per frame.
+    Alive,
 }
 
 /// A source of reads.

@@ -403,9 +403,15 @@ pub async fn run(cli: Cli) -> Result<()> {
                 DeviceCommand::Set {
                     min_free_mb,
                     reader_silence_ms,
+                    reader_heartbeat_ms,
                 } => {
-                    if min_free_mb.is_none() && reader_silence_ms.is_none() {
-                        bail!("nothing to set; pass --min-free-mb or --reader-silence-ms");
+                    if min_free_mb.is_none()
+                        && reader_silence_ms.is_none()
+                        && reader_heartbeat_ms.is_none()
+                    {
+                        bail!(
+                            "nothing to set; pass --min-free-mb, --reader-silence-ms or                              --reader-heartbeat-ms"
+                        );
                     }
                     let mut changed = serde_json::Map::new();
 
@@ -431,6 +437,17 @@ pub async fn run(cli: Cli) -> Result<()> {
                         changed.insert("reader_silence_ms".to_owned(), ms.into());
                     }
 
+                    if let Some(ms) = reader_heartbeat_ms {
+                        store.set_reader_heartbeat_threshold_ms(ms)?;
+                        store.record_audit(
+                            &actor,
+                            "device.set",
+                            Some("reader_heartbeat_ms"),
+                            Some(&format!(r#"{{"reader_heartbeat_ms":{ms}}}"#)),
+                        )?;
+                        changed.insert("reader_heartbeat_ms".to_owned(), ms.into());
+                    }
+
                     emit(&serde_json::Value::Object(changed), format)
                 }
                 DeviceCommand::Show => {
@@ -441,6 +458,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                             "database": database.display().to_string(),
                             "min_free_mb": floor / (1024 * 1024),
                             "reader_silence_ms": store.reader_silence_threshold_ms()?,
+                            "reader_heartbeat_ms": store.reader_heartbeat_threshold_ms()?,
                             "free_mb": space.available_mb(),
                             "total_mb": space.total_mb(),
                             "above_floor": space.is_above(floor),

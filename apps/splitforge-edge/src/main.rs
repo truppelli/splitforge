@@ -63,8 +63,8 @@ use splitforge_api::{
 };
 use splitforge_cli::{ScriptedReader, Speed};
 use splitforge_domain::{
-    ClockStep, DeviceClockState, GapDetection, JournalError, RaceId, RawRead, RawReadJournal,
-    ReaderId, SAMPLE_INTERVAL_MS, SilenceVerdict, assess_silence,
+    ClockStep, DeviceClockState, GapDetection, HeartbeatVerdict, JournalError, RaceId, RawRead,
+    RawReadJournal, ReaderId, SAMPLE_INTERVAL_MS, SilenceVerdict, assess_heartbeat, assess_silence,
 };
 use splitforge_reader::{
     Disconnection, Ingest, ReaderEvent, ReaderFaults, ReaderProvider, TransmitPower,
@@ -272,6 +272,19 @@ struct ReaderStatus {
     /// open because a previous run of this service left one there, which says nothing about
     /// whether *this* process's provider currently holds a port.
     transport_down: bool,
+    /// When the reader last said anything on this connection, a read or not (ADR-0045).
+    ///
+    /// `None` until it has, on each connection: the heartbeat check is armed by hearing the
+    /// reader, so a module that sends nothing but reads never looks like one that stopped.
+    last_heard: Option<Instant>,
+    /// Whether this process opened the gap that is open because the reader said nothing at
+    /// all, and has not closed it.
+    ///
+    /// The same guard as [`Self::transport_down`], for the same reason. While it is set the
+    /// read-silence watchdog stands down, because its *not silent long enough yet* would close
+    /// this gap on the strength of nothing having been read, and only the heartbeat check
+    /// closes it, when the reader is heard again.
+    heartbeat_gap: bool,
 }
 
 /// What the silence watchdog needs to know to do its job.
@@ -299,6 +312,8 @@ impl ReaderStatus {
             watching: None,
             last_message: None,
             transport_down: false,
+            last_heard: None,
+            heartbeat_gap: false,
         }
     }
 
@@ -659,6 +674,14 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, inges
                 device.update_reader(|status| status.faults = faults);
                 continue;
             }
+            // Proof the reader is there, and nothing more: it moves `last_heard`, which the
+            // heartbeat check reads, and never `last_message`, which the read-silence watchdog
+            // reads. A module whose antenna has come loose sends these and reads nothing, and
+            // that is the read-silence watchdog's to notice (ADR-0045).
+            ReaderEvent::Alive => {
+                device.update_reader(|status| status.last_heard = Some(Instant::now()));
+                continue;
+            }
             // Said when it changes rather than on every connection: a reader reconnecting at
             // the power it had is not news, and one that comes back at another is.
             ReaderEvent::TransmitPower(power) => {
@@ -685,7 +708,10 @@ fn read_into_journal(device: &Device, mut receiver: Receiver<ReaderEvent>, inges
             // Before the write, deliberately. This says the reader is alive, which it has
             // just proved by sending; whether the journal can keep up is a different fault,
             // reported by `persisted` falling behind rather than by a gap in the evidence.
-            status.last_message = Some(Instant::now());
+            let now = Instant::now();
+            status.last_message = Some(now);
+            // A read is something said, too.
+            status.last_heard = Some(now);
         });
 
         // The device's own clocks, read as close to arrival as this thread can manage. The
@@ -859,6 +885,10 @@ fn record_connection(device: &Device, cause: Option<Disconnection>) {
         // write leaves the evidence incomplete, and letting an inference from quiet file a
         // *suspected* gap over the top would make it wrong as well.
         status.transport_down = cause.is_some();
+        // Each connection arms the heartbeat afresh, when the reader is first heard on it. The
+        // gap it may have opened is closed below, by the connection or superseded by the loss.
+        status.last_heard = None;
+        status.heartbeat_gap = false;
         if cause.is_none() {
             // A connection is evidence the reader is alive, exactly as a read is — and it is
             // the only such evidence a reader in an empty field will produce. Without this,
@@ -951,14 +981,17 @@ async fn watch_for_silence(device: Arc<Device>) {
 fn check_for_silence(device: &Device) {
     // Read the reader's state first and let go of that lock, because the journal work below
     // can block on an fsync the read path is in the middle of.
-    let (watching, last_message, transport_down) = match device.reader.lock() {
-        Ok(reader) => (
-            reader.watching.clone(),
-            reader.last_message,
-            reader.transport_down,
-        ),
-        Err(_) => return,
-    };
+    let (watching, last_message, transport_down, last_heard, heartbeat_gap) =
+        match device.reader.lock() {
+            Ok(reader) => (
+                reader.watching.clone(),
+                reader.last_message,
+                reader.transport_down,
+                reader.last_heard,
+                reader.heartbeat_gap,
+            ),
+            Err(_) => return,
+        };
 
     // **The transport has already spoken, so quiet adds nothing.** An inference is only worth
     // making where something is left to infer, and a provider that reported its own failure
@@ -980,6 +1013,77 @@ fn check_for_silence(device: &Device) {
     let Ok(mut stores) = device.stores.lock() else {
         return;
     };
+
+    // **Whether the reader is there, before whether it is reading** (ADR-0045). When it has
+    // said nothing at all for longer than the heartbeat threshold, that is the gap, and the
+    // read-silence watchdog below has nothing to add until it is heard again.
+    let heartbeat_ms = match stores.config.reader_heartbeat_threshold_ms() {
+        Ok(ms) => ms,
+        Err(error) => {
+            eprintln!("splitforge-edge: the heartbeat threshold could not be read — {error}");
+            return;
+        }
+    };
+    let quiet_for_ms = last_heard.map_or(0, |heard| {
+        u64::try_from(heard.elapsed().as_millis()).unwrap_or(u64::MAX)
+    });
+    let heartbeat = assess_heartbeat(
+        heartbeat_ms,
+        last_heard.is_some(),
+        quiet_for_ms,
+        heartbeat_gap,
+    );
+    if heartbeat != HeartbeatVerdict::Idle {
+        let now = time::OffsetDateTime::now_utc();
+        let monotonic_ms = u64::try_from(device.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let opened = heartbeat == HeartbeatVerdict::Open;
+        let outcome = if opened {
+            let began =
+                now - time::Duration::milliseconds(i64::try_from(quiet_for_ms).unwrap_or(0));
+            stores
+                .journal
+                .open_reader_gap(
+                    &watching.reader,
+                    GapDetection::Suspected,
+                    began,
+                    monotonic_ms,
+                    Some(
+                        "the reader said nothing at all, not even between reads, for longer                          than the heartbeat threshold",
+                    ),
+                )
+                .map(|_| ())
+        } else {
+            stores
+                .journal
+                .close_reader_gap(
+                    &watching.reader,
+                    now,
+                    monotonic_ms,
+                    Some(if heartbeat_ms == 0 {
+                        "the heartbeat check was switched off"
+                    } else {
+                        "the reader was heard again"
+                    }),
+                )
+                .map(|_| ())
+        };
+        drop(stores);
+        if let Err(error) = outcome {
+            eprintln!("splitforge-edge: a heartbeat gap could not be recorded — {error}");
+        }
+        // Set whether or not the row was written, as `transport_down` is: this is what the
+        // process believes, and the read-silence watchdog has to stand down either way.
+        device.update_reader(|status| status.heartbeat_gap = opened);
+        if opened {
+            return;
+        }
+        let Ok(relocked) = device.stores.lock() else {
+            return;
+        };
+        stores = relocked;
+    } else if heartbeat_gap {
+        return;
+    }
 
     let threshold_ms = match stores.config.reader_silence_threshold_ms() {
         Ok(ms) => ms,
@@ -1617,6 +1721,8 @@ mod tests {
                 // this feeds is lifted by the first `Connected`, so a test that never
                 // records one is a test of a device whose provider has said nothing.
                 transport_down: false,
+                last_heard: None,
+                heartbeat_gap: false,
             }),
         };
 
@@ -2209,6 +2315,144 @@ mod tests {
             open_gap(&device).is_none(),
             "reads resumed, so the gap the watchdog opened must close"
         );
+    }
+
+    /// Sets the heartbeat threshold the watchdog reads, as `device set` would.
+    fn listen_for_a_heartbeat(device: &Device, ms: u64) {
+        device
+            .stores
+            .lock()
+            .expect("the stores")
+            .config
+            .set_reader_heartbeat_threshold_ms(ms)
+            .expect("set the heartbeat threshold");
+    }
+
+    fn a_minute_ago() -> Instant {
+        Instant::now() - std::time::Duration::from_secs(60)
+    }
+
+    #[test]
+    fn a_reader_heard_and_then_silent_opens_a_suspected_gap_without_a_race() {
+        // ADR-0045. Not gated on a race running: a reader that was speaking every second and
+        // then is not is not a quiet field, at any hour.
+        let (device, _directory) = a_device_watching_a_reader();
+        listen_for_a_heartbeat(&device, 5_000);
+        deliver(&device, vec![ReaderEvent::Alive]);
+        assert!(device.reader.lock().expect("state").last_heard.is_some());
+
+        device.update_reader(|status| status.last_heard = Some(a_minute_ago()));
+        check_for_silence(&device);
+
+        let gap = open_gap(&device).expect("a minute of nothing at all");
+        assert_eq!(gap.detection, GapDetection::Suspected);
+        assert!(
+            gap.detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("heartbeat")),
+            "{gap:?}"
+        );
+        let started = gap.started_at;
+        let now = time::OffsetDateTime::now_utc();
+        assert!(
+            now - started >= time::Duration::seconds(59),
+            "the gap starts when the quiet began, not when the tick noticed: {started}"
+        );
+        assert!(device.reader.lock().expect("state").heartbeat_gap);
+    }
+
+    #[test]
+    fn a_reader_heard_again_closes_the_gap_its_quiet_opened() {
+        let (device, _directory) = a_device_watching_a_reader();
+        listen_for_a_heartbeat(&device, 5_000);
+        device.update_reader(|status| status.last_heard = Some(a_minute_ago()));
+        check_for_silence(&device);
+        assert!(open_gap(&device).is_some());
+
+        deliver(&device, vec![ReaderEvent::Alive]);
+        check_for_silence(&device);
+
+        assert!(open_gap(&device).is_none(), "the reader is there again");
+        assert!(!device.reader.lock().expect("state").heartbeat_gap);
+    }
+
+    #[test]
+    fn a_sign_of_life_does_not_hide_a_reader_that_reads_nothing() {
+        // The loose antenna. The module goes on sending end-of-cycle frames and reads nothing,
+        // and the read-silence watchdog must still open its gap during a race.
+        let (device, _directory) = a_device_watching_a_reader();
+        start_the_race(&device);
+        listen_for_a_heartbeat(&device, 5_000);
+        device.update_reader(|status| {
+            status.last_message = Some(a_minute_ago() - std::time::Duration::from_secs(3_540))
+        });
+
+        deliver(&device, vec![ReaderEvent::Alive]);
+        check_for_silence(&device);
+
+        let gap = open_gap(&device).expect("an hour without a read, heard all along");
+        assert_eq!(gap.detection, GapDetection::Suspected);
+        assert!(
+            gap.detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("no reads")),
+            "the read-silence watchdog's gap, not the heartbeat's: {gap:?}"
+        );
+        let status = device.reader.lock().expect("state");
+        assert!(!status.heartbeat_gap);
+        assert!(
+            status.last_message < status.last_heard,
+            "Alive moved `last_heard` and left `last_message` alone"
+        );
+    }
+
+    #[test]
+    fn the_read_silence_watchdog_leaves_a_heartbeat_gap_alone() {
+        // The guard. A read-silence tick that is *not silent long enough yet* would close this
+        // gap on the strength of nothing having been read.
+        let (device, _directory) = a_device_watching_a_reader();
+        start_the_race(&device);
+        listen_for_a_heartbeat(&device, 5_000);
+        device.update_reader(|status| status.last_heard = Some(a_minute_ago()));
+        check_for_silence(&device);
+        assert!(open_gap(&device).is_some());
+
+        device.update_reader(|status| status.last_message = Some(Instant::now()));
+        check_for_silence(&device);
+
+        assert!(
+            open_gap(&device).is_some(),
+            "nothing has been heard, so the heartbeat gap stays open"
+        );
+    }
+
+    #[test]
+    fn a_reader_never_heard_is_not_armed_and_a_threshold_of_zero_is_off() {
+        let (device, _directory) = a_device_watching_a_reader();
+        listen_for_a_heartbeat(&device, 5_000);
+        check_for_silence(&device);
+        assert!(
+            open_gap(&device).is_none(),
+            "never heard on this connection"
+        );
+
+        listen_for_a_heartbeat(&device, 0);
+        device.update_reader(|status| status.last_heard = Some(a_minute_ago()));
+        check_for_silence(&device);
+        assert!(open_gap(&device).is_none(), "off");
+    }
+
+    #[test]
+    fn a_connection_disarms_the_heartbeat_until_the_reader_is_heard_on_it() {
+        let (device, _directory) = a_device_watching_a_reader();
+        listen_for_a_heartbeat(&device, 5_000);
+        deliver(&device, vec![ReaderEvent::Alive]);
+
+        record_connection(&device, None);
+
+        let status = device.reader.lock().expect("state");
+        assert!(status.last_heard.is_none());
+        assert!(!status.heartbeat_gap);
     }
 
     /// A configured database with no service around it, for the argument-checking paths.

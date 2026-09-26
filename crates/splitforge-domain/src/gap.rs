@@ -170,6 +170,66 @@ pub const fn assess_silence(
     }
 }
 
+/// How long a reader that has been heard may say nothing at all before it is presumed gone,
+/// in milliseconds. **Zero, which is off.**
+///
+/// A different question from [`DEFAULT_SILENCE_THRESHOLD_MS`]'s
+/// ([ADR-0045](../../../docs/adr/0045-a-reader-that-says-nothing-at-all-is-a-different-gap.md)).
+/// That one asks whether the reader is *reading*, and an empty field makes it ambiguous. This one
+/// asks whether it is *there*, from frames a module sends whether or not a tag is near, such as
+/// the ThingMagic end-of-cycle frame two sources say arrives about once a second. A few periods
+/// of nothing at all is then not ambiguous.
+///
+/// Off until a module on a bench has shown the period
+/// ([Q14](../../../docs/open-questions.md#q14-reader-silence-threshold)): a threshold chosen
+/// before then would be a guess about a frame nobody has timed.
+pub const DEFAULT_HEARTBEAT_THRESHOLD_MS: u64 = 0;
+
+/// What the heartbeat check should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatVerdict {
+    /// Nothing: the check is off, the reader has not been heard on this connection, or all is
+    /// as it was.
+    Idle,
+    /// Open a [`GapDetection::Suspected`] gap, or leave the one already open alone.
+    Open,
+    /// Close the gap this check opened: the reader has been heard again.
+    Close,
+}
+
+/// Decides what a heartbeat check should do (ADR-0045).
+///
+/// `heard` is whether the reader has said anything on this connection. Until it has, the check
+/// is not armed: a module that never sends such frames, or a decoder that recognises none, must
+/// not look like a reader that stopped. `quiet_for_ms` is the time since it last did.
+/// `open` is whether a gap this check opened is still open, which only this check may close:
+/// a reader that is heard again is there, and says nothing about whether it is reading.
+///
+/// **Not gated on a race running**, where [`assess_silence`] is. A reader that has been heard
+/// every second and then is not is not a quiet field, at any hour.
+#[must_use]
+pub const fn assess_heartbeat(
+    threshold_ms: u64,
+    heard: bool,
+    quiet_for_ms: u64,
+    open: bool,
+) -> HeartbeatVerdict {
+    if threshold_ms == 0 || !heard {
+        return if open {
+            HeartbeatVerdict::Close
+        } else {
+            HeartbeatVerdict::Idle
+        };
+    }
+    if quiet_for_ms >= threshold_ms {
+        HeartbeatVerdict::Open
+    } else if open {
+        HeartbeatVerdict::Close
+    } else {
+        HeartbeatVerdict::Idle
+    }
+}
+
 /// A gap, assembled from the edges that bound it.
 ///
 /// **Derived, never stored.** Nothing writes one of these; storage pairs the rows and hands
@@ -307,6 +367,66 @@ mod tests {
         // The one value that means something other than a duration, and it must win over
         // every other input — including a race that is running and a reader silent for a day.
         assert_eq!(assess_silence(0, true, u64::MAX), SilenceVerdict::Idle);
+    }
+
+    #[test]
+    fn a_reader_heard_on_time_is_left_alone_and_one_that_stops_opens_a_gap() {
+        assert_eq!(
+            assess_heartbeat(5_000, true, 1_000, false),
+            HeartbeatVerdict::Idle
+        );
+        assert_eq!(
+            assess_heartbeat(5_000, true, 4_999, false),
+            HeartbeatVerdict::Idle
+        );
+        assert_eq!(
+            assess_heartbeat(5_000, true, 5_000, false),
+            HeartbeatVerdict::Open
+        );
+        assert_eq!(
+            assess_heartbeat(5_000, true, 60_000, true),
+            HeartbeatVerdict::Open,
+            "still quiet: the gap stays open, and open_reader_gap writes no second row"
+        );
+    }
+
+    #[test]
+    fn a_reader_heard_again_closes_the_gap_this_check_opened_and_no_other() {
+        assert_eq!(
+            assess_heartbeat(5_000, true, 200, true),
+            HeartbeatVerdict::Close
+        );
+        assert_eq!(
+            assess_heartbeat(5_000, true, 200, false),
+            HeartbeatVerdict::Idle,
+            "a gap the read-silence watchdog opened is not this check's to close"
+        );
+    }
+
+    #[test]
+    fn the_heartbeat_is_not_armed_until_the_reader_has_been_heard() {
+        // A module that sends no such frame, or a decoder that recognises none, never looks
+        // like a reader that stopped.
+        assert_eq!(
+            assess_heartbeat(5_000, false, 3_600_000, false),
+            HeartbeatVerdict::Idle
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_switched_off_closes_what_it_had_opened_and_opens_nothing() {
+        assert_eq!(
+            assess_heartbeat(0, true, 3_600_000, false),
+            HeartbeatVerdict::Idle
+        );
+        assert_eq!(
+            assess_heartbeat(0, true, 3_600_000, true),
+            HeartbeatVerdict::Close
+        );
+        assert_eq!(
+            DEFAULT_HEARTBEAT_THRESHOLD_MS, 0,
+            "off until a module shows the period"
+        );
     }
 
     #[test]

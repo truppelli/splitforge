@@ -107,6 +107,20 @@ threshold for presuming it gone has to sit comfortably above. The intervals are 
 each connection, on the capture's monotonic offsets, so a clock step or an unplugged cable does
 not move them. Ignore the verdict for now: no tag has been read, so there is nothing to compare.
 
+If the period is there, **turn the heartbeat check on** at a few periods, comfortably above
+`between_frames.longest_ms`
+([ADR-0045](../adr/0045-a-reader-that-says-nothing-at-all-is-a-different-gap.md)):
+
+```bash
+sf device set --reader-heartbeat-ms 5000
+```
+
+It opens a *suspected* gap when the reader has said nothing at all for that long. It says the
+reader is there, not that it can read: a loose antenna is still `--reader-silence-ms`'s to catch.
+Pulling the cable in session 3 does not exercise it, because that is a confirmed disconnection.
+What does is a module that goes quiet while the port stays open, and no step here produces one
+yet: how to stop this board's module without the USB bridge going with it is not known.
+
 **Then one tag against the board**, for thirty seconds:
 
 ```bash
