@@ -1744,10 +1744,18 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
 - [ ] **The edge, API, and CLI crates do not deny `unwrap` and `expect`.** *From code.* There
       are no violations today, but `splitforge-edge` is the binary CONTRIBUTING's *"no
       `unwrap`/`expect` on any path reachable during an event"* rule matters most for.
-- [ ] **`backup create` builds `VACUUM INTO '<path>'` by escaping a string.** *From code.* A
+- [x] **`backup create` builds `VACUUM INTO '<path>'` by escaping a string.** *From code.* A
       non-UTF-8 path goes through `to_string_lossy`, so the snapshot is written under a
       different name, and the requested path is then opened as an empty database. *Fix:* bind
       the path as a parameter (`VACUUM INTO ?1`).
+      **Fixed.** The path is bound as `?1`. Binding alone would not have fixed the finding,
+      because SQLite takes the filename as text: a path that is not UTF-8 is now refused, naming
+      it, before anything is written. The snapshot is opened for its count without `CREATE`, so
+      a snapshot that is not where it was asked for is an error rather than an empty database
+      made there. The non-UTF-8 test fails on `8d0dff2`, where `create` is as it was at
+      `b457991`: the snapshot went elsewhere and the count failed on `no such table: raw_reads`.
+      A second test, a path with quotes in it, passes on both and holds the case the escaping
+      used to handle
 - [ ] **Supply-chain pins.** *From code.* Third-party Actions are referenced by mutable tag,
       and the workflow sets no `permissions:`. `docker/Dockerfile` pipes the cargo-binstall
       install script from its `main` branch into bash, and installs unpinned `cargo-deny` and

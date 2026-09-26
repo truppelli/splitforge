@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use time::OffsetDateTime;
 
 use crate::StorageError;
@@ -73,14 +73,21 @@ pub fn create(
         )));
     }
 
-    let path = destination.to_string_lossy().replace('\'', "''");
-    store
-        .connection()
-        .execute_batch(&format!("VACUUM INTO '{path}'"))?;
+    // SQLite takes the filename as text. A lossy conversion would write the snapshot under
+    // another name, so a path that is not UTF-8 is refused rather than approximated.
+    let Some(path) = destination.to_str() else {
+        return Err(StorageError::Decode(format!(
+            "{} is not a UTF-8 path, which is the only kind SQLite can write a snapshot to",
+            destination.display()
+        )));
+    };
+    store.connection().execute("VACUUM INTO ?1", [path])?;
 
     // Open the snapshot and count what landed in it. A backup nobody verified is a backup
     // whose failure is discovered during a restore, which is the worst possible moment.
-    let snapshot = Connection::open(destination)?;
+    // Without CREATE: if the snapshot is not where it was asked for, that is an error, not an
+    // empty database made at the requested path.
+    let snapshot = Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let raw_reads: i64 =
         snapshot.query_row("SELECT COUNT(*) FROM raw_reads", [], |row| row.get(0))?;
 
@@ -549,5 +556,53 @@ mod tests {
 
         let error = create(&store, &snapshot).expect_err("a second backup must refuse");
         assert!(error.to_string().contains("already exists"), "got: {error}");
+    }
+
+    #[test]
+    fn a_backup_path_with_a_quote_in_it_is_written_where_it_was_asked_for() {
+        let dir = tempdir().expect("tempdir");
+        let live = dir.path().join("event.db");
+        let snapshot = dir.path().join("o'brien's 5k.db");
+        {
+            let mut journal = SqliteJournal::open(&live).expect("open");
+            journal.append(&read("A")).expect("append");
+        }
+
+        let store = ConfigStore::open(&live).expect("open store");
+        let report = create(&store, &snapshot).expect("backup");
+        assert_eq!(report.raw_reads, 1);
+        assert!(snapshot.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_path_that_is_not_utf8_is_refused_and_nothing_is_written() {
+        // The 2026-09-13 review, from code: the path went through `to_string_lossy`, so the
+        // snapshot was written under a different name, and the requested path was then opened
+        // as a new, empty database.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().expect("tempdir");
+        let live = dir.path().join("event.db");
+        let snapshot = dir.path().join(OsStr::from_bytes(b"backup-\xff.db"));
+        let store = ConfigStore::open(&live).expect("open store");
+
+        let error = create(&store, &snapshot).expect_err("a non-UTF-8 path is refused");
+        assert!(
+            error.to_string().contains("not a UTF-8 path"),
+            "got: {error}"
+        );
+
+        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|entry| entry.expect("entry").file_name())
+            .filter(|name| !name.as_bytes().starts_with(b"event.db"))
+            .collect();
+        left.sort();
+        assert!(
+            left.is_empty(),
+            "nothing is written beside the journal: {left:?}"
+        );
     }
 }
