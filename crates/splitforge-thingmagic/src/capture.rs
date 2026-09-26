@@ -208,6 +208,22 @@ fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
         .map(PrimitiveDateTime::assume_utc)
 }
 
+/// A record's monotonic offset, `+1234.567ms`, in microseconds.
+fn parse_offset(text: &str) -> Option<u64> {
+    let (millis, micros) = text
+        .strip_prefix('+')?
+        .strip_suffix("ms")?
+        .split_once('.')?;
+    if micros.len() != 3 {
+        return None;
+    }
+    millis
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1000)?
+        .checked_add(micros.parse::<u64>().ok()?)
+}
+
 /// One record as its line or lines.
 fn line(record: &Record) -> String {
     let mut text = String::new();
@@ -267,6 +283,55 @@ pub struct Replay {
     pub dropped_records: u64,
     /// Lines that are neither a comment nor a record.
     pub unreadable_lines: u64,
+    /// The time from one end-of-cycle frame to the next, within a connection.
+    ///
+    /// What [Q14](../../../docs/open-questions.md#q14-reader-silence-threshold) waits on: two
+    /// sources say the module sends one about once a second into an empty field, and nothing
+    /// has timed it. Measured on the capture's monotonic offsets, so a wall clock that steps
+    /// mid-session does not move it.
+    pub end_of_cycle_every: Intervals,
+    /// The time from one frame of any kind to the next, within a connection.
+    ///
+    /// Its longest is the longest the module went without saying anything while connected,
+    /// which a threshold for presuming it gone has to be comfortably above.
+    pub between_frames: Intervals,
+}
+
+/// How far apart a series of events were, with nothing held but running totals.
+///
+/// Microseconds, at the resolution the capture records. Frames completed by the same record
+/// share its time, so an interval of zero means they arrived in one read of the port.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Intervals {
+    /// How many intervals were measured.
+    pub count: u64,
+    /// The shortest, when any was.
+    pub shortest_us: Option<u64>,
+    /// The longest, when any was.
+    pub longest_us: Option<u64>,
+    /// All of them together, for the mean.
+    pub total_us: u64,
+}
+
+impl Intervals {
+    fn add(&mut self, micros: u64) {
+        self.count += 1;
+        self.total_us = self.total_us.saturating_add(micros);
+        self.shortest_us = Some(
+            self.shortest_us
+                .map_or(micros, |shortest| shortest.min(micros)),
+        );
+        self.longest_us = Some(
+            self.longest_us
+                .map_or(micros, |longest| longest.max(micros)),
+        );
+    }
+
+    /// The mean interval, when any was measured.
+    #[must_use]
+    pub const fn mean_us(&self) -> Option<u64> {
+        self.total_us.checked_div(self.count)
+    }
 }
 
 /// Decodes frames the way the service's provider does, and counts what they were.
@@ -274,10 +339,22 @@ struct Replayer<F> {
     found: Replay,
     decoder: StreamDecoder,
     each: F,
+    /// The monotonic offset of the record being replayed, which every frame it completes
+    /// arrived at.
+    now_us: u64,
+    /// When this connection's last frame of any kind arrived.
+    last_frame_us: Option<u64>,
+    /// When this connection's last end-of-cycle frame arrived.
+    last_cycle_us: Option<u64>,
 }
 
 impl<F: FnMut(ReaderMessage)> Replayer<F> {
     fn frame(&mut self, anchor: &SessionAnchor, response: &Response<'_>) {
+        if let Some(last) = self.last_frame_us.replace(self.now_us) {
+            self.found
+                .between_frames
+                .add(self.now_us.saturating_sub(last));
+        }
         let tag_report = OpCode::ReadTagIdMultiple.to_byte();
         if response.opcode != tag_report {
             self.found.answers += 1;
@@ -297,7 +374,14 @@ impl<F: FnMut(ReaderMessage)> Replayer<F> {
                     (self.each)(read);
                 }
             }
-            0x0400 => self.found.end_of_cycle += 1,
+            0x0400 => {
+                self.found.end_of_cycle += 1;
+                if let Some(last) = self.last_cycle_us.replace(self.now_us) {
+                    self.found
+                        .end_of_cycle_every
+                        .add(self.now_us.saturating_sub(last));
+                }
+            }
             _ => self.found.other_status += 1,
         }
     }
@@ -308,6 +392,10 @@ impl<F: FnMut(ReaderMessage)> Replayer<F> {
             reassembler.flush(|response| self.frame(&anchor, response));
             self.found.framing_faults += reassembler.stats().errors();
         }
+        // Intervals are measured within a connection. The time a cable spent unplugged is a
+        // gap, not the module's cadence.
+        self.last_frame_us = None;
+        self.last_cycle_us = None;
     }
 }
 
@@ -331,6 +419,9 @@ pub fn replay(
         found: Replay::default(),
         decoder: StreamDecoder::new(reader_id),
         each,
+        now_us: 0,
+        last_frame_us: None,
+        last_cycle_us: None,
     };
     let mut connection: Option<(Reassembler, SessionAnchor)> = None;
 
@@ -346,15 +437,16 @@ pub fn replay(
             continue;
         }
         let mut fields = line.splitn(3, ' ');
-        let (Some(at), Some(_since), Some(what)) = (fields.next(), fields.next(), fields.next())
+        let (Some(at), Some(since), Some(what)) = (fields.next(), fields.next(), fields.next())
         else {
             replayer.found.unreadable_lines += 1;
             continue;
         };
-        let Some(at) = parse_timestamp(at) else {
+        let (Some(at), Some(since)) = (parse_timestamp(at), parse_offset(since)) else {
             replayer.found.unreadable_lines += 1;
             continue;
         };
+        replayer.now_us = since;
         replayer.found.first_at.get_or_insert(at);
         replayer.found.last_at = Some(at);
 
@@ -857,6 +949,73 @@ mod tests {
         let found = replay(text.as_bytes(), ReaderId::new("mat"), |_| {}).expect("replay");
         assert_eq!(found.dropped_records, 7);
         assert_eq!(found.unreadable_lines, 2, "{found:?}");
+    }
+
+    #[test]
+    fn a_replay_times_the_end_of_cycle_frames_within_each_connection() {
+        // Q14: how often the module speaks into an empty field. Three frames about a second
+        // apart, then a reconnection whose first frame comes nine seconds after the last one
+        // before it, which is time unplugged and not the module's cadence.
+        let at = "2026-09-26T10:00:00.000000Z";
+        let cycle = hex(&frame(0x22, 0x0400, &[]));
+        let text = format!(
+            "{at} +0.000ms open\n\
+             {at} +1000.000ms < {cycle}\n\
+             {at} +2000.250ms < {cycle}\n\
+             {at} +2999.750ms < {cycle}\n\
+             {at} +3000.000ms eof\n\
+             {at} +11000.000ms open\n\
+             {at} +12000.000ms < {cycle}\n\
+             {at} +13000.000ms < {cycle}\n\
+             {at} +13500.000ms close\n"
+        );
+        let found = replay(text.as_bytes(), ReaderId::new("mat"), |_| {}).expect("replay");
+
+        assert_eq!(found.end_of_cycle, 5);
+        let every = found.end_of_cycle_every;
+        assert_eq!(
+            every.count, 3,
+            "two in the first connection, one in the second: {every:?}"
+        );
+        assert_eq!(every.shortest_us, Some(999_500));
+        assert_eq!(every.longest_us, Some(1_000_250));
+        assert_eq!(every.mean_us(), Some(999_916));
+        assert_eq!(found.between_frames, every, "nothing else was said");
+    }
+
+    #[test]
+    fn the_time_between_frames_counts_every_frame_the_module_sent() {
+        // A tag report between two end-of-cycle frames breaks the quiet but not the cycle.
+        let at = "2026-09-26T10:00:00.000000Z";
+        let cycle = hex(&frame(0x22, 0x0400, &[]));
+        let report = hex(&crate::crc::CAPTURED_FRAME);
+        let text = format!(
+            "{at} +0.000ms open\n\
+             {at} +1000.000ms < {cycle}\n\
+             {at} +1400.000ms < {report}\n\
+             {at} +2000.000ms < {cycle}\n\
+             {at} +5000.000ms < {cycle}\n"
+        );
+        let found = replay(text.as_bytes(), ReaderId::new("mat"), |_| {}).expect("replay");
+
+        assert_eq!(found.end_of_cycle_every.count, 2);
+        assert_eq!(found.end_of_cycle_every.longest_us, Some(3_000_000));
+        assert_eq!(found.between_frames.count, 3);
+        assert_eq!(found.between_frames.shortest_us, Some(400_000));
+        assert_eq!(found.between_frames.longest_us, Some(3_000_000));
+    }
+
+    #[test]
+    fn a_record_whose_offset_cannot_be_read_is_counted_and_not_timed() {
+        assert_eq!(parse_offset("+1234.567ms"), Some(1_234_567));
+        assert_eq!(parse_offset("+0.000ms"), Some(0));
+        for bad in ["1234.567ms", "+1234.56ms", "+1234ms", "+x.000ms", "+1.000"] {
+            assert_eq!(parse_offset(bad), None, "{bad}");
+        }
+        let at = "2026-09-26T10:00:00.000000Z";
+        let text = format!("{at} +0.000ms open\n{at} later < 00\n");
+        let found = replay(text.as_bytes(), ReaderId::new("mat"), |_| {}).expect("replay");
+        assert_eq!(found.unreadable_lines, 1);
     }
 
     #[cfg(unix)]

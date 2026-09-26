@@ -124,6 +124,15 @@ pub trait TagReportDecoder: Send {
     fn faults(&self) -> u64 {
         0
     }
+
+    /// Verified frames this decoder accepted that carried no read, since it was created.
+    ///
+    /// What the provider reports as [`ReaderEvent::Alive`]. Zero by default, which is the truth
+    /// for a decoder that recognises no such frame, and which leaves the heartbeat detector
+    /// unarmed rather than tripping it (ADR-0045).
+    fn heard(&self) -> u64 {
+        0
+    }
 }
 
 /// A decoder that reads nothing, and counts what it declined to read.
@@ -249,6 +258,8 @@ pub struct ThingMagicReader<P, D> {
     framing_before: u64,
     /// The totals last sent, so a report goes out only when one changes.
     faults_reported: ReaderFaults,
+    /// The decoder's [`TagReportDecoder::heard`] when [`ReaderEvent::Alive`] was last sent.
+    heard_reported: u64,
     /// What each connection sends before it streams, or `None` to only listen.
     start: Option<StartSequence>,
     /// The last refusal logged, so a module refusing the same command on every attempt says
@@ -288,6 +299,7 @@ where
             capacity: 256,
             framing_before: 0,
             faults_reported: ReaderFaults::default(),
+            heard_reported: 0,
             start: None,
             last_refusal: None,
             last_open_failure: None,
@@ -635,6 +647,16 @@ where
                 return Pumped::ConsumerGone;
             }
 
+            // After the reads, like the faults. One event for however many such frames this
+            // turn decoded: the service wants to know when it last heard, not how often.
+            let heard = self.decoder.heard();
+            if heard > self.heard_reported {
+                self.heard_reported = heard;
+                if sender.blocking_send(ReaderEvent::Alive).is_err() {
+                    return Pumped::ConsumerGone;
+                }
+            }
+
             if let Some(cause) = cause {
                 self.framing_before = framing;
                 return Pumped::Ended {
@@ -764,7 +786,8 @@ mod tests {
                 ReaderEvent::Connected
                 | ReaderEvent::Disconnected { .. }
                 | ReaderEvent::Faults(_)
-                | ReaderEvent::TransmitPower(_) => {}
+                | ReaderEvent::TransmitPower(_)
+                | ReaderEvent::Alive => {}
             }
         }
     }
@@ -1047,6 +1070,69 @@ mod tests {
             }),
             "unchanged totals are not sent again"
         );
+    }
+
+    #[tokio::test]
+    async fn an_end_of_cycle_frame_says_the_reader_is_there_once_per_batch() {
+        // ADR-0045. Two end-of-cycle frames in one read of the port, then one in the next: two
+        // events, because the service wants to know when it last heard, not how often.
+        let cycle = answer(0x22, crate::tag_report::NO_TAGS_FOUND, &[]);
+        let script = vec![[cycle.clone(), cycle.clone()].concat(), cycle];
+        let factory = move || -> io::Result<Port> {
+            Ok(Box::new(ScriptedPort {
+                chunks: script.clone(),
+                index: 0,
+            }) as Port)
+        };
+
+        let mut receiver: mpsc::Receiver<ReaderEvent> = Box::new(
+            ThingMagicReader::new(
+                ReaderId::new("mat"),
+                factory,
+                crate::tag_report::StreamDecoder::new(ReaderId::new("mat")),
+            )
+            .with_backoff(Backoff {
+                first: Duration::from_millis(1),
+                max: Duration::from_secs(1),
+            })
+            .with_capacity(16),
+        )
+        .start();
+
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Connected));
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Alive));
+        assert_eq!(receiver.recv().await, Some(ReaderEvent::Alive));
+        assert_eq!(
+            receiver.recv().await,
+            Some(ReaderEvent::Disconnected {
+                cause: Disconnection::Ended
+            }),
+            "and no read, because none was sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decoder_that_hears_nothing_sends_no_sign_of_life() {
+        // `StubDecoder` keeps the trait's default of zero, which is what leaves the heartbeat
+        // detector unarmed for a decoder that recognises no such frame.
+        let script = vec![answer(0x22, crate::tag_report::NO_TAGS_FOUND, &[])];
+        let factory = move || -> io::Result<Port> {
+            Ok(Box::new(ScriptedPort {
+                chunks: script.clone(),
+                index: 0,
+            }) as Port)
+        };
+
+        let mut receiver = reader(factory).start();
+        loop {
+            match receiver.recv().await.expect("the reader is still running") {
+                ReaderEvent::Alive => {
+                    panic!("a decoder that hears nothing said the reader is there")
+                }
+                ReaderEvent::Disconnected { .. } => break,
+                _ => {}
+            }
+        }
     }
 
     /// A response frame with a status word, as the module sends one.

@@ -648,6 +648,17 @@ pub enum DeviceCommand {
         /// manufactures gaps on a quiet finish line; too long lets a dead reader go unnoticed.
         #[arg(long, value_name = "MS")]
         reader_silence_ms: Option<u64>,
+
+        /// Presume a reader gone after this many milliseconds in which it said nothing at all,
+        /// once it has been heard on a connection (ADR-0045).
+        ///
+        /// **Zero, the default, is off.** This listens for frames a reader sends whether or not
+        /// a tag is near, such as the ThingMagic end-of-cycle frame, and a few of their periods
+        /// is the value. It says the reader is there, not that it can read: a loose antenna is
+        /// still `--reader-silence-ms`'s to catch. Set it once a bench session has timed the
+        /// frames, with `splitforge-capture check`.
+        #[arg(long, value_name = "MS")]
+        reader_heartbeat_ms: Option<u64>,
     },
 
     /// Show device settings and what the disk currently has left.

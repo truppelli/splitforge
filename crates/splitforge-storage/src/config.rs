@@ -25,8 +25,9 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use splitforge_domain::{
     AntennaMap, Bib, Checkpoint, CheckpointId, CheckpointKind, ChipAssignment, ChipId,
-    DEFAULT_SILENCE_THRESHOLD_MS, Event, EventId, Participant, ParticipantId, Race, RaceConfig,
-    RaceId, RaceSession, Reader, ReaderId, SessionAction, StartMode, TimestampTrust, TimingPolicy,
+    DEFAULT_HEARTBEAT_THRESHOLD_MS, DEFAULT_SILENCE_THRESHOLD_MS, Event, EventId, Participant,
+    ParticipantId, Race, RaceConfig, RaceId, RaceSession, Reader, ReaderId, SessionAction,
+    StartMode, TimestampTrust, TimingPolicy,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -41,6 +42,7 @@ const MIN_FREE_BYTES_KEY: &str = "min_free_bytes";
 
 /// Key under which the reader-silence threshold is stored in `device_settings`.
 const READER_SILENCE_MS_KEY: &str = "reader_silence_threshold_ms";
+const READER_HEARTBEAT_MS_KEY: &str = "reader_heartbeat_threshold_ms";
 
 /// What an import changed.
 ///
@@ -883,6 +885,32 @@ impl ConfigStore {
         self.set_device_setting(READER_SILENCE_MS_KEY, &ms.to_string())
     }
 
+    /// How long a reader that has been heard may say nothing at all before it is presumed
+    /// gone, in milliseconds (ADR-0045). **Zero is off, and is the default.**
+    ///
+    /// Unlike the silence threshold, an unparseable value falls back to off rather than to a
+    /// conservative number. Off is the conservative number here: no measurement backs any
+    /// other until a module has shown the period of the frames this listens for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the settings table cannot be read.
+    pub fn reader_heartbeat_threshold_ms(&self) -> Result<u64, StorageError> {
+        Ok(self
+            .device_setting(READER_HEARTBEAT_MS_KEY)?
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_HEARTBEAT_THRESHOLD_MS))
+    }
+
+    /// Sets the heartbeat threshold, in milliseconds. Zero switches the check off.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the write fails.
+    pub fn set_reader_heartbeat_threshold_ms(&mut self, ms: u64) -> Result<(), StorageError> {
+        self.set_device_setting(READER_HEARTBEAT_MS_KEY, &ms.to_string())
+    }
+
     /// Whether a race has been started and not since stopped.
     ///
     /// The same question [`RaceConfig::is_running`] answers, asked without loading the roster
@@ -1598,6 +1626,22 @@ mod tests {
             assert_eq!(parse_checkpoint_kind(kind_to_str(kind)), Ok(kind));
         }
         assert!(parse_checkpoint_kind("halfway").is_err());
+    }
+
+    #[test]
+    fn the_heartbeat_is_off_until_it_is_set_and_round_trips_when_it_is() {
+        let mut store = ConfigStore::open_in_memory().expect("open");
+        assert_eq!(store.reader_heartbeat_threshold_ms().expect("read"), 0);
+        store.set_reader_heartbeat_threshold_ms(5_000).expect("set");
+        assert_eq!(store.reader_heartbeat_threshold_ms().expect("read"), 5_000);
+        store
+            .set_device_setting("reader_heartbeat_threshold_ms", "soon")
+            .expect("write nonsense");
+        assert_eq!(
+            store.reader_heartbeat_threshold_ms().expect("read"),
+            0,
+            "nonsense is off, which is the only value a measurement backs"
+        );
     }
 
     #[test]
