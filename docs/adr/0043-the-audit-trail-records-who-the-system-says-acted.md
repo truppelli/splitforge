@@ -1,6 +1,6 @@
 # ADR-0043: The audit trail records who the system says acted, beside who the command was told
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Extends:** [ADR-0011](0011-append-only-enforced-by-triggers.md)
 
