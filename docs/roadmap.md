@@ -433,6 +433,15 @@ pair of facts rather than a contradiction.
       the real binary with it and finds the start sequence as sent and a tag report as received.
       **Unticked until a real session has been captured**, which is the point of having it
 
+- [ ] **List the reader gaps from the CLI.** The exit criterion asks that every disconnection
+      is recorded as a bounded gap, and only `/health`'s one open gap is visible without SQL
+      against a snapshot. Found by writing [the bench runbook](readers/thingmagic-m7e-hecto-bench.md)
+- [ ] **Reconcile a capture with the journal.** *"The journal never disagrees with what
+      arrived"* is proved by decoding every frame a capture holds with the same reassembler and
+      decoder and comparing the reads with `raw_reads`. Nothing does that yet; until something
+      does, the proof is `reads_received` against `reads_persisted` per process, which a restart
+      resets. Also found by the runbook
+
 **Needs the module:**
 
 - [ ] `PrivateDevices=no` / `DevicePolicy=closed` / `DeviceAllow=char-ttyUSB rw` in the unit,
