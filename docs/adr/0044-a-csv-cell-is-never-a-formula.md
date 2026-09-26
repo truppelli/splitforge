@@ -1,6 +1,6 @@
 # ADR-0044: A CSV cell is never a formula
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Extends:** [ADR-0042](0042-a-result-says-when-its-time-was-typed.md) (on what the export contract's version rule allows)
 
