@@ -52,6 +52,12 @@
 //! device's wall clock jumps — an observation a one-shot command cannot make, because it was
 //! not there for the moment before.
 
+// No panicking on any path reachable during an event: a corrupt frame, a missing
+// field, or an out-of-range value must become an error the caller can act on, never a
+// timer that stops mid-race. Test code is exempt, where panicking on the unexpected is
+// the point. See CONTRIBUTING.md, "Code standards".
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;

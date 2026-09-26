@@ -1775,9 +1775,15 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       reader first for M3a's measurements to settle. The new tests call what this change
       added, the checkpoint and where a pass started, so they have nothing to run against at
       `3cef7c0`; the measurement above is the before and after.
-- [ ] **The edge, API, and CLI crates do not deny `unwrap` and `expect`.** *From code.* There
+- [x] **The edge, API, and CLI crates do not deny `unwrap` and `expect`.** *From code.* There
       are no violations today, but `splitforge-edge` is the binary CONTRIBUTING's *"no
       `unwrap`/`expect` on any path reachable during an event"* rule matters most for.
+      **Fixed.** The five crate roots that lacked it now carry the same
+      `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]` as the rest of
+      the workspace: `splitforge-edge`'s service and `splitforge-capture`, the API, and the CLI's
+      library and binary. There were still no violations. That the lint reaches each root was
+      checked by planting an `unwrap` in each, one at a time, and seeing clippy refuse it. There
+      is no test to fail against `b457991`: the check is clippy, and CI runs it
 - [x] **`backup create` builds `VACUUM INTO '<path>'` by escaping a string.** *From code.* A
       non-UTF-8 path goes through `to_string_lossy`, so the snapshot is written under a
       different name, and the requested path is then opened as an empty database. *Fix:* bind
