@@ -10,6 +10,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read the repository and nothing else (security review 2026-09-13). No job here writes, so none
+# is given a token that could.
+permissions:
+  contents: read
+
+# Every third-party action is pinned to a commit, with its tag beside it. A tag can be moved to
+# point at other code; a commit cannot. To bump one, resolve the new tag to its commit (an
+# annotated tag to the commit it points at) and change both. `dtolnay/rust-toolchain` has no
+# useful tags, only a branch per toolchain, so it is pinned to a commit of `master` and told the
+# toolchain by input.
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -23,9 +34,10 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-26
         with:
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -33,7 +45,7 @@ jobs:
     name: Clippy (1.98)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Pinned on purpose. `@stable` moves on its own, and a new release can add a lint
       # that fails every open pull request on code none of them touched — 1.98.0 did
       # exactly that on 2026-08-20 with `chunks_exact_to_as_chunks`, reddening two PRs
@@ -43,28 +55,33 @@ jobs:
       # small deliberate change that fixes whatever it surfaces, instead of a surprise
       # that lands on somebody trying to merge something unrelated. Keep it moving —
       # a pin left alone for a year is how a codebase collects a hundred lints at once.
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-26
         with:
+          toolchain: 1.98.0
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-26
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --workspace --all-features
 
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-26
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # The Pi may run an older toolchain than a developer laptop. Catch it here
       # rather than during a deploy the night before an event.
       #
@@ -76,9 +93,13 @@ jobs:
     name: Security advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-26
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-audit@0.22.2
       # Audits the committed Cargo.lock, the one that ships. This job used to run
       # `cargo generate-lockfile` first, from before the lockfile was committed. That
       # re-resolved every dependency to its newest compatible version, 57 of them on
@@ -90,8 +111,8 @@ jobs:
     name: Licenses and bans
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           arguments: --all-features
@@ -100,11 +121,12 @@ jobs:
     name: Cross-build for Raspberry Pi (aarch64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-26
         with:
+          toolchain: stable
           targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Also the C cross-compiler: `rusqlite` is built with the `bundled` feature
       # (ADR-0009), so SQLite itself is compiled from source for the target.
       - name: Install cross toolchain
