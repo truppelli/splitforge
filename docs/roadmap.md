@@ -1778,11 +1778,25 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       `b457991`: the snapshot went elsewhere and the count failed on `no such table: raw_reads`.
       A second test, a path with quotes in it, passes on both and holds the case the escaping
       used to handle
-- [ ] **Supply-chain pins.** *From code.* Third-party Actions are referenced by mutable tag,
+- [x] **Supply-chain pins.** *From code.* Third-party Actions are referenced by mutable tag,
       and the workflow sets no `permissions:`. `docker/Dockerfile` pipes the cargo-binstall
       install script from its `main` branch into bash, and installs unpinned `cargo-deny` and
       `cargo-audit` on a floating `rust:1` base. *Fix:* pin Actions by SHA and tools by
       version, and set `permissions: contents: read`.
+      **Fixed.** Every action is pinned to a commit with its tag beside it, each the newest
+      release in the major already in use, so pinning changed no behaviour: `checkout` v4.4.0,
+      `rust-cache` v2.9.2, `install-action` v2.87.21 installing `cargo-audit@0.22.2`, and
+      `cargo-deny-action` v2.1.1. `dtolnay/rust-toolchain` has a branch per toolchain rather than
+      tags, so it is pinned to a commit of `master` and told the toolchain by input. The workflow
+      grants `contents: read` and nothing else. The image is `rust:1.98.1-slim-bookworm` by
+      digest, cargo-binstall is its v1.24.0 release tarball checked against a SHA-256 in the
+      Dockerfile, and cargo-deny 0.20.2 and cargo-audit 0.22.2 are named by version, the versions
+      the image already had. The pinned image built, a wrong checksum failed the build at
+      `sha256sum`, and all seven gates pass on it. **Not pinned, deliberately:** the `stable`
+      toolchain the fmt, test and cross-build jobs use, which rustup verifies and which those
+      jobs exist to track, and the `ubuntu-latest` runner image. The binstall hashes were taken
+      from the release assets once, not checked against the signatures published beside them.
+      There is no test to fail against `b457991`: the check is CI itself
 - [x] **Stale text tells an operator the wrong thing.** *From code.* When started with
       `--serial`, the edge still logs *"it has no tag-report decoder, so it will record
       connection gaps and no reads"*, but `StreamDecoder` is composed. M3a's *Compose the
