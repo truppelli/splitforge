@@ -53,7 +53,7 @@ this?" two years from now, the ADR is the answer.
 | [0043](0043-the-audit-trail-records-who-the-system-says-acted.md) | The audit trail records who the system says acted, beside who the command was told | Accepted |
 | [0044](0044-a-csv-cell-is-never-a-formula.md) | A CSV cell is never a formula | Accepted |
 | [0045](0045-a-reader-that-says-nothing-at-all-is-a-different-gap.md) | A reader that says nothing at all is a different gap from one that reads nothing | Accepted |
-| [0046](0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md) | RaceDay Connect is reached with ureq and rustls, from a process of its own | Proposed |
+| [0046](0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md) | RaceDay Connect is reached with ureq and rustls, from a process of its own | Accepted |
 
 ## Process
 

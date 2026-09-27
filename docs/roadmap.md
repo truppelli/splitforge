@@ -1331,8 +1331,8 @@ built before M5 has to survive the reliability work.
       corrected crossing leaves the live board, result revisions, and what each response
       means for the outbox. It sends nothing yet.
       **The client and where it runs are decided**
-      ([ADR-0046](adr/0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md),
-      Proposed): ureq with rustls and ring, trusting the system's certificate store, in a
+      ([ADR-0046](adr/0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md)):
+      ureq with rustls and ring, trusting the system's certificate store, in a
       `splitforge-ship` process with a unit of its own, because the timer's unit refuses any
       connection off the device (ADR-0032) and stays that way. Chosen over reqwest and ureq's
       bundled roots by prototypes measured against `deny.toml` and the Pi cross-build. Nothing
