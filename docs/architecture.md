@@ -338,7 +338,13 @@ sent. What follows is the shape the work must take, written down before the code
 constraint is the point and it is easier to hold to a boundary that was drawn first:
 
 - No SplitForge crate other than `splitforge-sync` may reference it
-- `splitforge-sync` may not be a dependency of `engine`, `results`, or the read path
+- `splitforge-sync` may not be a dependency of `engine`, `results`, or the read path. The
+  dependency rules hold this for every crate but `splitforge-edge`, which may depend on it
+  because the shipper will be composed there. Inside the edge,
+  `apps/splitforge-edge/tests/read_path_boundary.rs` holds it: only a `src/ship.rs` or
+  `src/ship/` module may name the crate, and the functions a read and its evidence pass
+  through (`read_into_journal`, `store`, `record_connection`, `check_for_silence`) may not
+  mention it, the `ship` module, or the outbox
 - Outbound messages are written to a local `outbox_messages` table and shipped
   asynchronously; failure to ship is a warning, never an error that blocks timing
 - Credentials live in local config, are never required for startup, and their absence

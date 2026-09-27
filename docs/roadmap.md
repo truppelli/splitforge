@@ -1308,8 +1308,9 @@ Building an integration is not what puts the timer at risk.
 and outbound-only. The dependency rules keep the crates the read path is built from
 (`splitforge-reader`, `splitforge-storage` and the protocol adapters) from ever naming
 `splitforge-sync`, and [architecture § 5](architecture.md#5-the-raceday-connect-boundary) keeps
-it out of the read loop in `splitforge-edge`, which is a rule a reviewer holds and no test does
-yet. And this milestone's exit criterion, identical timing and byte-identical exports with
+it out of the read loop in `splitforge-edge`. That half was a rule only a reviewer held when this
+was written; `apps/splitforge-edge/tests/read_path_boundary.rs` holds it now, by reading the
+source. And this milestone's exit criterion, identical timing and byte-identical exports with
 integrations on and off, can be shown by tests rather than by hardware. So the outbox, the
 shipper and pairing may be built now, as the M4 swap let results be built before a reader
 existed.
