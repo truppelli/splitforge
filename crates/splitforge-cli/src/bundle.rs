@@ -54,15 +54,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
-use splitforge_domain::{
-    CheckpointKind, RaceConfig, RawReadJournal, StartMode, StoredRawRead, TimingPolicy,
-};
+use splitforge_domain::{CheckpointKind, RaceConfig, StartMode, TimingPolicy};
 use splitforge_storage::{ConfigStore, DiskSpace, ResultStore, SidecarStatus, SqliteJournal};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::clock_source::ClockSourceView;
 use crate::report::{DoctorReport, Finding};
+use crate::summary::JournalSummary;
 
 /// Identifies the shape of the file to whatever reads it.
 pub const BUNDLE_FORMAT: &str = "splitforge.diagnostic-bundle";
@@ -585,11 +584,11 @@ pub(crate) fn build(
     store: &ConfigStore,
     results: &ResultStore,
     journal: &SqliteJournal,
+    summary: &JournalSummary,
     configs: &[RaceConfig],
     report: &DoctorReport,
 ) -> Result<Bundle> {
     let names = Pseudonymizer::new();
-    let reads = journal.read_all().context("reading the journal")?;
 
     Ok(Bundle {
         format: BUNDLE_FORMAT,
@@ -608,10 +607,10 @@ pub(crate) fn build(
                 .map(|finding| BundledFinding::of(finding, database))
                 .collect(),
         },
-        journal: journal_section(journal, &reads),
+        journal: journal_section(journal, summary),
         races: configs
             .iter()
-            .map(|config| race_section(config, results, journal, &reads, &names))
+            .map(|config| race_section(config, results, journal, summary, &names))
             .collect::<Result<Vec<_>>>()?,
         audit: store
             .audit_trail(AUDIT_LIMIT)
@@ -664,59 +663,30 @@ fn device_section(
     })
 }
 
-/// Counts the journal without reproducing it.
-fn journal_section(journal: &SqliteJournal, reads: &[StoredRawRead]) -> JournalSection {
-    let mut by_source: BTreeMap<String, usize> = BTreeMap::new();
-    let mut chips: BTreeSet<&str> = BTreeSet::new();
-    let mut max_offset: Option<i64> = None;
-
-    for stored in reads {
-        let antenna = stored
-            .read
-            .antenna
-            .map_or_else(|| "*".to_owned(), |antenna| antenna.to_string());
-        *by_source
-            .entry(format!("{}/{antenna}", stored.read.source.as_str()))
-            .or_insert(0) += 1;
-        chips.insert(stored.read.chip.as_str());
-
-        if let Some(offset) = stored.read.clock_offset_ms {
-            max_offset = Some(max_offset.map_or(offset, |seen: i64| {
-                if offset.abs() > seen.abs() {
-                    offset
-                } else {
-                    seen
-                }
-            }));
-        }
-    }
+/// Counts the journal without reproducing it, from one streamed pass over it.
+fn journal_section(journal: &SqliteJournal, summary: &JournalSummary) -> JournalSection {
+    let by_source = summary
+        .reads_by_source
+        .iter()
+        .map(|(source, count)| {
+            let antenna = source
+                .antenna
+                .map_or_else(|| "*".to_owned(), |antenna| antenna.to_string());
+            (format!("{}/{antenna}", source.reader.as_str()), *count)
+        })
+        .collect::<BTreeMap<String, usize>>();
 
     JournalSection {
-        raw_reads: reads.len(),
-        first_seq: reads.first().map(|stored| stored.seq),
-        last_seq: reads.last().map(|stored| stored.seq),
-        sequence_gaps: reads
-            .windows(2)
-            .filter(|pair| pair[1].seq != pair[0].seq + 1)
-            .count(),
-        first_read_at: reads
-            .iter()
-            .map(|stored| stored.read.authoritative_timestamp())
-            .min(),
-        last_read_at: reads
-            .iter()
-            .map(|stored| stored.read.authoritative_timestamp())
-            .max(),
-        untrusted_clock_reads: reads
-            .iter()
-            .filter(|stored| !stored.read.device_clock_state.is_trustworthy())
-            .count(),
-        device_timed_reads: reads
-            .iter()
-            .filter(|stored| stored.read.reader_timestamp.is_none())
-            .count(),
-        max_clock_offset_ms: max_offset,
-        distinct_chips: chips.len(),
+        raw_reads: summary.reads,
+        first_seq: summary.first_seq,
+        last_seq: summary.last_seq,
+        sequence_gaps: summary.gap_count,
+        first_read_at: summary.first_read_at,
+        last_read_at: summary.last_read_at,
+        untrusted_clock_reads: summary.untrusted_clock_reads,
+        device_timed_reads: summary.device_timed_reads,
+        max_clock_offset_ms: summary.max_clock_offset_ms,
+        distinct_chips: summary.chips.len(),
         by_source,
         // `survey` reads the sidecar off disk and can legitimately fail — a missing file, a
         // permission problem. A bundle that refuses to be written because the thing it is
@@ -731,7 +701,7 @@ fn race_section(
     config: &RaceConfig,
     results: &ResultStore,
     journal: &SqliteJournal,
-    reads: &[StoredRawRead],
+    summary: &JournalSummary,
     names: &Pseudonymizer,
 ) -> Result<RaceSection> {
     let assigned: BTreeSet<&str> = config
@@ -740,12 +710,12 @@ fn race_section(
         .map(|assignment| assignment.chip.as_str())
         .collect();
 
-    let unassigned: Vec<&str> = reads
+    // Already distinct and sorted: the summary's chips are a `BTreeSet`.
+    let unassigned: Vec<&str> = summary
+        .chips
         .iter()
-        .map(|stored| stored.read.chip.as_str())
+        .map(String::as_str)
         .filter(|chip| !assigned.contains(chip))
-        .collect::<BTreeSet<&str>>()
-        .into_iter()
         .collect();
 
     let checkpoint_name = |id| {

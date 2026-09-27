@@ -256,6 +256,25 @@ impl SqliteJournal {
         self.repair(actor, &Start::Beginning)
     }
 
+    /// Hands every read in the journal to `each`, a row at a time, in sequence order.
+    ///
+    /// For questions about the whole journal whose answer is smaller than it: `doctor` and the
+    /// diagnostic bundle count, and hold a row only while they look at it. `read_all` held every
+    /// row at once, which on a million reads was most of a gigabyte for a handful of numbers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the table cannot be read or a row cannot be decoded.
+    pub fn for_each_read(&self, mut each: impl FnMut(StoredRawRead)) -> Result<(), StorageError> {
+        let sql = format!("SELECT {SELECT_COLUMNS} FROM raw_reads ORDER BY seq");
+        let mut statement = self.conn.prepare(&sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            each(row_to_stored(row)?);
+        }
+        Ok(())
+    }
+
     /// Hands every read received between `from` and `to`, inclusive, to `each`, a row at a time.
     ///
     /// For comparing a span of the journal with something else without loading all of it: the
