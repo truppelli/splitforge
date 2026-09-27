@@ -332,7 +332,7 @@ architectural constraint, not a product preference.
 **The translation is built; the shipping is not.** `splitforge-sync` holds the wire contract
 RaceDay Connect reads and pure functions from SplitForge's derivation onto it: the course
 manifest, crossings restated a runner at a time, and result revisions
-([ADR-0039](adr/0039-raceday-connect-publishes-what-splitforge-derived.md), Proposed). There
+([ADR-0039](adr/0039-raceday-connect-publishes-what-splitforge-derived.md)). There
 is still no `outbox_messages` table, no HTTP client and no pairing command, so nothing is
 sent. What follows is the shape the work must take, written down before the code because the
 constraint is the point and it is easier to hold to a boundary that was drawn first:
