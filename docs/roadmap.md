@@ -1297,8 +1297,27 @@ no matter how well it goes.
 
 ## Milestone 6 — Integrations
 
-Only after the local timer is dependable on its own — which means after Milestone 5's exit
-criterion, and therefore after hardware.
+**Built alongside the hardware milestones, and relied on only after them.** This header used to
+say *only after the local timer is dependable on its own — which means after Milestone 5's exit
+criterion, and therefore after hardware*, and the RaceDay Connect translation
+([ADR-0039](adr/0039-raceday-connect-publishes-what-splitforge-derived.md)) was built while it
+still said so. The two disagreed, and the gate is now drawn where the risk is, on 2026-09-26.
+
+Building an integration is not what puts the timer at risk.
+[ADR-0006](adr/0006-optional-outbound-integrations.md) makes every one optional, asynchronous
+and outbound-only. The dependency rules keep the crates the read path is built from
+(`splitforge-reader`, `splitforge-storage` and the protocol adapters) from ever naming
+`splitforge-sync`, and [architecture § 5](architecture.md#5-the-raceday-connect-boundary) keeps
+it out of the read loop in `splitforge-edge`, which is a rule a reviewer holds and no test does
+yet. And this milestone's exit criterion, identical timing and byte-identical exports with
+integrations on and off, can be shown by tests rather than by hardware. So the outbox, the
+shipper and pairing may be built now, as the M4 swap let results be built before a reader
+existed.
+
+**What waits for Milestone 5 is turning one on at a real event.** An integration that is
+enabled on race day is one more thing running beside a timer whose field reliability has not
+been observed yet, and [ordering principle 3](#ordering-principles) still holds: every feature
+built before M5 has to survive the reliability work.
 
 - [x] **Versioned JSON results export.** `RESULTS_FORMAT` and `RESULTS_VERSION` ship in the
       envelope of `splitforge export results --as json`
@@ -1306,7 +1325,7 @@ criterion, and therefore after hardware.
       `the_csv_column_list_is_the_contract` fails if a column moves. Every row carries the
       contract version in a trailing `format_version` column
 - ◑ **Optional RaceDay Connect publish adapter** — the translation is built
-      ([ADR-0039](adr/0039-raceday-connect-publishes-what-splitforge-derived.md), Proposed):
+      ([ADR-0039](adr/0039-raceday-connect-publishes-what-splitforge-derived.md)):
       the wire contract, the course manifest, crossings restated a runner at a time so a
       corrected crossing leaves the live board, result revisions, and what each response
       means for the outbox. It sends nothing yet

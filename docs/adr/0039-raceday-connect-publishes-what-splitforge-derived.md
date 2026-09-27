@@ -1,6 +1,6 @@
 # ADR-0039: RaceDay Connect publishes what SplitForge derived, a runner at a time
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-25
 - **Extends:** [ADR-0006](0006-optional-outbound-integrations.md)
 
