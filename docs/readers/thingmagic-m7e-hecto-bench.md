@@ -23,7 +23,7 @@ need hours.
       no reader, `/health` answering.
 - [ ] `chrony` running, with the DS3231 fitted if it has arrived. `splitforge doctor` reports the
       clock source.
-- [ ] `sqlite3` and `jq` installed (`sudo apt install sqlite3 jq`). The queries below run as root
+- [ ] `sqlite3`, `jq` and GNU `time` installed (`sudo apt install sqlite3 jq time`). The queries below run as root
       against a snapshot, never the live file: `backup create` writes it as the service's user,
       `0640`.
 - [ ] Your own account in the `splitforge` group, so `curl` can reach `/health` on the socket
@@ -252,9 +252,11 @@ preserved through deliberately induced disconnections and service restarts; the 
 disagrees with what arrived; and every disconnection is detected and recorded as a bounded gap.*
 
 **Size the stream first.** With the read filter off, one tag held in the field streams many reads
-a second. Four hours of that is millions of reads, and `doctor` and the bundle still load the
-whole journal (the roadmap's [Hygiene](../roadmap.md#hygiene) item). Use a tag that crosses the
-lane every few seconds, and check `reads_received` after ten minutes to estimate the total.
+a second. Four hours of that is millions of reads. `doctor` and the bundle stream the journal
+now, but their sidecar check still holds about 0.11 KB a read (the roadmap's
+[Hygiene](../roadmap.md#hygiene) item), so a stream nobody sized can still reach the Pi's limit
+in a long enough run. Use a tag that crosses the lane every few seconds, and check
+`reads_received` after ten minutes to estimate the total.
 
 **Run it for four hours**, with a written schedule of what was done and when:
 - ten cable pulls, of one to sixty seconds;
@@ -278,6 +280,8 @@ lane every few seconds, and check `reads_received` after ten minutes to estimate
 ```bash
 sf doctor                     # clean, or a torn write per power cut and nothing worse
 sf status                     # raw_reads
+sudo -u splitforge /usr/bin/time -f '%M KB peak, %e s'   splitforge --database $DB doctor --bundle /tmp/session-7.bundle.json
+                              # the memory the x86 figures predicted, measured on the Pi
 ls -l /var/lib/splitforge     # what a day weighs: the database, the sidecar, the capture
 ```
 
@@ -305,14 +309,14 @@ a sparser stream.
 
 ## Tooling still missing
 
-Writing this runbook found three things the exit run needs. Two are built. The third can be built
-without hardware, and should be before session 7:
+Writing this runbook found three things the exit run needs. All three are built:
 
 1. ~~**A command that lists reader gaps.**~~ Built: `splitforge reader gaps`.
 2. ~~**Reconciling a capture with the journal.**~~ Built: `splitforge-capture check`, in
    session 7.
-3. **`doctor` and the bundle within the Pi's memory** on a journal of millions of reads, or a
-   stream kept small enough that it does not matter.
+3. ~~**`doctor` and the bundle within the Pi's memory** on a journal of millions of reads.~~
+   Built: both stream the journal now, and a million reads cost 117 MB on x86 where they cost
+   440 MB and 550 MB. The `doctor --bundle` line in session 7 measures it on the Pi.
 
 ## What these sessions do not claim
 

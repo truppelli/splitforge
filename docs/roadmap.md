@@ -1729,7 +1729,7 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       watchdog still take `stores` from the runtime, each once every ten seconds, and can wait
       there on an append. The runtime is multi-threaded, so that wait holds one of its worker
       threads rather than the whole of it.
-- [ ] **Recovery, `doctor`, and the bundle load the whole journal into memory.** *From code.*
+- [x] **Recovery, `doctor`, and the bundle load the whole journal into memory.** *From code.*
       `Sidecar::scan` reads the entire file, `compare` builds a set of every id, and
       `doctor` and `bundle` call `read_all`. On a 1 GB Pi, an out-of-memory crash during
       startup recovery would become a `Restart=always` crash loop that records nothing.
@@ -1775,6 +1775,30 @@ A box is ticked when the fix is merged **and** its test fails on `b457991`.
       past its checkpoint. A full pass holds two sets of 16-byte ids rather than the file and
       every record. `doctor` and the bundle halved, and what remains is `read_all` in their
       other checks, which this did not touch. That half stays open, and costs one command.
+      **`doctor` and the bundle fixed too.** Neither needed the reads, only numbers about them:
+      the first sequence and any gaps, the readers and antennas reads came from, the chips seen,
+      the first and last time, and how many reads had an untrusted clock or no reader timestamp.
+      `JournalSummary` counts them in one streamed pass (`SqliteJournal::for_each_read`), holding
+      the distinct readers, antennas and chips and never the reads, and `doctor --bundle` counts
+      once for both where it used to load the journal twice. Measured the same way:
+
+      | Reads | `doctor` | `doctor --bundle` |
+      |---|---|---|
+      | 100k | 54 MB → 19 MB | 62 MB → 21 MB |
+      | 500k | 225 MB → 65 MB | 286 MB → 74 MB |
+      | 1M | 440 MB → 117 MB | 550 MB → 117 MB |
+
+      What is left is the full sidecar check both run, the same pass as `recover`: two sets of
+      16-byte ids, about 0.11 KB a read, or around fifteen million reads before a 2 GB Pi 4 is in
+      trouble. Times are not compared: the machine ran about 1.4 times slower for this run, as the
+      rows this change did not touch show (a full replay took 33.1 s where it took 24.8 s).
+      Neither output changed. On three journals, the two fixtures and one with an unmapped reader
+      and unassigned chips, `doctor`'s JSON is byte for byte what `4b5ea64` produced, and the
+      bundle is too once the generation time, the free space, the audit times and its per-bundle
+      hash tokens are set aside. Four unit tests cover what the fixtures cannot produce: a journal
+      that does not start at 1, sequence gaps, clock offsets and untrusted clocks. There is no
+      test to fail on `b457991`: the claim is memory, and the table is the evidence. **The same
+      numbers on a Pi** belong to M3a's measurement of a full day's journal
 - [x] **Nothing is recorded while startup recovery runs, and it takes longer the longer the
       event has run.** *Measured, as above.* `main` in `splitforge-edge` opens the journal with
       `open_recovering` before it composes the reader, so a module is not read until recovery

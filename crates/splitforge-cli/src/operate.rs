@@ -13,6 +13,7 @@ use splitforge_storage::{ConfigStore, DiskSpace, RecoveryReport, SqliteJournal};
 use crate::cli::{ExportFormat, Format};
 use crate::clock_source;
 use crate::report::{DoctorReport, Finding, RawReadView};
+use crate::summary::JournalSummary;
 
 /// Streams raw reads, optionally following the journal as it grows.
 ///
@@ -142,6 +143,7 @@ pub(crate) fn doctor(
     database: &Path,
     store: &ConfigStore,
     journal: &SqliteJournal,
+    summary: &JournalSummary,
     configs: &[RaceConfig],
 ) -> Result<DoctorReport> {
     let mut findings = Vec::new();
@@ -284,30 +286,24 @@ pub(crate) fn doctor(
     // The journal's sequence numbers are the independent answer to "did we lose a read?".
     // A gap means rows left a table that has no DELETE path, which is worth shouting about.
     checks_run += 1;
-    let reads = journal.read_all()?;
-    if let Some(first) = reads.first() {
-        if first.seq != 1 {
+    if let Some(first_seq) = summary.first_seq {
+        if first_seq != 1 {
             findings.push(Finding::warning(
                 "journal.sequence",
                 format!(
-                    "the journal starts at sequence {} rather than 1; reads may predate this file",
-                    first.seq
+                    "the journal starts at sequence {first_seq} rather than 1; reads may predate this file"
                 ),
             ));
         }
-        let gaps: Vec<u64> = reads
-            .windows(2)
-            .filter(|pair| pair[1].seq != pair[0].seq + 1)
-            .map(|pair| pair[0].seq)
-            .collect();
-        if !gaps.is_empty() {
+        if summary.gap_count > 0 {
             findings.push(Finding::error(
                 "journal.sequence",
                 format!(
                     "the journal has {} gap(s), after sequence {}. Evidence is missing.",
-                    gaps.len(),
-                    gaps.iter()
-                        .take(5)
+                    summary.gap_count,
+                    summary
+                        .first_gaps_after
+                        .iter()
                         .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -473,28 +469,27 @@ pub(crate) fn doctor(
 
         // A reader that appears in the journal but is mapped to nothing is the single most
         // common configuration mistake: the mat works, the reads land, and nothing scores.
+        // The first unmapped one in the order the journal met them, which is the read a pass
+        // over every read would stop at.
         checks_run += 1;
-        for stored in &reads {
-            if config
+        if let Some(source) = summary.sources.iter().find(|source| {
+            config
                 .antennas
-                .resolve(&stored.read.source, stored.read.antenna)
+                .resolve(&source.reader, source.antenna)
                 .is_none()
-            {
-                findings.push(Finding::error(
-                    "config.readers",
-                    format!(
-                        "reader {:?} (antenna {}) has reads in the journal but is not mapped to \
-                         any checkpoint of race {:?}",
-                        stored.read.source.as_str(),
-                        stored
-                            .read
-                            .antenna
-                            .map_or_else(|| "none".to_owned(), |a| a.to_string()),
-                        race.name
-                    ),
-                ));
-                break;
-            }
+        }) {
+            findings.push(Finding::error(
+                "config.readers",
+                format!(
+                    "reader {:?} (antenna {}) has reads in the journal but is not mapped to \
+                     any checkpoint of race {:?}",
+                    source.reader.as_str(),
+                    source
+                        .antenna
+                        .map_or_else(|| "none".to_owned(), |a| a.to_string()),
+                    race.name
+                ),
+            ));
         }
 
         checks_run += 1;
@@ -511,10 +506,7 @@ pub(crate) fn doctor(
     }
 
     checks_run += 1;
-    let untrusted = reads
-        .iter()
-        .filter(|stored| !stored.read.device_clock_state.is_trustworthy())
-        .count();
+    let untrusted = summary.untrusted_clock_reads;
     if untrusted > 0 {
         findings.push(Finding::warning(
             "clock.device",

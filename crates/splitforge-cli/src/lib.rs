@@ -51,6 +51,7 @@ mod operate;
 mod report;
 mod results;
 mod simulate;
+mod summary;
 
 use std::path::Path;
 
@@ -725,7 +726,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                     .map(|race| store.load(race.id))
                     .collect::<Result<Vec<_>, _>>()?,
             };
-            let report = operate::doctor(&database, &store, &journal, &configs)?;
+            // Counted once, a row at a time, for both the report and the bundle, which each
+            // used to load every read to answer a handful of numbers.
+            let summary = summary::JournalSummary::of(&journal)?;
+            let report = operate::doctor(&database, &store, &journal, &summary, &configs)?;
             let errors = report.errors;
 
             // Written before the findings are printed and long before the non-zero exit
@@ -733,8 +737,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             // creation to a clean run would withhold it in every case it exists for.
             if let Some(path) = bundle.as_deref() {
                 let results = open_results(&database)?;
-                let contents =
-                    bundle::build(&database, &store, &results, &journal, &configs, &report)?;
+                let contents = bundle::build(
+                    &database, &store, &results, &journal, &summary, &configs, &report,
+                )?;
                 let json = serde_json::to_string_pretty(&contents)
                     .context("serializing the diagnostic bundle")?;
                 std::fs::write(path, json)
