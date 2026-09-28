@@ -1335,8 +1335,14 @@ built before M5 has to survive the reliability work.
       ureq with rustls and ring, trusting the system's certificate store, in a
       `splitforge-ship` process with a unit of its own, because the timer's unit refuses any
       connection off the device (ADR-0032) and stays that way. Chosen over reqwest and ureq's
-      bundled roots by prototypes measured against `deny.toml` and the Pi cross-build. Nothing
-      is built yet
+      bundled roots by prototypes measured against `deny.toml` and the Pi cross-build.
+      **The client is built**: `raceday::transport` in `splitforge-sync` pairs, and sends the
+      manifest, crossings and results, each answer classified by `raceday::delivery`. A failure
+      with no status, a TLS one included, is a retry. A token goes only over TLS, or to this
+      machine. Six tests run it against a loopback server, and it was run once against live
+      HTTPS: a trusted certificate verified, and an expired and a self-signed one came back as
+      retries with their reasons. A 3xx is now a retry, where it was refused. Nothing calls it
+      yet
 - Signed/credentialed outbound sync — the pairing contract and response types exist.
   **Where the token lives is decided**
   ([ADR-0047](adr/0047-the-shipper-reads-the-event-database-and-keeps-its-own.md)):

@@ -11,6 +11,7 @@
 //! | 2xx | [`Outcome::Delivered`] | Stored, or already held (a replay is still delivered) |
 //! | 401 | [`Outcome::Unpaired`] | The race director unpaired this box, or the token is wrong. Nothing will succeed until the operator pairs again |
 //! | 408, 429, 5xx | [`Outcome::Retry`] | Transient; RaceDay Connect answers 503 with `Retry-After` when two batches race |
+//! | 3xx | [`Outcome::Retry`] | A misconfigured endpoint. Redirects are not followed; retrying means fixing the configuration resumes delivery with nothing lost (ADR-0046) |
 //! | any other 4xx | [`Outcome::Refused`] | The same bytes will get the same answer. Set aside and reported, never retried |
 //!
 //! A transport failure — no route, DNS, a reset connection — is [`Outcome::Retry`] too,
@@ -40,7 +41,7 @@ pub fn classify(status: u16, retry_after_secs: Option<u64>) -> Outcome {
     match status {
         200..=299 => Outcome::Delivered,
         401 => Outcome::Unpaired,
-        408 | 429 | 500..=599 => Outcome::Retry {
+        300..=399 | 408 | 429 | 500..=599 => Outcome::Retry {
             after: retry_after_secs.map(Duration::from_secs),
         },
         _ => Outcome::Refused,
@@ -85,6 +86,18 @@ mod tests {
         assert_eq!(classify(500, None), Outcome::Retry { after: None });
         assert_eq!(classify(429, None), Outcome::Retry { after: None });
         assert_eq!(classify(408, None), Outcome::Retry { after: None });
+    }
+
+    #[test]
+    fn a_redirect_is_a_misconfigured_endpoint_and_is_retried_not_refused() {
+        // ADR-0046: nothing is followed, and nothing is thrown away while the address is wrong.
+        for status in [301, 302, 307, 308] {
+            assert_eq!(
+                classify(status, None),
+                Outcome::Retry { after: None },
+                "{status}"
+            );
+        }
     }
 
     #[test]

@@ -46,6 +46,11 @@ clap = { version = "4.5.51", features = ["derive"] }
 # between a reader report and a durable write parses CSV.
 csv = "1.4.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# The RaceDay Connect client, in splitforge-sync only (ADR-0046). rustls with ring, and the
+# system's certificate store: ureq's default `rustls` feature bundles `webpki-roots`, whose
+# CDLA-Permissive-2.0 license deny.toml does not allow, so its provider is left out here and
+# ring is enabled on rustls directly.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Test-only, and already in the tree: `tokio` and `tempfile` both build it. The pty module
 # gives the serial rehearsal a real tty device to point `--serial` at, through a safe API —
 # `openpty` by hand would need `unsafe`, which is denied workspace-wide (CONTRIBUTING).
@@ -77,6 +82,7 @@ tokio = { version = "1.53.1", features = [
     "time",
 ] }
 toml = "1.1.4"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 uuid = { version = "1.24.1", features = ["serde", "v4", "v5"] }
 
 [workspace.lints.rust]

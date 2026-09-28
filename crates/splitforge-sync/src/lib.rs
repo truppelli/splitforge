@@ -4,9 +4,10 @@
 //!
 //! **Status:** the RaceDay Connect publish contract and the mapping onto it
 //! ([ADR-0039](../../../docs/adr/0039-raceday-connect-publishes-what-splitforge-derived.md)).
-//! The outbox and the HTTP transport are the next slice. Nothing in this crate performs I/O
-//! yet: every function here is a pure translation from what SplitForge derived to what
-//! RaceDay Connect accepts, so it can be tested without a network, a database or a race.
+//! Everything but [`raceday::transport`] is a pure translation from what SplitForge derived
+//! to what RaceDay Connect accepts, so it can be tested without a network, a database or a
+//! race. The transport is the one module that performs I/O, and only the shipper uses it
+//! ([ADR-0046](../../../docs/adr/0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md)).
 //!
 //! - [`raceday::contract`] — the wire format, field for field what RaceDay Connect's
 //!   `/api/v1/timing` endpoints read.
@@ -17,6 +18,8 @@
 //!   revisions.
 //! - [`raceday::delivery`] — what a response means for the outbox: delivered, retry,
 //!   refused for good, or unpaired.
+//! - [`raceday::transport`] — the HTTPS client: pairing, and each send classified by
+//!   [`raceday::delivery`].
 //!
 //! ## Boundaries
 //!
