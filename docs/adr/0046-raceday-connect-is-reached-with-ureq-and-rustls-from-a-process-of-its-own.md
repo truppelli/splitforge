@@ -1,6 +1,6 @@
 # ADR-0046: RaceDay Connect is reached with ureq and rustls, from a process of its own
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-27
 - **Extends:** [ADR-0006](0006-optional-outbound-integrations.md), [ADR-0039](0039-raceday-connect-publishes-what-splitforge-derived.md)
 - **Constrained by:** [ADR-0032](0032-the-service-speaks-ip-to-this-device-only.md)
