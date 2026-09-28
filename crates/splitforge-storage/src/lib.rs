@@ -102,6 +102,18 @@ pub enum StorageError {
     )]
     SchemaAltered(Vec<String>),
 
+    /// A read-only handle found a database its writer has not yet migrated to this build's
+    /// schema. It cannot migrate it itself (ADR-0047).
+    #[error(
+        "database schema version {found} is older than this build reads ({expected}), and a          read-only handle cannot migrate it; starting the service or running any splitforge          command will"
+    )]
+    SchemaNotMigrated {
+        /// Version found in the database.
+        found: i64,
+        /// The version this build reads.
+        expected: i64,
+    },
+
     /// The database was created by a newer build than this one.
     #[error("database schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew {

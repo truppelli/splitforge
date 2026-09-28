@@ -65,6 +65,19 @@ impl ResultStore {
         })
     }
 
+    /// Opens the result store for reading only (ADR-0047). See
+    /// [`crate::SqliteJournal::open_read_only`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the file cannot be opened read-only or is at another schema
+    /// version.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Ok(Self {
+            conn: connection::open_read_only(path)?,
+        })
+    }
+
     /// Opens a private in-memory store, for tests.
     ///
     /// # Errors
