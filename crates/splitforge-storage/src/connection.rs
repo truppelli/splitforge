@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::time::Duration as StdDuration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use time::OffsetDateTime;
 
 use crate::StorageError;
@@ -28,6 +28,43 @@ use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
 /// migration fails.
 pub(crate) fn open(path: impl AsRef<Path>) -> Result<Connection, StorageError> {
     prepare(Connection::open(path)?)
+}
+
+/// Opens the event database for reading only, for the RaceDay Connect shipper (ADR-0047).
+///
+/// Never migrates and never changes a pragma that writes, so it works for a user the file's
+/// permissions let read and not write. A database at another schema version is refused rather
+/// than misread: a newer one as usual, and an older one because only its writer may migrate
+/// it.
+///
+/// In WAL mode this needs the `-shm` file to exist, or the right to create it. The timer's
+/// service keeps the database open, and with it `-shm`, all day.
+///
+/// # Errors
+///
+/// Returns [`StorageError`] if the file cannot be opened read-only or is at another schema
+/// version.
+pub(crate) fn open_read_only(path: impl AsRef<Path>) -> Result<Connection, StorageError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(StdDuration::from_secs(5))?;
+    distrust_the_schema(&conn)?;
+    let found = schema_version(&conn)?;
+    if found > SCHEMA_VERSION {
+        return Err(StorageError::SchemaTooNew {
+            found,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    if found < SCHEMA_VERSION {
+        return Err(StorageError::SchemaNotMigrated {
+            found,
+            expected: SCHEMA_VERSION,
+        });
+    }
+    Ok(conn)
 }
 
 /// Opens a private in-memory database. For tests and dry runs only — nothing survives.

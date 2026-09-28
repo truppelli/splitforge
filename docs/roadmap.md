@@ -1352,7 +1352,10 @@ built before M5 has to survive the reliability work.
   exist. **The outbox is decided** (ADR-0047): not an `outbox_messages` table in the event
   database, but the shipper's own `ship.db` holding what it last delivered per runner, diffed
   against a fresh derivation whenever `PRAGMA data_version` moves. The shipper opens the event
-  database read-only as a user the kernel will not let write it. Not built
+  database read-only as a user the kernel will not let write it. **Read-only access is
+  built**: `open_read_only` on the journal, the config store and the result store, which never
+  migrate, carry no sidecar, and refuse a database at another schema version; and
+  `SqliteJournal::data_version`. The shipper itself is not built
 - **Timing never blocks on integration success**
 
 The first two landed with Milestone 4 rather than here: results are a published contract the

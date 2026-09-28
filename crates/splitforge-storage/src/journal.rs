@@ -159,6 +159,41 @@ impl SqliteJournal {
         })
     }
 
+    /// Opens a journal for reading only, for the RaceDay Connect shipper (ADR-0047).
+    ///
+    /// No sidecar, no recovery and no migration. The shipper runs as a user the file's
+    /// permissions let read the database and not write it, so the kernel refuses a write even
+    /// if this code attempted one. An append here fails, as it should.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the file cannot be opened read-only or is at another schema
+    /// version.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Ok(Self {
+            conn: connection::open_read_only(path)?,
+            sidecar: None,
+            unconfirmed: false,
+            last_checkpoint: Instant::now(),
+            checkpoint_every: CHECKPOINT_INTERVAL,
+        })
+    }
+
+    /// A number that changes whenever another connection commits to the database, and only
+    /// then (`PRAGMA data_version`).
+    ///
+    /// What the shipper checks every interval before deriving anything (ADR-0047): the same
+    /// number twice means nothing changed, at the cost of one pragma.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the pragma cannot be read.
+    pub fn data_version(&self) -> Result<i64, StorageError> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))?)
+    }
+
     /// Opens a journal and reconciles it with its sidecar.
     ///
     /// For the process that appends reads. Running recovery on every start of the writer —
@@ -1555,6 +1590,106 @@ mod tests {
             assert_eq!(before.read, after.read);
             assert_eq!(before.seq, after.seq);
         }
+    }
+
+    #[test]
+    fn a_read_only_journal_reads_what_the_writer_committed_and_cannot_write() {
+        // ADR-0047: the shipper's handle. The writer stays open, as the timer's service does.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let mut writer = SqliteJournal::open(&path).expect("open");
+        writer.append(&sample_read("A", 0)).expect("append");
+
+        let mut reader = SqliteJournal::open_read_only(&path).expect("open read-only");
+        assert_eq!(reader.count().expect("count"), 1);
+        assert!(
+            reader.sidecar_path().is_none(),
+            "no sidecar, and no recovery"
+        );
+        let error = reader
+            .append(&sample_read("B", 1))
+            .expect_err("a read-only handle cannot append");
+        assert!(error.to_string().contains("readonly"), "{error}");
+
+        assert_eq!(
+            writer.count().expect("count"),
+            1,
+            "the refused append left nothing"
+        );
+        assert_eq!(reader.count().expect("count"), 1);
+    }
+
+    #[test]
+    fn data_version_moves_when_another_connection_commits_and_only_then() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let mut writer = SqliteJournal::open(&path).expect("open");
+        writer.append(&sample_read("A", 0)).expect("append");
+        let reader = SqliteJournal::open_read_only(&path).expect("open read-only");
+
+        let before = reader.data_version().expect("version");
+        assert_eq!(
+            reader.data_version().expect("version"),
+            before,
+            "nothing changed"
+        );
+        writer.append(&sample_read("B", 1)).expect("append");
+        let after = reader.data_version().expect("version");
+        assert_ne!(after, before, "the writer committed");
+        assert_eq!(reader.data_version().expect("version"), after);
+    }
+
+    #[test]
+    fn a_read_only_handle_refuses_a_database_its_writer_has_not_migrated() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).expect("create");
+            for migration in crate::migrations::MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version < crate::migrations::SCHEMA_VERSION)
+            {
+                conn.execute_batch(migration.sql).expect("migrate");
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at_us) \
+                     VALUES (?1, ?2, 0)",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record it");
+            }
+        }
+
+        let error = SqliteJournal::open_read_only(&path).expect_err("not migrated");
+        assert!(
+            matches!(error, StorageError::SchemaNotMigrated { expected, .. } if expected == crate::migrations::SCHEMA_VERSION),
+            "{error}"
+        );
+        let error = crate::ConfigStore::open_read_only(&path).expect_err("nor the config store");
+        assert!(
+            matches!(error, StorageError::SchemaNotMigrated { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_config_and_result_stores_open_read_only_beside_their_writer() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event.db");
+        let _writer = SqliteJournal::open(&path).expect("open");
+        crate::ConfigStore::open(&path)
+            .expect("config")
+            .set_reader_silence_threshold_ms(30_000)
+            .expect("a setting");
+
+        let config = crate::ConfigStore::open_read_only(&path).expect("config read-only");
+        assert_eq!(config.reader_silence_threshold_ms().expect("read"), 30_000);
+        let results = crate::ResultStore::open_read_only(&path).expect("results read-only");
+        assert!(
+            results
+                .revisions(splitforge_domain::RaceId::new())
+                .expect("read")
+                .is_empty()
+        );
     }
 
     #[test]

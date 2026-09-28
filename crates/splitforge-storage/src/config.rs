@@ -119,6 +119,19 @@ impl ConfigStore {
         })
     }
 
+    /// Opens the configuration store for reading only (ADR-0047). See
+    /// [`crate::SqliteJournal::open_read_only`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the file cannot be opened read-only or is at another schema
+    /// version.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Ok(Self {
+            conn: connection::open_read_only(path)?,
+        })
+    }
+
     /// Opens a private in-memory store. For tests only — nothing survives.
     ///
     /// # Errors
