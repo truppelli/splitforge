@@ -1337,10 +1337,16 @@ built before M5 has to survive the reliability work.
       connection off the device (ADR-0032) and stays that way. Chosen over reqwest and ureq's
       bundled roots by prototypes measured against `deny.toml` and the Pi cross-build. Nothing
       is built yet
-- Signed/credentialed outbound sync — the pairing contract and response types exist; the
-  `splitforge raceday pair` command and the token's place in local config do not
+- Signed/credentialed outbound sync — the pairing contract and response types exist.
+  **Where the token lives is decided**
+  ([ADR-0047](adr/0047-the-shipper-reads-the-event-database-and-keeps-its-own.md), Proposed):
+  `splitforge-ship pair`, run as the shipper's own user, keeps it in the shipper's database and
+  never in the event database, its backups or a bundle. Not built
 - Local outbox with safe retry — the retry/refuse/unpaired classification and the backoff
-  exist; the `outbox_messages` table, the last-sent state per runner and the shipper do not
+  exist. **The outbox is decided** (ADR-0047): not an `outbox_messages` table in the event
+  database, but the shipper's own `ship.db` holding what it last delivered per runner, diffed
+  against a fresh derivation whenever `PRAGMA data_version` moves. The shipper opens the event
+  database read-only as a user the kernel will not let write it. Not built
 - **Timing never blocks on integration success**
 
 The first two landed with Milestone 4 rather than here: results are a published contract the
