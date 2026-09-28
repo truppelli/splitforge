@@ -1339,7 +1339,7 @@ built before M5 has to survive the reliability work.
       is built yet
 - Signed/credentialed outbound sync — the pairing contract and response types exist.
   **Where the token lives is decided**
-  ([ADR-0047](adr/0047-the-shipper-reads-the-event-database-and-keeps-its-own.md), Proposed):
+  ([ADR-0047](adr/0047-the-shipper-reads-the-event-database-and-keeps-its-own.md)):
   `splitforge-ship pair`, run as the shipper's own user, keeps it in the shipper's database and
   never in the event database, its backups or a bundle. Not built
 - Local outbox with safe retry — the retry/refuse/unpaired classification and the backoff

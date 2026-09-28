@@ -1,6 +1,6 @@
 # ADR-0047: The shipper reads the event database, and keeps what it sent in its own
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-27
 - **Extends:** [ADR-0046](0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md)
 - **Amends:** [ADR-0006](0006-optional-outbound-integrations.md) (the `outbox_messages` table), [ADR-0039](0039-raceday-connect-publishes-what-splitforge-derived.md) § 7
