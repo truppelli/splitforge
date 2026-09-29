@@ -28,6 +28,8 @@ splitforge-storage.workspace = true
 # `splitforge-ship` only: the RaceDay Connect client and translation (ADR-0046). The read path
 # may not name it, which `tests/read_path_boundary.rs` holds.
 splitforge-sync.workspace = true
+# `splitforge-ship` derives what it publishes exactly as the timer's commands do.
+splitforge-engine.workspace = true
 # `splitforge-ship`'s own database, `ship.db`, which is not the event database and so is not
 # `splitforge-storage`'s (ADR-0047). Also held open by a test to make an append wait.
 rusqlite.workspace = true

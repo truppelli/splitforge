@@ -221,3 +221,330 @@ fn stored_token(state: &Path) -> Option<String> {
         })
         .ok()
 }
+
+// ---- run --------------------------------------------------------------------------------
+
+/// One request the fake RaceDay Connect received.
+#[derive(Debug, Clone)]
+struct Request {
+    method: String,
+    path: String,
+    body: String,
+}
+
+/// A fake RaceDay Connect answering every request with `answer(method, path)`, for as long as
+/// the test runs, and recording each one.
+fn raceday(
+    answer: impl Fn(&str, &str) -> String + Send + 'static,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Request>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("address"));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap_or_default().to_owned();
+            let path = parts.next().unwrap_or_default().to_owned();
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).expect("header");
+                let header = header.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().expect("length");
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).expect("body");
+            let response = answer(&method, &path);
+            log.lock().expect("log").push(Request {
+                method,
+                path,
+                body: String::from_utf8(body).expect("utf-8"),
+            });
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (base, seen)
+}
+
+/// A RaceDay Connect that pairs as race `r1` and takes everything.
+fn accepting(method: &str, path: &str) -> String {
+    let _ = method;
+    if path.ends_with("/pair") {
+        answer("200 OK", PAIRED)
+    } else {
+        answer("200 OK", r#"{"accepted":1}"#)
+    }
+}
+
+/// A paired shipper with the five-k course recorded, over an event database holding the
+/// simulated 5K. Returns the writer too: it has to stay open (ADR-0047).
+fn ready(url: &str) -> (Shipper, splitforge_storage::SqliteJournal) {
+    let shipper = Shipper::new();
+    let store = shipper.event();
+    let journal = simulate(&shipper.database, &store);
+    let _ = shipper.json(&["pair", "--url", url, "--code", "K7QM-4XPD"]);
+    let _ = shipper.json(&["course", "--race", "5K", "--key", "5k", "--meters", "5000"]);
+    (shipper, journal)
+}
+
+fn simulate(database: &Path, store: &ConfigStore) -> splitforge_storage::SqliteJournal {
+    let race = match store.resolve_race(None).expect("resolve") {
+        splitforge_storage::RaceSelection::One(race) => race,
+        other => panic!("one race, not {other:?}"),
+    };
+    let config = store.load(race.id).expect("load");
+    let (mut journal, _) =
+        splitforge_storage::SqliteJournal::open_recovering(database, "test").expect("journal");
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(splitforge_cli::into_journal(
+            &config,
+            "five-k",
+            &mut journal,
+            0x5F17_F03E,
+            splitforge_cli::Speed::Immediate,
+        ))
+        .expect("simulate");
+    journal
+}
+
+fn publish_results(database: &Path) {
+    use clap::Parser as _;
+    let cli = splitforge_cli::Cli::parse_from([
+        "splitforge",
+        "--database",
+        database.to_str().expect("utf-8"),
+        "--format",
+        "compact",
+        "results",
+        "publish",
+        "--reason",
+        "the test publishes",
+    ]);
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(splitforge_cli::run(cli))
+        .expect("publish");
+}
+
+fn sent_to(requests: &[Request], suffix: &str) -> Vec<Request> {
+    requests
+        .iter()
+        .filter(|request| request.path.ends_with(suffix))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_pass_sends_the_course_and_every_runner_and_the_next_sends_nothing_new() {
+    let (url, seen) = raceday(accepting);
+    let (shipper, _writer) = ready(&url);
+
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "done");
+    let first = seen.lock().expect("log").clone();
+    let manifests = sent_to(&first, "/races/r1/manifest");
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].method, "PUT");
+    let crossings = sent_to(&first, "/races/r1/crossings");
+    assert!(!crossings.is_empty(), "{first:?}");
+    let body: serde_json::Value = serde_json::from_str(&crossings[0].body).expect("json");
+    assert!(
+        !body["replaces"].as_array().expect("replaces").is_empty(),
+        "{body}"
+    );
+    assert!(
+        sent_to(&first, "/results").is_empty(),
+        "nothing is published yet"
+    );
+
+    let status = shipper.json(&["status"]);
+    assert!(
+        status["runners_sent"].as_i64().expect("a count") > 0,
+        "{status}"
+    );
+    assert!(status["delivery"]["last_error"].is_null(), "{status}");
+    assert!(status["delivery"]["last_delivered"].is_string(), "{status}");
+
+    // Nothing changed, so nothing is sent: what arrived is recorded in ship.db.
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "done");
+    assert_eq!(seen.lock().expect("log").len(), first.len());
+}
+
+#[test]
+fn a_published_revision_is_sent_once() {
+    let (url, seen) = raceday(accepting);
+    let (shipper, _writer) = ready(&url);
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "done");
+
+    publish_results(&shipper.database);
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "done");
+    let results = sent_to(&seen.lock().expect("log"), "/races/r1/results");
+    assert_eq!(results.len(), 1);
+    assert_eq!(shipper.json(&["status"])["revisions_delivered"], 1);
+
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "done");
+    assert_eq!(
+        sent_to(&seen.lock().expect("log"), "/races/r1/results").len(),
+        1
+    );
+}
+
+#[test]
+fn a_busy_raceday_connect_is_retried_and_nothing_is_recorded_as_sent() {
+    let (url, _seen) = raceday(|method, path| {
+        if path.ends_with("/crossings") {
+            answer("503 Service Unavailable", "busy")
+        } else {
+            accepting(method, path)
+        }
+    });
+    let (shipper, _writer) = ready(&url);
+
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "retry");
+    let status = shipper.json(&["status"]);
+    assert_eq!(status["runners_sent"], 0, "{status}");
+    let error = status["delivery"]["last_error"].as_str().expect("an error");
+    assert!(
+        error.contains("will retry") && error.contains("503"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_unpaired_box_stops_until_it_is_paired_again() {
+    let (url, seen) = raceday(|method, path| {
+        if path.ends_with("/manifest") {
+            answer("401 Unauthorized", "")
+        } else {
+            accepting(method, path)
+        }
+    });
+    let (shipper, _writer) = ready(&url);
+
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "stopped");
+    assert_eq!(shipper.json(&["status"])["delivery"]["unpaired"], true);
+    let sent = seen.lock().expect("log").len();
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "stopped");
+    assert_eq!(
+        seen.lock().expect("log").len(),
+        sent,
+        "nothing is sent while unpaired"
+    );
+
+    let _ = shipper.json(&["pair", "--url", &url, "--code", "K7QM-4XPD"]);
+    assert_eq!(shipper.json(&["status"])["delivery"]["unpaired"], false);
+}
+
+#[test]
+fn a_refused_course_is_not_resent_until_it_changes() {
+    let (url, seen) = raceday(|method, path| {
+        if path.ends_with("/manifest") {
+            answer("422 Unprocessable Entity", "no such distance")
+        } else {
+            accepting(method, path)
+        }
+    });
+    let (shipper, _writer) = ready(&url);
+
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "stopped");
+    let status = shipper.json(&["status"]);
+    let error = status["delivery"]["last_error"].as_str().expect("an error");
+    assert!(error.contains("the course was refused"), "{error}");
+    assert!(sent_to(&seen.lock().expect("log"), "/crossings").is_empty());
+
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "stopped");
+    assert_eq!(
+        sent_to(&seen.lock().expect("log"), "/manifest").len(),
+        1,
+        "not resent"
+    );
+
+    let _ = shipper.json(&["course", "--race", "5K", "--key", "5k", "--meters", "5010"]);
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "stopped");
+    assert_eq!(
+        sent_to(&seen.lock().expect("log"), "/manifest").len(),
+        2,
+        "a new course is sent"
+    );
+}
+
+#[test]
+fn a_shipper_waits_for_an_event_database_it_cannot_open() {
+    let (url, _seen) = raceday(accepting);
+    let shipper = Shipper::new();
+    let _ = shipper.json(&["pair", "--url", &url, "--code", "K7QM-4XPD"]);
+
+    assert_eq!(shipper.json(&["run", "--once"])["pass"], "waiting");
+    let status = shipper.json(&["status"]);
+    let error = status["delivery"]["last_error"].as_str().expect("an error");
+    assert!(error.contains("waiting for the event database"), "{error}");
+}
+
+#[test]
+fn the_running_shipper_retries_after_a_busy_answer_and_notices_new_results() {
+    // The loop itself, not one pass: a 503 with Retry-After, then a revision published while it
+    // runs, which it has to notice through data_version.
+    let busy_once = std::sync::atomic::AtomicBool::new(true);
+    let (url, seen) = raceday(move |method, path| {
+        if path.ends_with("/crossings")
+            && busy_once.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 4\r\n\
+             Connection: close\r\n\r\nbusy"
+                .to_owned()
+        } else {
+            accepting(method, path)
+        }
+    });
+    let (shipper, _writer) = ready(&url);
+    let mut running = Command::new(SHIP)
+        .arg("--state")
+        .arg(&shipper.state)
+        .arg("--database")
+        .arg(&shipper.database)
+        .args(["run", "--interval", "1"])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run splitforge-ship");
+
+    let arrived = |suffix: &str, wanted: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            let count = seen
+                .lock()
+                .expect("log")
+                .iter()
+                .filter(|request| request.path.ends_with(suffix) && request.method == "POST")
+                .count();
+            if count >= wanted {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    };
+    let crossings_delivered = arrived("/crossings", 2);
+    publish_results(&shipper.database);
+    let results_delivered = arrived("/results", 1);
+    let _ = running.kill();
+    let _ = running.wait();
+
+    assert!(
+        crossings_delivered,
+        "the refused batch was retried: {:?}",
+        seen.lock().expect("log")
+    );
+    assert!(results_delivered, "the new revision was noticed and sent");
+}
