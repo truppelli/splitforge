@@ -2,9 +2,9 @@
 //!
 //! The dependency rules keep the crates the read path is built from, `splitforge-reader`,
 //! `splitforge-storage` and the protocol adapters, from ever naming `splitforge-sync`
-//! (ADR-0012). They cannot say the same of this crate: the composition root is allowed to
-//! depend on it, because the shipper that sends to RaceDay Connect will be composed here. What
-//! keeps it out of the read loop is this file.
+//! (ADR-0012). They cannot say the same of this package: the composition root is allowed to
+//! depend on it, because the shipper that sends to RaceDay Connect, `splitforge-ship`, is a
+//! binary here (ADR-0046). What keeps it out of the timer's read loop is this file.
 //!
 //! Deliberately read from the source, as `splitforge-api` checks that it binds no port
 //! (ADR-0021). A call behind a flag or an `if` would pass every runtime test and still be the
@@ -12,10 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// Where in this crate `splitforge_sync` may be named: the shipper's own module, and nowhere
-/// else. `main.rs` starts the shipper through that module rather than naming the crate itself,
-/// so a reviewer reading the read loop never has to wonder whether something in it sends.
-const SHIPPER: &[&str] = &["src/ship.rs", "src/ship/"];
+/// Where in this package `splitforge_sync` may be named: the shipper's own binary, which is a
+/// process of its own (ADR-0046), and nowhere else. The timer's `main.rs` never names it, so a
+/// reviewer reading the read loop never has to wonder whether something in it sends.
+const SHIPPER: &[&str] = &["src/bin/splitforge-ship.rs", "src/bin/splitforge-ship/"];
 
 /// The functions a read, and the evidence about the reader, pass through in `main.rs`.
 ///
