@@ -25,6 +25,12 @@ splitforge-domain.workspace = true
 # ThingMagic adapter arrives as a different value passed to the same loop.
 splitforge-reader.workspace = true
 splitforge-storage.workspace = true
+# `splitforge-ship` only: the RaceDay Connect client and translation (ADR-0046). The read path
+# may not name it, which `tests/read_path_boundary.rs` holds.
+splitforge-sync.workspace = true
+# `splitforge-ship`'s own database, `ship.db`, which is not the event database and so is not
+# `splitforge-storage`'s (ADR-0047). Also held open by a test to make an append wait.
+rusqlite.workspace = true
 # The detail of the `reader.configured` audit row: a device path and a region, which a string
 # built by hand would have to escape. Already in the tree through `splitforge-storage`.
 serde_json.workspace = true
@@ -46,9 +52,6 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 workspace = true
 
 [dev-dependencies]
-# To hold a write lock on the event database from a second connection, which is how a test
-# makes the read path's append fail the way a busy database really does.
-rusqlite.workspace = true
 # A pseudo-terminal for the serial rehearsal: a real device for `--serial` to open, with a
 # fake module on the other end. `openpty` by hand would need `unsafe`, denied workspace-wide.
 rustix.workspace = true

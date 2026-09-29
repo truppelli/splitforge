@@ -1195,6 +1195,7 @@ dependencies = [
  "splitforge-domain",
  "splitforge-reader",
  "splitforge-storage",
+ "splitforge-sync",
  "splitforge-thingmagic",
  "splitforge-timesource",
  "tempfile",

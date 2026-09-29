@@ -1347,7 +1347,10 @@ built before M5 has to survive the reliability work.
   **Where the token lives is decided**
   ([ADR-0047](adr/0047-the-shipper-reads-the-event-database-and-keeps-its-own.md)):
   `splitforge-ship pair`, run as the shipper's own user, keeps it in the shipper's database and
-  never in the event database, its backups or a bundle. Not built
+  never in the event database, its backups or a bundle. **Built**, with `splitforge-ship pair`
+  and `status`: the pairing lives in `ship.db`, created `0600`, and `status` never prints the
+  token. `splitforge-ship course` records each race's distance key, metres and split positions,
+  checked against the race and every other course before it is kept
 - Local outbox with safe retry — the retry/refuse/unpaired classification and the backoff
   exist. **The outbox is decided** (ADR-0047): not an `outbox_messages` table in the event
   database, but the shipper's own `ship.db` holding what it last delivered per runner, diffed
