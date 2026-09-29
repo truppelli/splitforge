@@ -1358,7 +1358,14 @@ built before M5 has to survive the reliability work.
   database read-only as a user the kernel will not let write it. **Read-only access is
   built**: `open_read_only` on the journal, the config store and the result store, which never
   migrate, carry no sidecar, and refuse a database at another schema version; and
-  `SqliteJournal::data_version`. The shipper itself is not built
+  `SqliteJournal::data_version`. **The send loop is built**: `splitforge-ship run` looks every
+  10 s at both databases' `data_version`, and when either moved, derives each coursed race and
+  sends the manifest if it changed, each changed runner's crossings whole, and every result
+  revision not yet delivered, recording what arrived in `ship.db`. A retry waits out
+  `Retry-After` or the backoff, an unpaired box stops until `pair`, a refused course is not
+  resent until it changes, and other refusals are set aside. `status` shows the last error and
+  delivery. Twelve tests run the binary against a fake RaceDay Connect, one of them the running
+  loop. Its systemd unit is next
 - **Timing never blocks on integration success**
 
 The first two landed with Milestone 4 rather than here: results are a published contract the
