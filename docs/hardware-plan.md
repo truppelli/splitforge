@@ -537,8 +537,12 @@ rather than staying quiet about one that was not.
 working. Phase 1's GPS/PPS is what makes `GpsLocked` reachable at all, and it is also what
 would make a Phase 0 device stop reporting `Unsynced`.
 
-What stays gated is making any of this **blocking**. *Which* states should refuse a race
-start is [Q11](open-questions.md#q11-clock-error-budget-enforcement), which has no answer.
+**So a Phase 0 device needs `race start --force --note` for every start** without a network
+with NTP: an untrustworthy clock refuses a start
+([ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md), answering
+[Q11](open-questions.md#q11-clock-error-budget-enforcement)), and each result it times is
+published flagged `untrusted_device_clock`. That is the gate saying something true: without
+a reference, nothing has established the clock.
 
 ```text
 # Phase 0 - /boot/firmware/config.txt

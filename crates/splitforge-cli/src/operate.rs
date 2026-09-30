@@ -512,7 +512,7 @@ pub(crate) fn doctor(
             "clock.device",
             format!(
                 "{untrusted} read(s) were taken while the device clock had no trustworthy \
-                 source; results derived from them need an accuracy caveat"
+                 source; results timed by them are published flagged `untrusted_device_clock`"
             ),
         ));
     }
@@ -521,9 +521,8 @@ pub(crate) fn doctor(
     // above, which reports reads already taken under a bad one. This is the question an
     // operator can still act on: the reads have happened, the next hour's have not.
     //
-    // It warns and blocks nothing. Which states should refuse a race start is
-    // Q11 (docs/open-questions.md), which has no answer, and choosing one here would be
-    // answering it silently.
+    // It warns and blocks nothing: `race start` is where a clock known to be bad refuses
+    // (ADR-0048), and this is the earlier notice that it will.
     checks_run += 1;
     let clock_reading = clock_source::read_tracking();
     findings.extend(clock_source::findings_for(&clock_reading));

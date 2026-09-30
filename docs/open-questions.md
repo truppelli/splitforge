@@ -12,7 +12,6 @@ is in the timing model.
 | [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
 | [Q9b](#q9b-first-llrp-reader-model) | Which networked LLRP reader comes first? | **M3b — hard gate** | — |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
-| [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | M5 | — |
 | [Q12](#q12-leap-second-handling) | Leap-second policy | M5 | — |
 | [Q14](#q14-reader-silence-threshold) | How long may a streaming reader be silent before it is presumed gone? | M3a | — |
 
@@ -100,20 +99,6 @@ at an arbitrary LAN NTP server, or does it only accept a vendor default?
 
 *Leaning:* required for any event where results are published; optional for development.
 Enforced by the pre-race check rather than by refusing to run.
-
-### Q11: Clock error budget enforcement
-
-**Raised in:** [clock-and-time-discipline.md § 10](clock-and-time-discipline.md#10-health-checks-and-alarms)
-
-If measured drift implies accumulated error beyond ±0.1 s, should SplitForge refuse to
-publish a `final` revision, or publish with a prominent accuracy caveat recorded in the
-revision?
-
-Refusing protects the project's credibility. Publishing with a caveat respects that the
-organizer, not the software, owns the decision about whether the result stands.
-
-*Leaning:* record the estimated accuracy in the revision, warn loudly, do not refuse.
-A timer that will not produce results has failed at its job.
 
 ### Q12: Leap-second handling
 
@@ -277,6 +262,32 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q7](#q7-corruption-recovery-strategy) | Database corruption recovery strategy | [ADR-0018](adr/0018-write-ahead-sidecar-journal.md) |
 | [Q5](#q5-local-api-authentication-model) | Local API authentication model | [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md) |
 | [Q9a](#q9a-first-serial-module) | Which serial module is the first physical adapter? | [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) |
+| [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | [ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md) |
+
+### Q11: Clock error budget enforcement
+
+**Resolved — [ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md): never
+refuse a publish; flag each result the clock touched; refuse a start on a clock measured bad,
+with `--force --note` to go ahead on the record.**
+
+**Raised in:** [clock-and-time-discipline.md § 10](clock-and-time-discipline.md#10-health-checks-and-alarms)
+
+If measured drift implies accumulated error beyond ±0.1 s, should SplitForge refuse to
+publish a `final` revision, or publish with a prominent accuracy caveat recorded in the
+revision?
+
+Refusing protects the project's credibility. Publishing with a caveat respects that the
+organizer, not the software, owns the decision about whether the result stands.
+
+*Leaning:* record the estimated accuracy in the revision, warn loudly, do not refuse.
+A timer that will not produce results has failed at its job.
+
+**The leaning was taken, with two changes.** The caveat is a flag on each result rather than
+one figure on the revision, so it says which rows. And it records what is known without
+hardware: a crossing timed by an untrustworthy device clock, and a clock step inside a
+result's span. A drift *estimate* needs `clock_samples`, which needs GPS/PPS and an LLRP
+reader. When it exists it becomes a third flag, and it still does not refuse. The question
+also decided what it had been blocking: an untrustworthy clock now refuses a `race start`.
 
 ### Q9a: First serial module
 

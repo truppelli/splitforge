@@ -322,14 +322,10 @@ direction: it can give a later read an earlier timestamp than one recorded befor
 amount of sequence numbering repairs that after the fact.
 
 **It warns; it does not block.** A step degrades health — so `curl --fail` and a systemd
-watchdog see it without parsing a body — and raises a `doctor` warning, and that is all.
-Nothing refuses to start a race and nothing refuses to publish.
-
-That is **not** an answer to [Q11](open-questions.md#q11-clock-error-budget-enforcement),
-which asks whether accumulated error beyond the budget should block a `final` revision.
-Q11 is about *drift measured against a reference*, needs the hardware in items 3 and 4
-above, and remains open. A step is a different and cruder signal: the clock demonstrably
-moved, by a knowable amount, with no reference required.
+watchdog see it without parsing a body — and raises a `doctor` warning. Nothing refuses to
+publish. What a step does to a result is said on the result: every entry whose span it
+overlaps is published flagged `clock_step_during_result`
+([ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md), below).
 
 **Also built: `device_clock_state` is now determined**, by asking the system's time daemon
 rather than the kernel — `chronyc -c tracking`, which needs no `unsafe` and leaves
@@ -344,9 +340,25 @@ synchronised"* to chrony, so both are reported as `unsynced` — the safe direct
 [hardware-plan § 7](hardware-plan.md#7-software-plan), whose Step 6 originally claimed
 otherwise and is corrected there.
 
-Item 8's **blocking** pre-race check is still not built, and it is no longer waiting on
-hardware — it is waiting on [Q11](open-questions.md#q11-clock-error-budget-enforcement) to
-say which states should refuse a start.
+### Built: the clock blocks the start and flags the result
+
+[Q11](open-questions.md#q11-clock-error-budget-enforcement) is answered by
+[ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md), and item 8 above is
+built on it:
+
+- **`race start` refuses when `chronyc` reports an untrustworthy state**, and
+  `--force --note` goes ahead on the record, as the free-space gate does
+  ([ADR-0019](adr/0019-pre-race-gates-block-but-can-be-overridden.md)). No daemon, or one that
+  does not answer, is recorded rather than refused. A start with `--at` does not ask, because
+  its gun was not timed by this clock. The start's audit row carries the clock either way.
+  This replaces the `--i-know-the-clock-is-wrong` override the list above proposed.
+- **Publishing never refuses.** Each result the clock touched carries a flag instead:
+  `untrusted_device_clock` when a crossing it rests on was timed by the device's clock while
+  that clock was `manual` or `unsynced`, and `clock_step_during_result` when a recorded step
+  falls inside it. `results publish` counts them as `clock_caveats` and warns.
+
+Neither flag is the ±0.1 s budget. They mark results whose error nobody established. A drift
+estimate needs `clock_samples`, and becomes a third flag when it exists.
 
 **Still not built**, and still needing hardware: the DS3231, GPS/PPS, the Pi as a LAN NTP
 server, per-reader offset and skew into `clock_samples`, and time since last good sync.
@@ -371,5 +383,4 @@ server, per-reader offset and skew into `clock_samples`, and time since last goo
 |---|---|
 | [Q3](open-questions.md#q3-reader-clock-trust-defaults) | Default for `auto` trust mode, and the offset alarm threshold |
 | [Q10](open-questions.md#q10-gps-pps-time-reference) | Is GPS+PPS mandatory hardware, or a documented recommendation? |
-| [Q11](open-questions.md#q11-clock-error-budget-enforcement) | Should SplitForge refuse to publish results when accumulated clock error exceeds the budget? |
 | [Q12](open-questions.md#q12-leap-second-handling) | Leap-second policy — smearing, or record and ignore at 0.1 s resolution? |

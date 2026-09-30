@@ -55,6 +55,7 @@ this?" two years from now, the ADR is the answer.
 | [0045](0045-a-reader-that-says-nothing-at-all-is-a-different-gap.md) | A reader that says nothing at all is a different gap from one that reads nothing | Accepted |
 | [0046](0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md) | RaceDay Connect is reached with ureq and rustls, from a process of its own | Accepted |
 | [0047](0047-the-shipper-reads-the-event-database-and-keeps-its-own.md) | The shipper reads the event database, and keeps what it sent in its own | Accepted |
+| [0048](0048-a-bad-clock-blocks-the-start-and-flags-the-result.md) | A bad clock blocks the start and flags the result, and never blocks a publish | Accepted |
 
 ## Process
 

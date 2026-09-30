@@ -863,9 +863,12 @@ Operational safety, not features. This milestone is what separates a demo from a
   ([clock discipline § 10](clock-and-time-discipline.md#10-health-checks-and-alarms)). And
   **determining `DeviceClockState`**, by asking the time daemon rather than the kernel — the
   question this milestone had recorded as blocked on `unsafe`. Still hardware-gated: DS3231
-  RTC support, GPS/PPS integration, and Pi as LAN NTP server. Still *question*-gated, which
-  is not the same thing: clock state as a **blocking** pre-race check waits on
-  [Q11](open-questions.md#q11-clock-error-budget-enforcement)
+  RTC support, GPS/PPS integration, and Pi as LAN NTP server. Clock state as a **blocking**
+  pre-race check is built, now that
+  [Q11](open-questions.md#q11-clock-error-budget-enforcement) is answered
+  ([ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md)): `race start`
+  refuses on a clock measured untrustworthy unless forced on the record, and each result the
+  clock touched is published flagged rather than refused
 - [x] Manual backup and **restore drills** — restore is rehearsed, not discovered
 - [x] Corruption recovery ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
 - Graceful shutdown on power loss where the hardware permits
@@ -1166,6 +1169,9 @@ without parsing a body, and `doctor` raises a warning. Nothing refuses to start 
 nothing refuses to publish — which is deliberately *not* an answer to
 [Q11](open-questions.md#q11-clock-error-budget-enforcement), which asks about accumulated
 drift measured against a reference, needs the GPS and RTC hardware, and stays open.
+*(Since answered by [ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md):
+publishing still never refuses, and a result a step falls inside is flagged
+`clock_step_during_result`.)*
 
 Two defects surfaced, both from running it rather than from tests passing. `record_clock_step`
 returned a timestamp carrying nanoseconds the column had truncated to microseconds, so the
@@ -1223,6 +1229,9 @@ staying quiet about one that was not.
 **It warns and blocks nothing**, for the same reason step detection does. *Which* states
 should refuse a `race start` is [Q11](open-questions.md#q11-clock-error-budget-enforcement),
 Q11 has no answer, and choosing one in the code would be answering it silently.
+*(Since answered by [ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md):
+`doctor` still only warns, and `race start` refuses on a measured untrustworthy state unless
+forced on the record.)*
 
 A bundle carries the answer, because a set of finish times that are all shifted by the same
 amount is explained by this and by almost nothing else. What it does not carry is the
@@ -1269,11 +1278,11 @@ should look. Reading the daemon is hardware-free; being sure it is *this* daemon
   risk. Installing the service is written up in [deployment.md](deployment.md); this is the
   half that cannot be written honestly from a desk.
 - **The hardware half of clock discipline** — the DS3231 RTC, GPS/PPS, the Pi as a LAN NTP
-  server, and per-reader offset and skew into `clock_samples`. Clock state as a **blocking**
-  pre-race check stays gated too, but for a different reason than the rest: not hardware, but
-  [Q11](open-questions.md#q11-clock-error-budget-enforcement) — *which* states should refuse
-  a start has no answer, and choosing one in the code would be answering it silently.
-  **Determining and reporting the state is now built** — see below.
+  server, and per-reader offset and skew into `clock_samples`. **Determining and reporting the
+  state is built**, and so is making it **blocking**
+  ([ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md), answering
+  [Q11](open-questions.md#q11-clock-error-budget-enforcement)). What `clock_samples` adds is a
+  drift estimate, which becomes a third result flag and still never refuses a publish.
 
 **Measurements nothing here has taken**, because they are properties of real flash and real
 power rather than of code: whether an SD card honors `fsync` at all, what the second sync per
