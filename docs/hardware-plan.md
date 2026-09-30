@@ -645,7 +645,7 @@ Each is a decision, not a guess, and belongs in
 | 3 | Does `serialport` join the read path? | Covered by the same ADR, per `deny.toml` `[bans]` | **Decided** — ADR-0024, with `default-features = false` mandatory for the Pi cross-build |
 | 4 | Does CM4/CM5 become the shipped platform with Pi 3 as the support floor? | New ADR, plus one line in ADR-0002 | **Half decided** — [ADR-0036](adr/0036-raspberry-pi-4-is-the-edge-target.md) makes the Pi 4 the target and drops the Pi 3 as a floor. Whether a Compute Module ships is still open |
 | 5 | Is the product's radio a replaceable subassembly, or soldered down? | New ADR — it constrains the carrier design | **Open** |
-| 6 | Is [Q10](open-questions.md#q10-gps-pps-time-reference) answered as "required for published results"? | Q10 has been open since M0, and Phase 1 is when it becomes answerable | **Open** |
+| 6 | Is [Q10](open-questions.md#q10-gps-pps-time-reference) answered as "required for published results"? | Q10 has been open since M0, and Phase 1 is when it becomes answerable | **Decided** — [ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md): not required by the software. GPS+PPS is standard in the Phase 1 field kit, and the start gate ([ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md)) requires a trustworthy clock, which offline means GPS |
 
 Decisions 4 and 5 are deliberately *not* bundled into ADR-0024. They constrain a product this
 project has not committed to building, on a timescale where nothing forces the choice yet —

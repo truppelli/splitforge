@@ -125,9 +125,15 @@ readers discipline themselves to the same reference. Both clock domains collapse
 offsets go to near-zero, and cross-domain measurements stop being a source of error at
 all. This is the single highest-leverage item in this document.
 
+**Standard equipment, not a software requirement**
+([ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md),
+answering [Q10](open-questions.md#q10-gps-pps-time-reference)). The field kit carries GPS+PPS.
+What the software requires is a trustworthy clock, which `race start` checks (§ 10): offline,
+that means GPS; with a network, NTP also passes.
+
 **OPEN:** confirm the chosen reader model can be pointed at an arbitrary LAN NTP server —
-many can, some only accept a fixed vendor default. See
-[Q10](open-questions.md#q10-gps-pps-time-reference).
+many can, some only accept a fixed vendor default. That is a reader selection criterion, in
+[Q9b](open-questions.md#q9b-first-llrp-reader-model).
 
 **Never smear a leap second**
 ([ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md)). Leave chrony on its
@@ -399,4 +405,3 @@ server, per-reader offset and skew into `clock_samples`, and time since last goo
 | # | Question |
 |---|---|
 | [Q3](open-questions.md#q3-reader-clock-trust-defaults) | Default for `auto` trust mode, and the offset alarm threshold |
-| [Q10](open-questions.md#q10-gps-pps-time-reference) | Is GPS+PPS mandatory hardware, or a documented recommendation? |

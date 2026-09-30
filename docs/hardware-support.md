@@ -108,8 +108,11 @@ NTP. See [clock and time discipline](clock-and-time-discipline.md) for the full 
 | DS3231 RTC (I²C) | **Strongly recommended** | ±2 ppm, holds time across power-off. ~£5 removes the worst clock failure mode |
 | GPS receiver with PPS | **Recommended** | Stratum-1 UTC with no infrastructure. Lets the Pi serve NTP to the readers, collapsing both clocks into one domain |
 
-**OPEN:** whether these become required hardware or documented recommendations —
-[Q10](open-questions.md#q10-gps-pps-time-reference).
+**Recommendations, not requirements**
+([ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md),
+answering [Q10](open-questions.md#q10-gps-pps-time-reference)). Both are standard in the field
+kit. What the software requires is a trustworthy clock at `race start`, and at a venue with no
+network, only GPS provides one.
 
 ## Deliberately unsupported
 

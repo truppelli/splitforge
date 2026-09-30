@@ -871,7 +871,11 @@ Operational safety, not features. This milestone is what separates a demo from a
   clock touched is published flagged rather than refused. Leap seconds are decided too
   ([ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md), answering
   [Q12](open-questions.md#q12-leap-second-handling)): never smeared, so a leap is a recorded
-  one-second step that flags the results spanning it, and `doctor` warns when one is pending
+  one-second step that flags the results spanning it, and `doctor` warns when one is pending.
+  So is GPS ([ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md),
+  answering [Q10](open-questions.md#q10-gps-pps-time-reference)): standard in the field kit,
+  not a software requirement, because the start gate already requires a trustworthy clock and
+  offline only GPS provides one. **M5 has no open question left**; what remains is hardware
 - [x] Manual backup and **restore drills** — restore is rehearsed, not discovered
 - [x] Corruption recovery ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
 - Graceful shutdown on power loss where the hardware permits
