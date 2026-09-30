@@ -22,6 +22,9 @@ use std::process::Command;
 /// The service binary, built by Cargo for this test run.
 const SERVICE: &str = env!("CARGO_BIN_EXE_splitforge-edge");
 
+/// The RaceDay Connect shipper, built by Cargo for this test run (ADR-0047).
+const SHIP: &str = env!("CARGO_BIN_EXE_splitforge-ship");
+
 fn deploy() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -39,8 +42,18 @@ struct Unit {
 }
 
 impl Unit {
+    /// The timer's unit.
     fn load() -> Self {
-        let path = deploy().join("splitforge-edge.service");
+        Self::load_file("splitforge-edge.service")
+    }
+
+    /// The shipper's unit.
+    fn ship() -> Self {
+        Self::load_file("splitforge-ship.service")
+    }
+
+    fn load_file(name: &str) -> Self {
+        let path = deploy().join(name);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
 
@@ -149,19 +162,41 @@ impl Rule {
     }
 }
 
-/// The account `splitforge.sysusers.conf` declares.
-fn service_account() -> String {
+/// `splitforge.sysusers.conf`'s lines of one kind, `u` for a user or `m` for a membership, as
+/// their whitespace-separated fields after the kind.
+fn sysusers(kind: &str) -> Vec<Vec<String>> {
     let path = deploy().join("splitforge.sysusers.conf");
-    let sysusers = std::fs::read_to_string(&path)
+    let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
-    let declared: Vec<&str> = sysusers
-        .lines()
+    text.lines()
         .map(str::trim)
-        .filter(|line| line.starts_with("u "))
-        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter(|line| line.split_whitespace().next() == Some(kind))
+        .map(|line| line.split_whitespace().skip(1).map(str::to_owned).collect())
+        .collect()
+}
+
+/// The users `splitforge.sysusers.conf` declares: the timer's, then the shipper's.
+fn declared_users() -> Vec<String> {
+    let users: Vec<String> = sysusers("u")
+        .into_iter()
+        .map(|fields| fields[0].clone())
         .collect();
-    assert_eq!(declared.len(), 1, "expected one user, got {declared:?}");
-    declared[0].to_owned()
+    assert_eq!(
+        users.len(),
+        2,
+        "the timer's account and the shipper's: {users:?}"
+    );
+    users
+}
+
+/// The account the timer runs as, declared first.
+fn service_account() -> String {
+    declared_users()[0].clone()
+}
+
+/// The account the shipper runs as, declared second.
+fn ship_account() -> String {
+    declared_users()[1].clone()
 }
 
 /// The device group the unit's filter allows: `ttyUSB` for `DeviceAllow=char-ttyUSB rw`.
@@ -188,10 +223,15 @@ fn install_guide() -> String {
 /// Read out of `--help` rather than restated here, so this compares the unit against the
 /// program rather than against a second copy of the same assumption.
 fn default_for(option: &str) -> String {
-    let help = Command::new(SERVICE)
+    default_in(SERVICE, option)
+}
+
+/// A default path as `binary` reports it.
+fn default_in(binary: &str, option: &str) -> String {
+    let help = Command::new(binary)
         .arg("--help")
         .output()
-        .expect("run splitforge-edge --help");
+        .expect("run --help");
     assert!(help.status.success(), "--help failed");
     let help = String::from_utf8(help.stdout).expect("utf-8");
 
@@ -558,4 +598,168 @@ fn the_hardening_that_is_load_bearing_is_present() {
             "{directive}={value} disables a protection the unit is supposed to apply"
         );
     }
+}
+
+// ---- the shipper's unit (ADR-0046, ADR-0047) ------------------------------------------
+
+#[test]
+fn the_shippers_unit_runs_this_packages_shipper() {
+    let unit = Unit::ship();
+    let exec_start = unit.one("ExecStart");
+    let mut words = exec_start.split_whitespace();
+    let program = words.next().expect("a program");
+    assert_eq!(
+        Path::new(program)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str),
+        Some("splitforge-ship"),
+        "{exec_start}"
+    );
+    assert_eq!(
+        words.collect::<Vec<_>>(),
+        ["run"],
+        "the send loop, with the binary's default paths: {exec_start}"
+    );
+}
+
+#[test]
+fn the_shippers_state_directory_is_where_it_keeps_ship_db_and_it_reads_the_timers() {
+    let ship = Unit::ship();
+    let state = default_in(SHIP, "state");
+    assert_eq!(
+        Path::new(&state).parent().expect("a parent directory"),
+        Path::new("/var/lib").join(ship.one("StateDirectory")),
+        "StateDirectory does not provision the directory ship.db defaults to ({state})"
+    );
+    assert_eq!(
+        ship.one("StateDirectoryMode"),
+        "0700",
+        "ship.db holds the pairing token"
+    );
+
+    // The event database the shipper reads by default is the one the timer's unit provisions.
+    let database = default_in(SHIP, "database");
+    assert_eq!(
+        Path::new(&database).parent().expect("a parent directory"),
+        Path::new("/var/lib").join(Unit::load().one("StateDirectory")),
+        "the shipper would read a database the timer does not write ({database})"
+    );
+}
+
+#[test]
+fn the_shipper_has_its_own_account_and_reads_through_the_timers_group() {
+    // ADR-0047: a separate account, so the kernel refuses it the event database's write access,
+    // and a member of the timer's group, whose read access /var/lib/splitforge grants.
+    let ship = Unit::ship();
+    let timer_group = Unit::load().one("Group").to_owned();
+    let account = ship_account();
+
+    assert_ne!(account, service_account(), "not the timer's account");
+    assert_eq!(ship.one("User"), account);
+    assert_eq!(ship.one("Group"), account);
+    assert_eq!(
+        ship.one("SupplementaryGroups"),
+        timer_group,
+        "the shipper reads the event database through the timer's group"
+    );
+    assert!(
+        sysusers("m").contains(&vec![account.clone(), timer_group.clone()]),
+        "splitforge.sysusers.conf does not put {account} in {timer_group}, so `sudo -u \\n         {account} splitforge-ship pair` could not read the event database either"
+    );
+    let line = sysusers("u")
+        .into_iter()
+        .find(|fields| fields[0] == account)
+        .expect("declared");
+    assert!(
+        line.iter().any(|field| field.ends_with("nologin")),
+        "the shipper's account should not be able to log in: {line:?}"
+    );
+}
+
+#[test]
+fn the_shipper_cannot_take_what_the_timer_needs() {
+    // ADR-0047. Deriving holds every read, so on a Pi the limit is what makes running out of
+    // memory end the shipper and not the timer, and the timer gets the CPU first.
+    let ship = Unit::ship();
+    let timer = Unit::load();
+
+    let memory = ship.one("MemoryMax");
+    assert!(
+        memory.ends_with('M') || memory.ends_with('G'),
+        "MemoryMax={memory}: a size, so the shipper has a ceiling"
+    );
+    let nice: i32 = ship.one("Nice").parse().expect("a number");
+    assert!(nice > 0, "Nice={nice}: the timer should come first");
+    let weight: u32 = ship.one("CPUWeight").parse().expect("a number");
+    assert!(
+        weight < 100,
+        "CPUWeight={weight}: below the default the timer has"
+    );
+    let ship_oom: i32 = ship.one("OOMScoreAdjust").parse().expect("a number");
+    let timer_oom: i32 = timer.one("OOMScoreAdjust").parse().expect("a number");
+    assert!(
+        ship_oom > timer_oom,
+        "when memory runs short the kernel should choose the shipper ({ship_oom}) before the \\n         timer ({timer_oom})"
+    );
+}
+
+#[test]
+fn the_timer_neither_needs_nor_names_the_shipper() {
+    // ADR-0006: an integration is optional, and a device without it times exactly as one with
+    // it. So nothing in the timer's unit may refer to the shipper's.
+    let path = deploy().join("splitforge-edge.service");
+    let timer = std::fs::read_to_string(&path).expect("read the timer's unit");
+    assert!(
+        !timer.contains("splitforge-ship"),
+        "the timer's unit names the shipper; it must not depend on it or wait for it"
+    );
+
+    // Nor does the shipper hold up boot for a network, the same argument as the timer's.
+    let ship = Unit::ship();
+    for directive in ["Wants", "Requires", "BindsTo", "Requisite"] {
+        for value in ship.all(directive) {
+            assert!(
+                !value.contains("network") && !value.contains("splitforge-edge"),
+                "{directive}={value}: the shipper retries rather than requiring anything"
+            );
+        }
+    }
+    assert_eq!(ship.one("Restart"), "always");
+    assert_eq!(ship.one("StartLimitIntervalSec"), "0");
+}
+
+#[test]
+fn the_shipper_speaks_to_the_internet_and_is_otherwise_as_closed_as_the_timer() {
+    let ship = Unit::ship();
+    let families = ship.one("RestrictAddressFamilies");
+    for family in ["AF_INET", "AF_INET6"] {
+        assert!(
+            families.split_whitespace().any(|f| f == family),
+            "RaceDay Connect is on the Internet (ADR-0046): {families}"
+        );
+    }
+
+    for directive in [
+        "NoNewPrivileges",
+        "ProtectSystem",
+        "ProtectHome",
+        "PrivateTmp",
+        "PrivateDevices",
+    ] {
+        let value = ship.one(directive);
+        assert!(
+            value != "no" && value != "false",
+            "{directive}={value} disables a protection the shipper's unit should apply"
+        );
+    }
+    assert_eq!(ship.one("ProtectSystem"), "strict");
+    assert_eq!(ship.one("CapabilityBoundingSet"), "");
+
+    let umask = ship.one("UMask");
+    let bits = u32::from_str_radix(umask.trim_start_matches('0'), 8).expect("octal");
+    assert_eq!(
+        bits & 0o077,
+        0o077,
+        "UMask={umask}: ship.db holds the token"
+    );
 }
