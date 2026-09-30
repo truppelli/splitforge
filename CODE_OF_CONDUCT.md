@@ -56,9 +56,7 @@ offline event.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to
 the community leaders responsible for enforcement at:
 
-> **`TODO: enforcement contact not yet set.`** See
-> [docs/open-questions.md](docs/open-questions.md#q4-code-of-conduct-enforcement-contact).
-> This must be filled in before the repository is publicized.
+> **[the SmartSponsor contact form](https://www.smartsponsor.ai/contact)**
 
 All complaints will be reviewed and investigated promptly and fairly. All community
 leaders are obligated to respect the privacy and security of the reporter of any
