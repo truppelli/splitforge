@@ -272,6 +272,16 @@ pub enum ResultFlag {
     /// Carried beside [`Self::ManualFinish`]. The case the 2026-09-13 review reproduced: a
     /// typed time that moves a runner up the results.
     ManualFinishOverChip,
+    /// A crossing this result rests on was timed by the device's clock while that clock had
+    /// no trustworthy source (ADR-0048).
+    ///
+    /// The time is published, because refusing would be the software deciding whether the
+    /// result stands. The flag is how the result says its accuracy was not established.
+    UntrustedDeviceClock,
+    /// The device clock was recorded jumping between this result's start and its finish
+    /// (ADR-0048), so the two ends were read from different clocks and the elapsed time can
+    /// be out by up to the size of the jump.
+    ClockStepDuringResult,
 }
 
 impl ResultFlag {
@@ -289,6 +299,8 @@ impl ResultFlag {
             Self::ManualFinish => "manual_finish",
             Self::ManualStartOverChip => "manual_start_over_chip",
             Self::ManualFinishOverChip => "manual_finish_over_chip",
+            Self::UntrustedDeviceClock => "untrusted_device_clock",
+            Self::ClockStepDuringResult => "clock_step_during_result",
         }
     }
 }

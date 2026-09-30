@@ -12,12 +12,13 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use splitforge_domain::{
-    ParticipantId, RaceConfig, RawReadJournal, ResultEntry, ResultRevision, ResultRevisionId,
-    ResultStatus, RevisionStatus, ScoringPolicy, StartMode, StatusDeclaration, StatusSource,
+    ParticipantId, RaceConfig, RawReadJournal, ResultEntry, ResultFlag, ResultRevision,
+    ResultRevisionId, ResultStatus, RevisionStatus, ScoringPolicy, StartMode, StatusDeclaration,
+    StatusSource,
 };
 use splitforge_engine::{DerivationInput, derive};
 use splitforge_export::format_duration_ms;
-use splitforge_results::{ScoringInput, score};
+use splitforge_results::{ScoringInput, clock, score};
 use splitforge_storage::{ResultStore, RevisionSummary, SqliteJournal};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -234,6 +235,9 @@ pub(crate) struct PublishView {
     pub(crate) dq: usize,
     /// Whether these results differ from the previous revision.
     pub(crate) changed: bool,
+    /// Entries whose accuracy the device's clock does not support (ADR-0048). Published
+    /// anyway, each carrying the flag that says why; in the audit row because this view is.
+    pub(crate) clock_caveats: usize,
 }
 
 /// Scores the race from the journal, without writing anything.
@@ -264,7 +268,7 @@ pub(crate) fn scoreboard(
         gun_time: config.gun_time(),
     };
 
-    let entries = score(&ScoringInput {
+    let mut entries = score(&ScoringInput {
         participants: &config.participants,
         checkpoints: &config.checkpoints,
         timing_events: &derivation.timing_events,
@@ -272,6 +276,19 @@ pub(crate) fn scoreboard(
         policy: &policy,
     })
     .context("scoring the race")?;
+
+    // Published whatever the clock was doing, and said on each result it touched (ADR-0048).
+    let steps: Vec<_> = journal
+        .recent_clock_steps(u32::MAX)?
+        .into_iter()
+        .map(|stored| stored.step)
+        .collect();
+    clock::flag_clock(
+        &mut entries,
+        &clock::untrusted_events(&reads, &derivation),
+        &steps,
+        policy.gun_time,
+    );
 
     Ok((entries, policy))
 }
@@ -353,6 +370,29 @@ pub(crate) fn publish(
 
     store.publish(&revision)?;
 
+    let clock_caveats = revision
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.flags.iter().any(|flag| {
+                matches!(
+                    flag,
+                    ResultFlag::UntrustedDeviceClock | ResultFlag::ClockStepDuringResult
+                )
+            })
+        })
+        .count();
+    if clock_caveats > 0 {
+        // Loud, and after the write rather than instead of it: the organizer decides whether
+        // these results stand, and needs to know there is something to decide.
+        eprintln!(
+            "warning: {clock_caveats} result(s) in revision {number} rest on a device clock \
+             that had no trustworthy source or jumped during the race. They are published and \
+             flagged `untrusted_device_clock` or `clock_step_during_result`; \
+             `splitforge results show` lists them."
+        );
+    }
+
     let counts = revision.status_counts();
     let count_of = |status: ResultStatus| {
         counts
@@ -373,6 +413,7 @@ pub(crate) fn publish(
         dns: count_of(ResultStatus::Dns),
         dq: count_of(ResultStatus::Dq),
         changed,
+        clock_caveats,
     })
 }
 

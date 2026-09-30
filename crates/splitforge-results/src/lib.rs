@@ -35,6 +35,8 @@
 // the point. See CONTRIBUTING.md, "Code standards".
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod clock;
+
 use std::collections::BTreeMap;
 
 use splitforge_domain::{

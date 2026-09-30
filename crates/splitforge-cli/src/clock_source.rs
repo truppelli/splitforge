@@ -25,6 +25,44 @@ pub(crate) use splitforge_timesource::{ClockReading, read_tracking};
 
 use crate::report::Finding;
 
+/// The pre-race clock gate ([ADR-0048](../../../docs/adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md)),
+/// on [ADR-0019](../../../docs/adr/0019-pre-race-gates-block-but-can-be-overridden.md)'s
+/// pattern: refuse by default, `--force --note` to go ahead on the record.
+///
+/// Refuses only on a **measurement that says the clock is untrustworthy**. No daemon, or one
+/// that did not answer, is not that: the first is a laptop as often as a Pi, and refusing on
+/// the second would stop a race because a status query failed. Both are recorded with the
+/// start, so a reviewer can see the clock was never established.
+///
+/// # Errors
+///
+/// When the daemon reports an untrustworthy state and `force` is not set.
+pub(crate) fn check_start(reading: &ClockReading, force: bool) -> anyhow::Result<()> {
+    let untrusted = matches!(
+        reading,
+        ClockReading::Tracking(tracking) if !tracking.device_clock_state().is_trustworthy()
+    );
+    if untrusted && !force {
+        anyhow::bail!(
+            "the device clock is not synchronized to any time source, and the gun and every \
+             read from here on would be timed by it. Connect the time source (GPS, or a network \
+             with NTP) and wait for `chronyc tracking` to show it, or start anyway with \
+             `--force --note \"...\"`: every result timed by this clock will then be published \
+             flagged `untrusted_device_clock`."
+        );
+    }
+    Ok(())
+}
+
+/// What a `race start` records about the clock it started on: the kind of answer, and the
+/// state when there was one.
+pub(crate) fn start_record(reading: &ClockReading) -> serde_json::Value {
+    serde_json::json!({
+        "measurement": reading.measurement(),
+        "state": reading.device_clock_state().map(state_name),
+    })
+}
+
 /// What `doctor` should say about a reading, if anything.
 ///
 /// Pure, and separate from `doctor` itself, because the branch that matters most — an
@@ -32,9 +70,8 @@ use crate::report::Finding;
 /// daemon happens to be in that state. A check nobody can test is a check nobody can
 /// change safely.
 ///
-/// **Warns and blocks nothing.** Which clock states should refuse a `race start` is
-/// [Q11](../../../docs/open-questions.md#q11-clock-error-budget-enforcement), which has no
-/// answer; picking one here would be answering it silently.
+/// **Warns and blocks nothing here.** `race start` is where an untrustworthy clock refuses
+/// ([`check_start`], ADR-0048); `doctor` is the earlier, softer notice of the same thing.
 pub(crate) fn findings_for(reading: &ClockReading) -> Vec<Finding> {
     match reading {
         // A measurement saying the clock is bad. The reads have not happened yet, which is
@@ -307,8 +344,47 @@ mod tests {
     }
 
     #[test]
+    fn only_a_measured_untrustworthy_clock_refuses_a_start() {
+        let error = check_start(&classify(true, UNSYNCED, ""), false)
+            .expect_err("an unsynchronized clock refuses");
+        let message = error.to_string();
+        assert!(
+            message.contains("--force --note"),
+            "names the way out: {message}"
+        );
+        assert!(
+            !message.contains("  "),
+            "no lost line continuation: {message}"
+        );
+
+        check_start(&classify(true, UNSYNCED, ""), true).expect("forced");
+        for reading in [
+            classify(true, GPS_LOCKED, ""),
+            classify(true, NTP_SYNCED, ""),
+            // Not measured is not measured bad.
+            ClockReading::NoDaemonTool,
+            classify(false, "", "506 Cannot talk to daemon"),
+            classify(true, "not csv", ""),
+        ] {
+            check_start(&reading, false).unwrap_or_else(|error| panic!("{reading:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn a_start_records_the_clock_it_started_on() {
+        assert_eq!(
+            start_record(&classify(true, UNSYNCED, "")),
+            serde_json::json!({"measurement": "measured", "state": "unsynced"})
+        );
+        assert_eq!(
+            start_record(&ClockReading::NoDaemonTool),
+            serde_json::json!({"measurement": "no_daemon_tool", "state": null})
+        );
+    }
+
+    #[test]
     fn nothing_here_is_ever_an_error() {
-        // Q11 is unanswered, so this check warns and blocks. An `error` from `doctor` is
+        // `doctor` warns; `race start` is what refuses (ADR-0048). An `error` from `doctor` is
         // reserved for something that will produce wrong results or lose data, and a
         // clock nobody has characterized is not yet known to be either.
         for reading in [

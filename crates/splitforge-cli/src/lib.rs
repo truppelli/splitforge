@@ -156,6 +156,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                     // something actually blocks — a warning in a different command is a
                     // warning nobody ran.
                     let space = operate::check_free_space(&database, &store, force)?;
+                    // The clock times the gun and every read after it, so it is asked only
+                    // when the gun is now. `--at` records a gun somebody timed another way,
+                    // after the reads it matters to have already been taken (ADR-0048).
+                    let clock = if at.is_none() {
+                        let reading = clock_source::read_tracking();
+                        clock_source::check_start(&reading, force)?;
+                        Some(clock_source::start_record(&reading))
+                    } else {
+                        None
+                    };
                     record_session(
                         &mut store,
                         &actor,
@@ -165,6 +175,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         SessionAction::Start,
                         format,
                         Some(space),
+                        clock,
                         force,
                     )
                 }
@@ -176,6 +187,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     note,
                     SessionAction::Stop,
                     format,
+                    None,
                     None,
                     false,
                 ),
@@ -1004,7 +1016,7 @@ fn load_only_race_config(store: &ConfigStore) -> Result<RaceConfig> {
 }
 
 /// Records a start or a stop and reports it.
-#[allow(clippy::too_many_arguments)] // Two of these exist only to record the override.
+#[allow(clippy::too_many_arguments)] // Three of these exist only to record the gates.
 fn record_session(
     store: &mut ConfigStore,
     actor: &str,
@@ -1014,6 +1026,7 @@ fn record_session(
     action: SessionAction,
     format: Format,
     space: Option<splitforge_storage::DiskSpace>,
+    clock: Option<serde_json::Value>,
     forced: bool,
 ) -> Result<()> {
     let race = configure::resolve_race(store, race.race.as_deref())?;
@@ -1030,6 +1043,9 @@ fn record_session(
     });
     if let Some(space) = space {
         detail["free_mb"] = serde_json::json!(space.available_mb());
+    }
+    if let Some(clock) = &clock {
+        detail["clock"] = clock.clone();
     }
     if forced {
         // The whole point of the override is that it is legible afterwards. A start that
@@ -1052,6 +1068,9 @@ fn record_session(
     let mut view = serde_json::to_value(SessionView::of(&session)).context("encoding session")?;
     if let Some(space) = space {
         view["free_mb"] = serde_json::json!(space.available_mb());
+    }
+    if let Some(clock) = clock {
+        view["clock"] = clock;
     }
     if forced {
         view["forced"] = serde_json::json!(true);
