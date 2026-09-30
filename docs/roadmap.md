@@ -868,7 +868,10 @@ Operational safety, not features. This milestone is what separates a demo from a
   [Q11](open-questions.md#q11-clock-error-budget-enforcement) is answered
   ([ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md)): `race start`
   refuses on a clock measured untrustworthy unless forced on the record, and each result the
-  clock touched is published flagged rather than refused
+  clock touched is published flagged rather than refused. Leap seconds are decided too
+  ([ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md), answering
+  [Q12](open-questions.md#q12-leap-second-handling)): never smeared, so a leap is a recorded
+  one-second step that flags the results spanning it, and `doctor` warns when one is pending
 - [x] Manual backup and **restore drills** — restore is rehearsed, not discovered
 - [x] Corruption recovery ([ADR-0018](adr/0018-write-ahead-sidecar-journal.md))
 - Graceful shutdown on power loss where the hardware permits

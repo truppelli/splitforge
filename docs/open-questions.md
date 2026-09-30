@@ -12,7 +12,6 @@ is in the timing model.
 | [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
 | [Q9b](#q9b-first-llrp-reader-model) | Which networked LLRP reader comes first? | **M3b — hard gate** | — |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
-| [Q12](#q12-leap-second-handling) | Leap-second policy | M5 | — |
 | [Q14](#q14-reader-silence-threshold) | How long may a streaming reader be silent before it is presumed gone? | M3a | — |
 
 ---
@@ -99,45 +98,6 @@ at an arbitrary LAN NTP server, or does it only accept a vendor default?
 
 *Leaning:* required for any event where results are published; optional for development.
 Enforced by the pre-race check rather than by refusing to run.
-
-### Q12: Leap-second handling
-
-**Raised in:** [clock-and-time-discipline.md § 12](clock-and-time-discipline.md#12-open-questions)
-
-A leap second inserted mid-race is a full second — ten times the accuracy budget. Options:
-rely on the upstream time source's smearing, detect and record the event, or ignore it as
-vanishingly unlikely.
-
-Low probability, non-zero impact, cheap to at least *record*. Deciding to ignore it is
-fine; doing so without noticing is not.
-
-**Re-scoped after Milestone 4**, which this was listed as blocking. It does not, and the
-reason is worth writing down rather than asserting.
-
-Every time M4 publishes is a *difference between two stored instants*, both of them
-microseconds since the Unix epoch, both taken from the same clock domain. Unix time has no
-leap seconds by construction, so the arithmetic is unaffected by the choice made here. What
-the choice affects is whether those two instants were *correct*, which is a clock-discipline
-question and belongs with the rest of them in M5.
-
-It is not negligible, though, and the numbers are worth having:
-
-| Elapsed time measured across a smear window | Error contributed |
-|---|---|
-| 20 min (5K) | ~14 ms |
-| 1 h | ~42 ms |
-| 2 h | ~83 ms |
-| 4 h (marathon) | ~167 ms |
-| 12 h (ultra) | ~500 ms |
-
-A 24-hour smear changes the clock's rate by ~11.6 ppm, which exhausts the ±0.1 s budget at
-**2.4 hours of elapsed time**. Short races are comfortably inside it; marathons and ultras
-are not. So "rely on smearing" is a defensible answer for a 5K and an undefensible one for a
-100-miler, and the policy has to say which races it is claiming accuracy for.
-
-Nothing was deferred to dodge this. M4 computes the difference it is given; making the
-inputs trustworthy is [Q10](#q10-gps-pps-time-reference)'s and
-[Q11](#q11-clock-error-budget-enforcement)'s territory, and this belongs beside them.
 
 ### Q14: Reader silence threshold
 
@@ -263,6 +223,57 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q5](#q5-local-api-authentication-model) | Local API authentication model | [ADR-0021](adr/0021-local-api-listens-on-a-unix-socket.md) |
 | [Q9a](#q9a-first-serial-module) | Which serial module is the first physical adapter? | [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | [ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md) |
+| [Q12](#q12-leap-second-handling) | Leap-second policy | [ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md) |
+
+### Q12: Leap-second handling
+
+**Resolved — [ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md): never
+smear. A leap is a one-second step, which the service records and which flags every result
+spanning it (ADR-0048). A pending leap is warned about and recorded, and blocks nothing.**
+
+**Raised in:** [clock-and-time-discipline.md § 12](clock-and-time-discipline.md#12-open-questions)
+
+A leap second inserted mid-race is a full second — ten times the accuracy budget. Options:
+rely on the upstream time source's smearing, detect and record the event, or ignore it as
+vanishingly unlikely.
+
+Low probability, non-zero impact, cheap to at least *record*. Deciding to ignore it is
+fine; doing so without noticing is not.
+
+**Re-scoped after Milestone 4**, which this was listed as blocking. It does not, and the
+reason is worth writing down rather than asserting.
+
+Every time M4 publishes is a *difference between two stored instants*, both of them
+microseconds since the Unix epoch, both taken from the same clock domain. Unix time has no
+leap seconds by construction, so the arithmetic is unaffected by the choice made here. What
+the choice affects is whether those two instants were *correct*, which is a clock-discipline
+question and belongs with the rest of them in M5.
+
+It is not negligible, though, and the numbers are worth having:
+
+| Elapsed time measured across a smear window | Error contributed |
+|---|---|
+| 20 min (5K) | ~14 ms |
+| 1 h | ~42 ms |
+| 2 h | ~83 ms |
+| 4 h (marathon) | ~167 ms |
+| 12 h (ultra) | ~500 ms |
+
+A 24-hour smear changes the clock's rate by ~11.6 ppm, which exhausts the ±0.1 s budget at
+**2.4 hours of elapsed time**. Short races are comfortably inside it; marathons and ultras
+are not. So "rely on smearing" is a defensible answer for a 5K and an undefensible one for a
+100-miler, and the policy has to say which races it is claiming accuracy for.
+
+Nothing was deferred to dodge this. M4 computes the difference it is given; making the
+inputs trustworthy is [Q10](#q10-gps-pps-time-reference)'s and
+[Q11](#q11-clock-error-budget-enforcement)'s territory, and this belongs beside them.
+
+**The answer came from Q11's.** Of the three options, *detect and record* was already built: a
+leap under chrony's default is a one-second step, over the detector's 250 ms threshold, and
+ADR-0048 flags every result a step falls inside. So the choice left was about smearing, and
+the table above decides it: a smear is the one way a leap reaches the results without being
+seen, so SplitForge's devices never smear. What was missing was saying so before the race,
+which `doctor` now does when chrony reports a leap as pending.
 
 ### Q11: Clock error budget enforcement
 

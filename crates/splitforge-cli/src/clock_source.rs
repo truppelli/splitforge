@@ -54,12 +54,17 @@ pub(crate) fn check_start(reading: &ClockReading, force: bool) -> anyhow::Result
     Ok(())
 }
 
-/// What a `race start` records about the clock it started on: the kind of answer, and the
-/// state when there was one.
+/// What a `race start` records about the clock it started on: the kind of answer, the state
+/// when there was one, and whether a leap second was scheduled (ADR-0049).
 pub(crate) fn start_record(reading: &ClockReading) -> serde_json::Value {
+    let leap_pending = match reading {
+        ClockReading::Tracking(tracking) => Some(tracking.leap.leap_pending()),
+        _ => None,
+    };
     serde_json::json!({
         "measurement": reading.measurement(),
         "state": reading.device_clock_state().map(state_name),
+        "leap_pending": leap_pending,
     })
 }
 
@@ -93,6 +98,17 @@ pub(crate) fn findings_for(reading: &ClockReading) -> Vec<Finding> {
                  clock state is unknown going into the race.",
             )]
         }
+        // A good clock that is about to step (ADR-0049). Said before the race, because the
+        // results it will flag are the ones spanning midnight UTC, and the organizer can see
+        // from the start time whether any will.
+        ClockReading::Tracking(tracking) if tracking.leap.leap_pending() => {
+            vec![Finding::warning(
+                CHECK,
+                "a leap second is scheduled at the end of today, UTC. The device clock will \
+                 step by one second at midnight UTC, and every result whose time spans it will \
+                 be published flagged `clock_step_during_result`.",
+            )]
+        }
         // A trustworthy source, or no daemon at all. The first is fine; the second is a
         // laptop as often as it is a misconfigured Pi, and `doctor`'s clock_source field
         // reports which happened without spending an alarm on it.
@@ -103,7 +119,7 @@ pub(crate) fn findings_for(reading: &ClockReading) -> Vec<Finding> {
 /// The check name, used in findings and matched by the bundle's allowlist.
 ///
 /// This check **is** on `bundle::DETAIL_IS_SAFE_TO_SHARE`, and that was decided here rather
-/// than assumed. Both messages [`findings_for`] can produce are compile-time constants with
+/// than assumed. Every message [`findings_for`] can produce is a compile-time constant with
 /// no interpolation whatsoever — no count, no path, no name, nothing taken from the
 /// database or from `chronyc`'s output. That is the strongest case the allowlist can be
 /// given, and ADR-0020 asks only that somebody make the decision, not that the answer always
@@ -256,6 +272,8 @@ mod tests {
          0.000,0.000,0.000,0.000000000,0.000000000,0.0,Not synchronised";
     const NTP_SYNCED: &str = "C0A80101,192.168.1.1,3,1776153600.123456,0.000123,0.000045,\
          0.000067,12.345,0.010,0.250,0.001200,0.004500,64.0,Normal";
+    const LEAP_PENDING: &str = "C0A80101,192.168.1.1,3,1776153600.123456,0.000123,0.000045,\
+         0.000067,12.345,0.010,0.250,0.001200,0.004500,64.0,Insert second";
 
     #[test]
     fn the_view_says_what_was_not_measured() {
@@ -374,12 +392,28 @@ mod tests {
     fn a_start_records_the_clock_it_started_on() {
         assert_eq!(
             start_record(&classify(true, UNSYNCED, "")),
-            serde_json::json!({"measurement": "measured", "state": "unsynced"})
+            serde_json::json!({"measurement": "measured", "state": "unsynced", "leap_pending": false})
+        );
+        assert_eq!(
+            start_record(&classify(true, LEAP_PENDING, ""))["leap_pending"],
+            true
         );
         assert_eq!(
             start_record(&ClockReading::NoDaemonTool),
-            serde_json::json!({"measurement": "no_daemon_tool", "state": null})
+            serde_json::json!({"measurement": "no_daemon_tool", "state": null, "leap_pending": null})
         );
+    }
+
+    #[test]
+    fn a_scheduled_leap_second_warns_and_does_not_refuse_the_start() {
+        // ADR-0049: a leap is a one-second step, which the service records and results
+        // spanning it are flagged for. The clock is still good, so the start goes ahead.
+        let reading = classify(true, LEAP_PENDING, "");
+        let findings = findings_for(&reading);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("leap second"), "{findings:?}");
+        assert!(!findings[0].detail.contains("  "), "{findings:?}");
+        check_start(&reading, false).expect("a good clock starts");
     }
 
     #[test]
@@ -389,6 +423,7 @@ mod tests {
         // clock nobody has characterized is not yet known to be either.
         for reading in [
             classify(true, UNSYNCED, ""),
+            classify(true, LEAP_PENDING, ""),
             classify(true, GPS_LOCKED, ""),
             classify(false, "", "boom"),
             classify(true, "not csv", ""),

@@ -129,6 +129,15 @@ all. This is the single highest-leverage item in this document.
 many can, some only accept a fixed vendor default. See
 [Q10](open-questions.md#q10-gps-pps-time-reference).
 
+**Never smear a leap second**
+([ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md)). Leave chrony on its
+default `leapsecmode system` with no `smoothtime`. Take time from GPS/PPS or from servers
+that do not smear: not Google Public NTP (`time.google.com`) or Amazon's Time Sync Service,
+which both smear, and never a mix of smearing and non-smearing servers. A leap is then a
+one-second step at midnight UTC, which the service records (§ 10) and which flags every
+result spanning it. A smear is the one way a leap second reaches the results unannounced: it
+runs the clock about 11.6 ppm off for a day, too slowly for the step detector to see.
+
 ## 6. LLRP timestamp specifics
 
 The LLRP `Timestamp` parameter is a **choice of two types**, and which one arrives tells
@@ -360,6 +369,14 @@ built on it:
 Neither flag is the ±0.1 s budget. They mark results whose error nobody established. A drift
 estimate needs `clock_samples`, and becomes a third flag when it exists.
 
+**A leap second is one of those steps**
+([ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md), answering
+[Q12](open-questions.md#q12-leap-second-handling)). Under chrony's default the clock steps
+by one second at midnight UTC, the detector records it, and every result spanning it is
+flagged. When chrony reports a leap as pending, `doctor` warns and `race start` records
+`leap_pending` beside the clock state; neither blocks. The one unannounced case is a smear,
+which is why § 5 rules it out.
+
 **Still not built**, and still needing hardware: the DS3231, GPS/PPS, the Pi as a LAN NTP
 server, per-reader offset and skew into `clock_samples`, and time since last good sync.
 
@@ -383,4 +400,3 @@ server, per-reader offset and skew into `clock_samples`, and time since last goo
 |---|---|
 | [Q3](open-questions.md#q3-reader-clock-trust-defaults) | Default for `auto` trust mode, and the offset alarm threshold |
 | [Q10](open-questions.md#q10-gps-pps-time-reference) | Is GPS+PPS mandatory hardware, or a documented recommendation? |
-| [Q12](open-questions.md#q12-leap-second-handling) | Leap-second policy — smearing, or record and ignore at 0.1 s resolution? |
