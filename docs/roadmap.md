@@ -1365,7 +1365,13 @@ built before M5 has to survive the reliability work.
   `Retry-After` or the backoff, an unpaired box stops until `pair`, a refused course is not
   resent until it changes, and other refusals are set aside. `status` shows the last error and
   delivery. Twelve tests run the binary against a fake RaceDay Connect, one of them the running
-  loop. Its systemd unit is next
+  loop. **Its unit is built and observed**: `deploy/splitforge-ship.service` runs it as its own
+  account in the timer's group, with the network the timer's unit refuses, `MemoryMax=768M`,
+  `Nice=10` and a low CPU weight, and the timer's unit never names it. Under systemd 252 it read
+  the event database read-only, was refused any write to it, and delivered the course, the
+  crossings and two revisions to a fake RaceDay Connect, one published after the timer stopped
+  ([deployment.md](deployment.md#publishing-to-raceday-connect)). Six tests hold the unit to the
+  binary and the sysusers file. What remains is a real RaceDay Connect
 - **Timing never blocks on integration success**
 
 The first two landed with Milestone 4 rather than here: results are a published contract the

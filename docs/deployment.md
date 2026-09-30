@@ -15,8 +15,10 @@ runs as live in [`deploy/`](../deploy).
 | `target/aarch64-unknown-linux-gnu/release/splitforge-edge` | `/usr/local/bin/splitforge-edge` | The service |
 | `target/aarch64-unknown-linux-gnu/release/splitforge` | `/usr/local/bin/splitforge` | The operator CLI |
 | `target/aarch64-unknown-linux-gnu/release/splitforge-capture` | `/usr/local/bin/splitforge-capture` | Checks a `--capture` against the journal, at the bench ([ADR-0041](adr/0041-a-capture-is-checked-against-the-journal-by-payload.md)) |
-| `deploy/splitforge.sysusers.conf` | `/usr/lib/sysusers.d/splitforge.conf` | The unprivileged account the service runs as |
+| `target/aarch64-unknown-linux-gnu/release/splitforge-ship` | `/usr/local/bin/splitforge-ship` | Publishes to RaceDay Connect. Optional: see [Publishing to RaceDay Connect](#publishing-to-raceday-connect) |
+| `deploy/splitforge.sysusers.conf` | `/usr/lib/sysusers.d/splitforge.conf` | The unprivileged accounts the services run as |
 | `deploy/splitforge-edge.service` | `/etc/systemd/system/splitforge-edge.service` | The unit |
+| `deploy/splitforge-ship.service` | `/etc/systemd/system/splitforge-ship.service` | The publisher's unit. Optional, and only where results go to RaceDay Connect |
 | `deploy/99-splitforge-reader.rules` | `/etc/udev/rules.d/99-splitforge-reader.rules` | The reader's port: a stable name, owned by the service's group |
 | `deploy/splitforge.modules-load.conf` | `/etc/modules-load.d/splitforge.conf` | Loads the USB serial driver at boot, before the service starts |
 
@@ -26,6 +28,7 @@ in the unit — there is nothing to `mkdir` and nothing to `chown`:
 ```text
 /var/lib/splitforge/   0750 splitforge:splitforge   event database + write-ahead sidecar
 /run/splitforge/       0750 splitforge:splitforge   the API socket, gone when the service stops
+/var/lib/splitforge-ship/  0700 splitforge-ship     ship.db, with the RaceDay Connect token (if installed)
 ```
 
 ## Build
@@ -48,16 +51,16 @@ cross-toolchain is the thing that is broken.
 
 ## Install
 
-Copy the six files to the device, then:
+Copy the files above to the device, then:
 
 ```bash
-sudo install -m 0755 splitforge-edge splitforge splitforge-capture /usr/local/bin/
+sudo install -m 0755 splitforge-edge splitforge splitforge-capture splitforge-ship /usr/local/bin/
 sudo install -m 0644 splitforge.sysusers.conf /usr/lib/sysusers.d/splitforge.conf
 sudo install -m 0644 splitforge-edge.service /etc/systemd/system/
 sudo install -m 0644 99-splitforge-reader.rules /etc/udev/rules.d/
 sudo install -m 0644 splitforge.modules-load.conf /etc/modules-load.d/splitforge.conf
 
-sudo systemd-sysusers                      # creates the splitforge user and group
+sudo systemd-sysusers                      # creates the splitforge and splitforge-ship accounts
 sudo systemctl restart systemd-modules-load  # loads usbserial now; every boot does it anyway
 sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=tty
 sudo systemctl daemon-reload
@@ -232,6 +235,77 @@ documentation; if `/dev/splitforge-reader` does not appear with the board plugge
 them with `udevadm info /dev/ttyUSB0`. Any other CH340 adapter on the same Pi contends for the
 name, so keep them unplugged. CH340-family bridges are not expected to carry a serial number,
 so two identical boards on one Pi cannot be told apart by this rule.
+
+## Publishing to RaceDay Connect
+
+Optional. `splitforge-ship` sends the course, live crossings and published results to RaceDay
+Connect, the public race page. Nothing about timing depends on it: the timer's unit never names
+it, and a device without it times exactly as one with it
+([ADR-0006](adr/0006-optional-outbound-integrations.md)).
+
+It is a process of its own, as its own user, `splitforge-ship`
+([ADR-0046](adr/0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md),
+[ADR-0047](adr/0047-the-shipper-reads-the-event-database-and-keeps-its-own.md)). It reads the event
+database through the `splitforge` group and cannot write it, which the kernel enforces. It keeps
+what it has sent, and the pairing token, in `/var/lib/splitforge-ship/ship.db`, readable by it
+alone, so the token is in no backup of the event database and no diagnostic bundle. Its unit
+lets it reach the Internet, which the timer's does not, and caps its memory at 768 MB, so running
+out of memory ends the shipper and not the timer.
+
+**Install it** with the files above and start it first: systemd creates
+`/var/lib/splitforge-ship` when the unit starts, and `pair` has nowhere to write until then.
+Unpaired, it waits and says so. Then pair the device and describe each race's course, with the
+timer's service running, because `course` reads the event database. Run these as the shipper's
+own user, because `ship.db` is its alone:
+
+```bash
+sudo install -m 0644 splitforge-ship.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now splitforge-ship.service
+
+# The code the race director reads out on RaceDay Connect's race page.
+sudo -u splitforge-ship splitforge-ship pair --url https://raceday.example --code K7QM-4XPD
+
+# What RaceDay Connect needs that the timer never did: each race's distance, and where its
+# intermediate splits are. The key is chosen once: a new key is a new distance on the page.
+sudo -u splitforge-ship splitforge-ship course --race 5K --key 5k --meters 5000
+sudo -u splitforge-ship splitforge-ship course --race 10K --key 10k --meters 10000 --split halfway=5000
+
+sudo -u splitforge-ship splitforge-ship status
+```
+
+`status` shows the pairing, the courses, the last delivery and the last error, never the token.
+The service's own log is `journalctl -u splitforge-ship`.
+
+**What it sends, and when.** Every 10 seconds it checks whether the event database or `ship.db`
+has changed. When one has, it derives each race with a course and sends the course if it changed,
+each runner whose crossings changed, and each published result revision not yet delivered. A
+busy or unreachable RaceDay Connect is retried; nothing is lost while it is down.
+
+**The shipper cannot start reading an event database nothing has open.** SQLite needs the
+database's `-wal` and `-shm` files, and only a writer may create them (ADR-0047 § 7). Once the
+shipper has the database open they stay, even after the timer stops, so results published after
+`systemctl stop splitforge-edge` still reach RaceDay Connect. What it cannot do is open the
+database for the first time while no process has it open, as after a reboot with the timer's
+service disabled. It then waits, says so in `status`, and starts sending once the timer's
+service has run.
+
+**When `status` says the device is not paired**, RaceDay Connect has refused its token: the race
+director unpaired it, or the race changed. Pair it again with a new code; everything is sent
+again, which the page takes as replacements. **When it says the course was refused**, correct
+the course with `splitforge-ship course`; nothing is sent against a course the page will not
+hold.
+
+**Observed** under systemd 252 on Debian bookworm, with both units installed as above and a fake
+RaceDay Connect on `127.0.0.1`. Without a code, the unit started as `splitforge-ship` with
+`splitforge` as a supplementary group, `MemoryMax=805306368`, `Nice=10`, `CPUWeight=20` and
+`OOMScoreAdjust=500`, opened the event database read-only under `ProtectSystem=strict`, and
+waited, saying it was not paired. That account could not create a file in
+`/var/lib/splitforge` or write the event database: *Permission denied*. After `pair`, the running
+unit noticed the change and sent the course and 12 runners' crossings. A revision published with
+the timer running was delivered, and so was a final one published after
+`systemctl stop splitforge-edge`. `ship.db` is `0600` in a `0700` directory, the token is found
+in no other file under `/var/lib`, and `systemd-analyze security` rates the unit 1.3, *OK*.
 
 ## Operating
 

@@ -1,0 +1,88 @@
+# The RaceDay Connect shipper, as systemd runs it beside the timer (ADR-0046, ADR-0047).
+#
+# Installation: docs/deployment.md
+#
+# Optional. The timer never waits for it, starts it or names it: it is installed only where
+# results are published to RaceDay Connect, and a device without it times exactly as one with
+# it (ADR-0006).
+
+[Unit]
+Description=SplitForge RaceDay Connect publisher
+Documentation=https://github.com/truppelli/splitforge/blob/main/docs/deployment.md
+
+# Ordering only, as for the timer. The shipper retries until the network is there, so it
+# never needs to hold up boot waiting for one (ADR-0022).
+After=network.target splitforge-edge.service
+
+# Never give up. A shipper that stopped for good would leave the results board stale for the
+# rest of the event, and whatever stopped it, usually the network, is usually transient.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/splitforge-ship run
+
+# Its own account, so the kernel refuses it the event database's write access (ADR-0047). It
+# reads that database through the splitforge group, which splitforge.sysusers.conf also gives
+# it, and it cannot write there: /var/lib/splitforge is 0750 and its files 0640.
+User=splitforge-ship
+Group=splitforge-ship
+SupplementaryGroups=splitforge
+
+# /var/lib/splitforge-ship: ship.db, which holds the pairing token (ADR-0047).
+StateDirectory=splitforge-ship
+StateDirectoryMode=0700
+UMask=0077
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+Environment=RUST_BACKTRACE=1
+
+# --- Containment (ADR-0047) -------------------------------------------------------------
+#
+# Deriving holds every read, about 0.5 KB each: 525 MB at a million reads on x86. On a 2 GB
+# Pi 4 this limit is what makes running out of memory kill the shipper and not the timer. The
+# number is room for the 1M-read measurement with margin, and is to be measured on the Pi.
+MemoryMax=768M
+# The kernel's choice when memory runs short, in the other direction from the timer's -500.
+OOMScoreAdjust=500
+# CPU goes to the timer first when both want it.
+Nice=10
+CPUWeight=20
+IOWeight=20
+
+# --- Hardening --------------------------------------------------------------------------
+#
+# The shipper, unlike the timer, speaks to the Internet: RaceDay Connect, over TLS (ADR-0046).
+# So it has IP of both families and no IP address filter, because RaceDay Connect's addresses
+# are a DNS answer that changes. Everything else is as closed as the timer's unit.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectHostname=yes
+PrivateTmp=yes
+PrivateMounts=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target
