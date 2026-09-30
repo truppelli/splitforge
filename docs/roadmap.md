@@ -1388,7 +1388,15 @@ built before M5 has to survive the reliability work.
   crossings and two revisions to a fake RaceDay Connect, one published after the timer stopped
   ([deployment.md](deployment.md#publishing-to-raceday-connect)). Six tests hold the unit to the
   binary and the sysusers file. What remains is a real RaceDay Connect
-- **Timing never blocks on integration success**
+- [x] **Timing never blocks on integration success** — held three ways, none of them a
+      promise in the read loop. The shipper is another process with its own unit
+      ([ADR-0046](adr/0046-raceday-connect-is-reached-with-ureq-and-rustls-from-a-process-of-its-own.md)),
+      it opens the event database read-only as a user the kernel will not let write it
+      ([ADR-0047](adr/0047-the-shipper-reads-the-event-database-and-keeps-its-own.md)), and
+      `read_path_boundary.rs` keeps `splitforge-sync` out of the read path by reading the source.
+      What no test has shown is a RaceDay Connect that hangs while a race is being timed. The
+      shipper's own tests cover a busy one, and its 15 s request ceiling bounds a hung one, in
+      its own process
 
 The first two landed with Milestone 4 rather than here: results are a published contract the
 moment anyone can export them, and shipping an unversioned one and versioning it later would
@@ -1407,6 +1415,27 @@ that ignores unknown fields keeps working.
 
 **Exit criterion:** an event times identically, and produces byte-identical exports, with
 integrations enabled and disabled.
+
+**Observed**, by `apps/splitforge-edge/tests/integrations_change_nothing.rs`, with the real
+`splitforge-ship` delivering to a loopback RaceDay Connect:
+
+- **Two events, the same 5K.** One is timed with `splitforge-ship run` looping beside it from
+  before the first read to after the results were delivered, the other with no shipper at
+  all. Both journal 638 reads, and their results CSVs are byte-identical, all twelve entries.
+  The test also asserts that the manifest, crossings and results really reached RaceDay
+  Connect, so "enabled" is not an integration that sent nothing.
+- **One event, before and after.** Every export an operator can take — results and
+  crossings, as CSV and as JSON — is byte-identical after the shipper has delivered
+  everything to what it was before.
+
+Two comparisons rather than one, because an event's exports carry identifiers minted at ingest
+and the moment of publication. Those differ between any two events, however they are timed.
+The results CSV carries neither, so it compares across events. The rest compare within one.
+
+ADR-0047 argued this holds by construction, because the shipper cannot write the database the
+exports are made from. The test is that argument observed. **The criterion is met on a desk.**
+What waits is the one thing a desk cannot show: an integration switched on at a real event,
+beside a timer whose field reliability Milestone 5 has not observed yet.
 
 ---
 
