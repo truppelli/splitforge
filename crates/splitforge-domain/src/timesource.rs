@@ -91,9 +91,9 @@ impl LeapStatus {
     /// Whether a leap second is pending, which
     /// [Q12](../../../docs/open-questions.md#q12-leap-second-handling) cares about.
     ///
-    /// Recording that this was true during an event is cheap and is the part
-    /// [Q12](../../../docs/open-questions.md#q12-leap-second-handling) says must not happen
-    /// by accident. Deciding what to *do* about it is still open.
+    /// A pending leap is a one-second step at midnight UTC, which the service records and
+    /// results spanning it are flagged for. `doctor` warns and `race start` records it
+    /// ([ADR-0049](../../../docs/adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md)).
     #[must_use]
     pub const fn leap_pending(self) -> bool {
         matches!(self, Self::InsertSecond | Self::DeleteSecond)

@@ -29,6 +29,10 @@ const UNSYNCED: &str = "00000000,,0,0.000000000,0.000000000,0.000000000,0.000000
 const NTP_SYNCED: &str = "C0A80101,192.168.1.1,3,1776153600.123456,0.000123,0.000045,\
      0.000067,12.345,0.010,0.250,0.001200,0.004500,64.0,Normal";
 
+/// The same daemon, with a leap second scheduled for the end of the UTC day.
+const LEAP_PENDING: &str = "C0A80101,192.168.1.1,3,1776153600.123456,0.000123,0.000045,\
+     0.000067,12.345,0.010,0.250,0.001200,0.004500,64.0,Insert second";
+
 /// A configured 5K, and a directory for a fake time daemon.
 struct Device {
     directory: TempDir,
@@ -138,7 +142,37 @@ async fn a_synchronized_clock_starts_and_is_recorded() {
     let device = Device::new(Some(NTP_SYNCED)).await;
     let started = device.ok(&["race", "start"]).await;
     assert!(started.get("forced").is_none(), "{started}");
-    assert_eq!(device.start_detail().await["clock"]["state"], "ntp_synced");
+    let clock = &device.start_detail().await["clock"];
+    assert_eq!(clock["state"], "ntp_synced");
+    assert_eq!(
+        clock["leap_pending"], false,
+        "ADR-0049: recorded either way"
+    );
+}
+
+#[tokio::test]
+async fn a_scheduled_leap_second_is_warned_about_and_recorded_but_does_not_block() {
+    // ADR-0049: the clock is good and will step once at midnight UTC. The service records the
+    // step and results spanning it are flagged, so the start goes ahead, saying so.
+    let device = Device::new(Some(LEAP_PENDING)).await;
+
+    let report = device.ok(&["doctor"]).await;
+    let warned = report["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .any(|finding| {
+            finding["check"] == "clock.source"
+                && finding["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("leap second"))
+        });
+    assert!(warned, "{report}");
+    assert_eq!(report["clock_source"]["leap_pending"], true);
+
+    let started = device.ok(&["race", "start"]).await;
+    assert!(started.get("forced").is_none(), "{started}");
+    assert_eq!(device.start_detail().await["clock"]["leap_pending"], true);
 }
 
 #[tokio::test]
