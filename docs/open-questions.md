@@ -11,7 +11,6 @@ is in the timing model.
 | [Q3](#q3-reader-clock-trust-defaults) | Reader clock trust defaults and alarm thresholds | M3b | — |
 | [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
 | [Q9b](#q9b-first-llrp-reader-model) | Which networked LLRP reader comes first? | **M3b — hard gate** | — |
-| [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | M5 | — |
 | [Q14](#q14-reader-silence-threshold) | How long may a streaming reader be silent before it is presumed gone? | M3a | — |
 
 ---
@@ -69,7 +68,9 @@ exit criteria are M3's, verbatim.
 
 **This is the hard gate on Milestone 3b**, and through it on Milestone 5. M3b cannot start
 until a physical LLRP-capable reader is in hand. Selection criteria: LLRP 1.0.1+ support,
-configurable NTP server (see [Q10](#q10-gps-pps-time-reference)), documented timestamp
+a configurable NTP server that accepts an arbitrary LAN address rather than only a vendor
+default (to be verified on the reader itself, per
+[ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md)), documented timestamp
 behavior, availability at a price an unfunded project can absorb, and a form factor suited to
 outdoor race use.
 
@@ -82,22 +83,6 @@ names unplugging Ethernet and a serial module has none.
 holds ~$350 to buy a used FCC-band Impinj R220/R420 or Zebra FX7500 opportunistically, as a
 **test instrument** rather than as product hardware. That would close this question. Do not
 block on it — blocking on it is what cost three milestones.
-
-### Q10: GPS PPS time reference
-
-**Raised in:** [clock-and-time-discipline.md § 5](clock-and-time-discipline.md#5-getting-a-time-reference-without-the-internet)
-
-Is a GPS+PPS receiver **required** hardware, or a strong recommendation?
-
-Requiring it guarantees the accuracy budget and enables the Pi-as-LAN-NTP-server design
-that removes cross-domain clock error entirely. Recommending it keeps the barrier to entry
-low for someone who just wants to try SplitForge on a bench.
-
-Related and needing verification against real hardware: can the chosen reader be pointed
-at an arbitrary LAN NTP server, or does it only accept a vendor default?
-
-*Leaning:* required for any event where results are published; optional for development.
-Enforced by the pre-race check rather than by refusing to run.
 
 ### Q14: Reader silence threshold
 
@@ -224,6 +209,36 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q9a](#q9a-first-serial-module) | Which serial module is the first physical adapter? | [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) |
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | [ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md) |
 | [Q12](#q12-leap-second-handling) | Leap-second policy | [ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md) |
+| [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | [ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md) |
+
+### Q10: GPS PPS time reference
+
+**Resolved — [ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md):
+standard in the field kit, not a software requirement. The requirement is a trustworthy
+clock, which ADR-0048's start gate already enforces.**
+
+**Raised in:** [clock-and-time-discipline.md § 5](clock-and-time-discipline.md#5-getting-a-time-reference-without-the-internet)
+
+Is a GPS+PPS receiver **required** hardware, or a strong recommendation?
+
+Requiring it guarantees the accuracy budget and enables the Pi-as-LAN-NTP-server design
+that removes cross-domain clock error entirely. Recommending it keeps the barrier to entry
+low for someone who just wants to try SplitForge on a bench.
+
+Related and needing verification against real hardware: can the chosen reader be pointed
+at an arbitrary LAN NTP server, or does it only accept a vendor default?
+
+*Leaning:* required for any event where results are published; optional for development.
+Enforced by the pre-race check rather than by refusing to run.
+
+**The leaning was overtaken by the pre-race check it asked for.** ADR-0048 made `race start`
+refuse an unestablished clock. At a venue with no network, GPS is then the only way to start
+without forcing it on the record, so the gate already requires GPS where nothing else can set
+the clock. Requiring it everywhere would only add refusing a clock NTP has already
+disciplined. With the serial module that clock times both ends of every result, so offset
+cancels and NTP's drift is far inside the budget. So GPS is standard in the field kit, and
+the software's requirement stays on the clock. The hardware half, whether a reader accepts a
+LAN time server, moved to [Q9b](#q9b-first-llrp-reader-model)'s selection criteria.
 
 ### Q12: Leap-second handling
 
