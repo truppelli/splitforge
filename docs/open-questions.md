@@ -9,7 +9,6 @@ is in the timing model.
 | # | Question | Blocks | Owner |
 |---|---|---|---|
 | [Q3](#q3-reader-clock-trust-defaults) | Reader clock trust defaults and alarm thresholds | M3b | — |
-| [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | Publicizing repo | — |
 | [Q9b](#q9b-first-llrp-reader-model) | Which networked LLRP reader comes first? | **M3b — hard gate** | — |
 | [Q14](#q14-reader-silence-threshold) | How long may a streaming reader be silent before it is presumed gone? | M3a | — |
 
@@ -32,14 +31,6 @@ These need real measurements from real hardware, which makes this partly gated o
 [Q9a](#q9a-first-serial-module)'s serial module, which has no reader clock at all — there
 is no offset to measure and no skew to threshold, which is one of the two criteria
 [ADR-0024](adr/0024-serial-reader-adapter-before-llrp.md) records that M3a cannot close.
-
-### Q4: Code of Conduct enforcement contact
-
-**Raised in:** [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)
-
-The Code of Conduct has a `TODO` where the enforcement contact belongs. A project-specific
-address (not a personal one) is preferable for a public repository. Must be filled in
-before the repo is publicized.
 
 ### Q9: First reader model
 
@@ -210,6 +201,20 @@ Kept for the record, and so that links from ADRs and older documents still resol
 | [Q11](#q11-clock-error-budget-enforcement) | Refuse to publish when clock error exceeds budget? | [ADR-0048](adr/0048-a-bad-clock-blocks-the-start-and-flags-the-result.md) |
 | [Q12](#q12-leap-second-handling) | Leap-second policy | [ADR-0049](adr/0049-a-leap-second-is-a-step-and-is-never-smeared.md) |
 | [Q10](#q10-gps-pps-time-reference) | Is GPS+PPS required hardware or a recommendation? | [ADR-0050](adr/0050-gps-is-standard-in-the-field-kit-and-the-clock-gate-is-the-requirement.md) |
+| [Q4](#q4-code-of-conduct-enforcement-contact) | Code of Conduct enforcement contact | [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md#enforcement) |
+
+### Q4: Code of Conduct enforcement contact
+
+**Resolved — reports go through [the SmartSponsor contact form](https://www.smartsponsor.ai/contact),
+named in [CODE_OF_CONDUCT.md § Enforcement](../CODE_OF_CONDUCT.md#enforcement).** A form
+rather than an address, so nothing in a public repository hands a harvester an inbox. No ADR:
+it is a contact, not a decision about the system.
+
+**Raised in:** [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)
+
+The Code of Conduct has a `TODO` where the enforcement contact belongs. A project-specific
+address (not a personal one) is preferable for a public repository. Must be filled in
+before the repo is publicized.
 
 ### Q10: GPS PPS time reference
 
